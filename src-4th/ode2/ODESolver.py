@@ -79,6 +79,57 @@ class ODESolver(object):
                 break  # terminate loop over k
         return self.u[:k+2], self.t[:k+2]
 
+    def var_solve(self, u, time_points, terminate=None):
+        """
+        Compute solution du for t values in the list/array
+        time_points, as long as terminate(u,t,step_no) is False.
+        terminate(u,t,step_no) is a user-given function
+        returning True or False. By default, a terminate
+        function which always returns False is used.
+        """
+        if terminate is None:
+            terminate = lambda u, t, step_no: False
+
+        self.u = u
+        self.t = np.asarray(time_points)
+        n = self.t.size
+        if self.neq%2 == 1:  # odd number of equations
+            raise ValueError('ODESolver.var_solve requires even number of equations')
+        else:              # systems of ODEs
+            self.du = np.zeros((n, self.neq, self.neq))
+            self.I_mat = np.eye(self.neq)
+
+        # Initialize du[0] with identity matrix
+        self.du[0] = self.I_mat
+
+        # Time loop
+        for k in range(n-1):
+            self.k = k
+            self.du[k+1] = self.var_advance()
+            if terminate(self.u, self.t, self.k+1):
+                break  # terminate loop over k
+        return self.du[:k+2], self.t[:k+2]
+
+    def symplectic_error(self, du, t):
+        '''
+        Compute Symplectic error for the method
+        '''
+        n = t.size
+        #du = self.du
+        Ecoeff = self.Ecoeff
+        neq = self.neq
+
+        J_mat = np.concatenate([np.concatenate([np.zeros((neq/2,neq/2)), np.eye(neq/2)], axis=1)\
+                          ,np.concatenate([-np.eye(neq/2), np.zeros((neq/2,neq/2))], axis=1)])
+        J_mat_inv = J_mat.T
+        symp_error = np.zeros(n)
+
+        for k in range(n-1):
+            dt = t[k+1] -t[k]
+            symp_error[k+1] = LA.norm((du[k+1].T).dot(J_mat_inv.dot(du[k+1])) -Ecoeff(-dt)**4*J_mat_inv)
+
+        return symp_error
+
 
 class ForwardEuler(ODESolver):
     def advance(self):
@@ -98,21 +149,34 @@ class RungeKutta4(ODESolver):
         K4 = dt*f(u[k] + K3, t[k] + dt)
         u_new = u[k] + (1/6.0)*(K1 + 2*K2 + 2*K3 + K4)
         return u_new
-    
+
 class ConformalStormerVerlet(ODESolver):
     def __init__(self, f, beta =0):
         ODESolver.__init__(self, f)
-        
+
         self.Ecoeff = lambda dt: exp(beta*dt/2)
 
     def advance(self):
-        u, f, k, t, Ecoeff = self.u, self.f, self.k, self.t, self.Ecoeff
+        u, f, k, t, Ecoeff, neq = self.u, self.f, self.k, self.t, self.Ecoeff, \
+                                    self.neq
         dt = t[k+1] - t[k]
-        u_new = np.zeros(2)
-        u_new[1] = Ecoeff(-dt)*u[k,1] +dt/2*f(u[k], t[k])[1]
-        u_new[0] = u[k,0] +dt*f([u[k,0], u_new[1]], t[k])[0]
-        u_new[1] = Ecoeff(-dt)*(u_new[1] +dt/2*f([u_new[0], u_new[1]], t[k])[1])
+        u_new = np.zeros(neq)
+        u_new[neq/2:] = Ecoeff(-dt)*u[k,neq/2:] +dt/2*f(u[k], t[k])[1]
+        u_new[:neq/2] = u[k,:neq/2] +dt*f(np.reshape([u[k,:neq/2], u_new[neq/2:]],neq), t[k])[0]
+        u_new[neq/2:] = Ecoeff(-dt)*(u_new[neq/2:] +dt/2*f(np.reshape([u_new[:neq/2], u_new[neq/2:]],neq), t[k])[1])
         return u_new
+
+    def var_advance(self):
+        u, var_u, dfdu, k, t, Ecoeff, neq = self.u, self.var_u, self.dfdu, self.k, \
+                                            self.t, self.Ecoeff, self.neq
+        dt = t[k+1] - t[k]
+        var_u_new = np.zeros((neq,neq))
+        u_new[neq/2:] = Ecoeff(-dt)*u[k,neq/2:] +dt/2*f(u[k], t[k])[1]
+
+        var_u_new[neq/2:] = Ecoeff(-dt)*var_u[k][neq/2:] +dt/2*dfdu(u[k], t[k], dt)[neq/2:].dot(var_u[k])
+        var_u_new[:neq/2] = var_u[k][:neq/2] +dt*dfdu(np.reshape([u[k,:neq/2], u_new[neq/2:]],neq), t[k], dt)[:neq/2].dot(np.concatenate((var_u[k][:neq/2], var_u_new[neq/2:]),axis=0))
+        var_u_new[neq/2:] = Ecoeff(-dt)*(var_u_new[neq/2:] +dt/2*dfdu(np.reshape([u[k,:neq/2], u[k+1,neq/2:]],neq), t[k], dt)[neq/2:].dot(np.concatenate))
+        raise NotImplementedError
 
 import sys, os
 
@@ -136,14 +200,14 @@ class BackwardEuler(ODESolver):
 Could not import module "Newton". Place Newton.py in this directory
 (%s)
 ''' % (os.path.dirname(os.path.abspath(__file__))))
-            
+
         # Select correct derivative
         if not callable(dfdu):
             try:
                 value =f(np.array([1]), 1)
             except IndexError:
                 raise ValueError('f(u,t) must return flaot/int')
-                
+
             self.discrete_derivative =True
         else:
             self.discrete_derivative = False
@@ -166,7 +230,7 @@ Could not import module "Newton". Place Newton.py in this directory
             def dFdw(w):
                 dfdw = self.dfdw
                 return dfdw(w, t[k+1], dt)
-            
+
         w_start = u[k] + dt*f(u[k], t[k])  # Forward Euler step
         u_new, n, F_value = self.Newton(F, w_start, dFdw, N=30)
         if k == 0:
@@ -178,8 +242,12 @@ Could not import module "Newton". Place Newton.py in this directory
         return u_new
 
 class ImplicitMidpoint(ODESolver):
-    def __init__(self, f, dfdu = None, neq = 1, beta  =0):
+    def __init__(self, f, dfdu = None, neq=1, beta=0):
         ODESolver.__init__(self, f)
+        self.dfdu = lambda u, t: np.asarray(dfdu(u,t), float)
+
+        # Define Ecoeff for computing symplectic error
+        self.Ecoeff = lambda dt: exp(beta*dt/4)
         # Make a sample call to check that f is a scalar function:
 #        try:
 #            u = np.array([1]); t = 1
@@ -196,20 +264,20 @@ class ImplicitMidpoint(ODESolver):
 Could not import module "Newton". Place Newton.py in this directory
 (%s)
 ''' % (os.path.dirname(os.path.abspath(__file__))))
-            
+
         # Select correct derivative
         if not callable(dfdu):
             try:
                 value =f(np.array([1]), 1)
             except IndexError: # must be scalar ODE
                 raise ValueError('f(u,t) must return float/int')
-                
+
             self.discrete_derivative =True
         else:
             self.discrete_derivative = False
             self.dfdw = lambda u, t, dt: \
                             np.eye(neq)-dt/2*np.asarray(dfdu((u[1]+u[0])/2, (t[1]+t[0])/2, dt), float)
-            
+
     def advance(self):
         u, f, k, t = self.u, self.f, self.k, self.t
         dt = t[k+1] - t[k]
@@ -223,7 +291,7 @@ Could not import module "Newton". Place Newton.py in this directory
             def dFdw(w):
                 dfdw = self.dfdw
                 return dfdw([w, u[k]], [t[k+1], t[k]], dt)
-            
+
         w_start = u[k] + dt*f(u[k], t[k])  # Forward Euler step
         u_new, n, F_value = self.Newton(F, w_start, dFdw, N=30)
         if k == 0:
@@ -233,13 +301,35 @@ Could not import module "Newton". Place Newton.py in this directory
             print "Newton's failed to converge at t=%g "\
                   "(%d iterations)" % (t[k+1], n)
         return u_new
-    
+
+    def var_advance(self):
+        u, dfdu, k, t, I_mat = self.u, self.dfdu, self.k, self.t, self.I_mat
+        dt = t[k+1] - t[k]
+
+#        def F(w):
+#            return Ecoeff(dt)*w - dt*f((Ecoeff(dt)*w +Ecoeff(-dt)*u[k])/2, (Ecoeff(dt)*t[k+1] +Ecoeff(-dt)*t[k])/2) \
+#                    - Ecoeff(-dt)*u[k]
+
+#        if self.discrete_derivative:
+#            dFdw = Derivative(F)
+#        else:
+#            def dFdw(w):
+#                dfdw = self.dfdw
+#                return dfdw([w, u[k]], [t[k+1], t[k]], dt)
+
+        temp = dt/2.0*dfdu((u[k+1] +u[k])/2.0, (t[k+1] +t[k])/2.0)
+        du_new = LA.solve((I_mat -temp), (I_mat +temp))
+#        symp_error[k+1] = LA.norm((dpsi[k+1].T).dot(J_mat_inv.dot(dpsi[k+1])) -exp(-beta*dt)*J_mat_inv)
+
+        return du_new
+
 class ConformalImplicitMidpoint(ODESolver):
     def __init__(self, f, dfdu = None, neq = 1, beta = 0):
         ODESolver.__init__(self, f)
-        
+
         self.beta = beta
         self.Ecoeff = Ecoeff = lambda dt: exp(beta*dt/4)
+        self.dfdu = lambda u, t: np.asarray(dfdu(u, t), float)
 
         # BackwardEuler needs to import function Newton from Newton.py:
         try:
@@ -247,29 +337,30 @@ class ConformalImplicitMidpoint(ODESolver):
             self.Newton = Newton
         except ImportError:
             raise ImportError('''
-Could not import module "Newton". Place Newton.py in this directory
-(%s)
-''' % (os.path.dirname(os.path.abspath(__file__))))
-            
+                Could not import module "Newton". Place Newton.py in this directory
+                (%s)
+                ''' % (os.path.dirname(os.path.abspath(__file__))))
+
         # Select correct derivative
         if not callable(dfdu):
             try:
                 value =f(np.array([1]), 1)
             except IndexError: # must be scalar ODE
                 raise ValueError('f(u,t) must return float/int')
-                
+
             self.discrete_derivative =True
         else:
             self.discrete_derivative = False
             self.dfdw = lambda u, t, dt: \
                             Ecoeff(dt)*(np.eye(neq)-dt/2*np.asarray(dfdu((Ecoeff(dt)*u[1] +Ecoeff(-dt)*u[0])/2, (Ecoeff(dt)*t[1] +Ecoeff(-dt)*t[0])/2, dt), float))
-            
+
     def advance(self):
         u, f, k, t, beta, Ecoeff = self.u, self.f, self.k, self.t, self.beta, self.Ecoeff
         dt = t[k+1] - t[k]
 
         def F(w):
-            return Ecoeff(dt)*w - dt*f((Ecoeff(dt)*w +Ecoeff(-dt)*u[k])/2, (Ecoeff(dt)*t[k+1] +Ecoeff(-dt)*t[k])/2) - Ecoeff(-dt)*u[k]
+            return Ecoeff(dt)*w - dt*f((Ecoeff(dt)*w +Ecoeff(-dt)*u[k])/2, (Ecoeff(dt)*t[k+1] +Ecoeff(-dt)*t[k])/2) \
+                    - Ecoeff(-dt)*u[k]
 
         if self.discrete_derivative:
             dFdw = Derivative(F)
@@ -277,7 +368,7 @@ Could not import module "Newton". Place Newton.py in this directory
             def dFdw(w):
                 dfdw = self.dfdw
                 return dfdw([w, u[k]], [t[k+1], t[k]], dt)
-            
+
         w_start = u[k] + dt*(f(u[k], t[k]) -beta/2*u[k])  # Forward Euler step
         u_new, n, F_value = self.Newton(F, w_start, dFdw, N=30)
         if k == 0:
@@ -288,6 +379,28 @@ Could not import module "Newton". Place Newton.py in this directory
                   "(%d iterations)" % (t[k+1], n)
         return u_new
 
+    def var_advance(self):
+        u, dfdu, k, t, Ecoeff, I_mat = self.u, self.dfdu, self.k, self.t, \
+                                        self.Ecoeff, self.I_mat
+        dt = t[k+1] - t[k]
+
+#        def F(w):
+#            return Ecoeff(dt)*w - dt*f((Ecoeff(dt)*w +Ecoeff(-dt)*u[k])/2, (Ecoeff(dt)*t[k+1] +Ecoeff(-dt)*t[k])/2) \
+#                    - Ecoeff(-dt)*u[k]
+
+#        if self.discrete_derivative:
+#            dFdw = Derivative(F)
+#        else:
+#            def dFdw(w):
+#                dfdw = self.dfdw
+#                return dfdw([w, u[k]], [t[k+1], t[k]], dt)
+
+        temp = dt/2.0*dfdu((Ecoeff(dt)*u[k+1] +Ecoeff(-dt)*u[k])/2.0, (Ecoeff(dt)*t[k+1] +Ecoeff(-dt)*t[k])/2.0)
+        du_new = LA.solve(Ecoeff(dt)*(I_mat -temp), Ecoeff(-dt)*(I_mat +temp))
+#        symp_error[k+1] = LA.norm((dpsi[k+1].T).dot(J_mat_inv.dot(dpsi[k+1])) -exp(-beta*dt)*J_mat_inv)
+
+        return du_new
+
 class Derivative:
     def __init__(self, f, h=1E-9):
         self.f = f
@@ -295,16 +408,14 @@ class Derivative:
 
     def __call__(self, x, discrete=True):
         f, h = self.f, self.h      # make short forms
-        return (f(x+h) - f(x-h))/(2*h)    
-
-registered_solver_classes = [ImplicitMidpoint, ConformalImplicitMidpoint, ConformalStormerVerlet]
+        return (f(x+h) - f(x-h))/(2*h)
 
 def test_exact_numerical_solution():
     a = 0.2; b = 3
 
     def f(u, t):
         return a + (u - u_exact(t))**5
-    
+
     def dfdu(u, t, dt):
         return 5*(u - u_exact(t))**4
 
@@ -317,6 +428,8 @@ def test_exact_numerical_solution():
     n = 10
     tol = 1E-15
     t_points = np.linspace(0, T, n)
+    registered_solver_classes = [ImplicitMidpoint, ConformalImplicitMidpoint]
+
     for solver_class in registered_solver_classes:
         solver = solver_class(f)
         solver.set_initial_condition(U0)
@@ -326,7 +439,7 @@ def test_exact_numerical_solution():
         msg = '%s failed with max_error=%g' % \
               (solver.__class__.__name__, max_error)
         assert max_error < tol, msg
-        
+
         solver = solver_class(f, dfdu)
         solver.set_initial_condition(U0)
         u, t = solver.solve(t_points)
@@ -335,7 +448,6 @@ def test_exact_numerical_solution():
         msg = '%s failed with max_error=%g' % \
               (solver.__class__.__name__, max_error)
         assert max_error < tol, msg
-        
+
 if __name__ == '__main__':
     test_exact_numerical_solution()
-        

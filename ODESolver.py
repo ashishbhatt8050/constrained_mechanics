@@ -14,7 +14,7 @@ class ODESolver(object):
     k: step number of the most recently computed solution
     f: callable object implementing f(u, t)
     """
-    def __init__(self, f, dfdu = None, neq = None, beta =0):
+    def __init__(self, f):
         if not callable(f):
             raise TypeError('f is %s, not a function' % type(f))
         # For ODE systems, f will often return a list, but
@@ -130,7 +130,6 @@ class ODESolver(object):
 
         return symp_error
 
-
 class ForwardEuler(ODESolver):
     def advance(self):
         u, f, k, t = self.u, self.f, self.k, self.t
@@ -151,10 +150,10 @@ class RungeKutta4(ODESolver):
         return u_new
 
 class ConformalStormerVerlet(ODESolver):
-    def __init__(self, f, beta =0):
+    def __init__(self, f):
         ODESolver.__init__(self, f)
 
-        self.Ecoeff = lambda dt: exp(beta*dt/2)
+        self.Ecoeff = lambda dt: exp(f.beta*dt/2)
 
     def advance(self):
         u, f, k, t, Ecoeff, neq = self.u, self.f, self.k, self.t, self.Ecoeff, \
@@ -182,14 +181,8 @@ import sys, os
 
 class BackwardEuler(ODESolver):
     """Backward Euler solver for scalar or vector ODEs."""
-    def __init__(self, f, dfdu = None, neq = 1, beta =0):
+    def __init__(self, f, dfdu=None):
         ODESolver.__init__(self, f)
-        # Make a sample call to check that f is a scalar function:
-#        try:
-#            u = np.array([1]); t = 1
-#            value = f(u, t)
-#        except IndexError:  # index out of bounds for u
-#            raise ValueError('f(u,t) must return float/int')
 
         # BackwardEuler needs to import function Newton from Newton.py:
         try:
@@ -210,12 +203,9 @@ Could not import module "Newton". Place Newton.py in this directory
 
             self.discrete_derivative =True
         else:
+            neq = size(f.u_init)
             self.discrete_derivative = False
             self.dfdw = lambda u, t, dt: np.eye(neq)-dt*np.asarray(dfdu(u, t, dt), float)
-
-    # Alternative implementation of F:
-    #def F(self, w):
-    #    return w - self.dt*self.f(w, self.t[-1]) - self.u[self.k]
 
     def advance(self):
         u, f, k, t = self.u, self.f, self.k, self.t
@@ -242,18 +232,12 @@ Could not import module "Newton". Place Newton.py in this directory
         return u_new
 
 class ImplicitMidpoint(ODESolver):
-    def __init__(self, f, dfdu = None, neq=1, beta=0):
+    def __init__(self, f, dfdu=None):
         ODESolver.__init__(self, f)
         self.dfdu = lambda u, t: np.asarray(dfdu(u,t), float)
 
         # Define Ecoeff for computing symplectic error
-        self.Ecoeff = lambda dt: exp(beta*dt/4)
-        # Make a sample call to check that f is a scalar function:
-#        try:
-#            u = np.array([1]); t = 1
-#            value = f(u, t)
-#        except IndexError:  # index out of bounds for u
-#            raise ValueError('f(u,t) must return float/int')
+        self.Ecoeff = lambda dt: exp(f.beta*dt/4)
 
         # BackwardEuler needs to import function Newton from Newton.py:
         try:
@@ -274,6 +258,7 @@ Could not import module "Newton". Place Newton.py in this directory
 
             self.discrete_derivative =True
         else:
+            neq = size(f.u_init)
             self.discrete_derivative = False
             self.dfdw = lambda u, t, dt: \
                             np.eye(neq)-dt/2*np.asarray(dfdu((u[1]+u[0])/2, (t[1]+t[0])/2, dt), float)
@@ -306,29 +291,16 @@ Could not import module "Newton". Place Newton.py in this directory
         u, dfdu, k, t, I_mat = self.u, self.dfdu, self.k, self.t, self.I_mat
         dt = t[k+1] - t[k]
 
-#        def F(w):
-#            return Ecoeff(dt)*w - dt*f((Ecoeff(dt)*w +Ecoeff(-dt)*u[k])/2, (Ecoeff(dt)*t[k+1] +Ecoeff(-dt)*t[k])/2) \
-#                    - Ecoeff(-dt)*u[k]
-
-#        if self.discrete_derivative:
-#            dFdw = Derivative(F)
-#        else:
-#            def dFdw(w):
-#                dfdw = self.dfdw
-#                return dfdw([w, u[k]], [t[k+1], t[k]], dt)
-
         temp = dt/2.0*dfdu((u[k+1] +u[k])/2.0, (t[k+1] +t[k])/2.0)
         du_new = LA.solve((I_mat -temp), (I_mat +temp))
-#        symp_error[k+1] = LA.norm((dpsi[k+1].T).dot(J_mat_inv.dot(dpsi[k+1])) -exp(-beta*dt)*J_mat_inv)
-
         return du_new
 
 class ConformalImplicitMidpoint(ODESolver):
-    def __init__(self, f, dfdu = None, neq = 1, beta = 0):
+    def __init__(self, f, dfdu=None):
         ODESolver.__init__(self, f)
 
-        self.beta = beta
-        self.Ecoeff = Ecoeff = lambda dt: exp(beta*dt/4)
+        self.beta = f.beta
+        self.Ecoeff = Ecoeff = lambda dt: exp(f.beta*dt/4)
         self.dfdu = lambda u, t: np.asarray(dfdu(u, t), float)
 
         # BackwardEuler needs to import function Newton from Newton.py:
@@ -351,6 +323,7 @@ class ConformalImplicitMidpoint(ODESolver):
             self.discrete_derivative =True
         else:
             self.discrete_derivative = False
+            neq = size(f.u_init)
             self.dfdw = lambda u, t, dt: \
                             Ecoeff(dt)*(np.eye(neq)-dt/2*np.asarray(dfdu((Ecoeff(dt)*u[1] +Ecoeff(-dt)*u[0])/2, (Ecoeff(dt)*t[1] +Ecoeff(-dt)*t[0])/2, dt), float))
 
@@ -384,21 +357,8 @@ class ConformalImplicitMidpoint(ODESolver):
                                         self.Ecoeff, self.I_mat
         dt = t[k+1] - t[k]
 
-#        def F(w):
-#            return Ecoeff(dt)*w - dt*f((Ecoeff(dt)*w +Ecoeff(-dt)*u[k])/2, (Ecoeff(dt)*t[k+1] +Ecoeff(-dt)*t[k])/2) \
-#                    - Ecoeff(-dt)*u[k]
-
-#        if self.discrete_derivative:
-#            dFdw = Derivative(F)
-#        else:
-#            def dFdw(w):
-#                dfdw = self.dfdw
-#                return dfdw([w, u[k]], [t[k+1], t[k]], dt)
-
         temp = dt/2.0*dfdu((Ecoeff(dt)*u[k+1] +Ecoeff(-dt)*u[k])/2.0, (Ecoeff(dt)*t[k+1] +Ecoeff(-dt)*t[k])/2.0)
         du_new = LA.solve(Ecoeff(dt)*(I_mat -temp), Ecoeff(-dt)*(I_mat +temp))
-#        symp_error[k+1] = LA.norm((dpsi[k+1].T).dot(J_mat_inv.dot(dpsi[k+1])) -exp(-beta*dt)*J_mat_inv)
-
         return du_new
 
 class Derivative:

@@ -25,6 +25,7 @@ params = {
     'xtick.labelsize': 20,
     'ytick.labelsize': 20,
     'text.usetex': True,
+    # 'text.latex.preamble': r'\boldmath',
     'figure.figsize': [14, 6],
     'figure.autolayout': True
 }
@@ -68,6 +69,9 @@ def plot_data(ax, x_data, y_data, use_y_labels, use_legend):
         frame = ax.legend().get_frame()
         frame.set_facecolor('1.0')
         frame.set_edgecolor('1.0')
+
+def tex_table(solver_name, array2print):
+    print solver_name, "\n", " \\\\\n".join([" & ".join(map('{0:.3f}'.format, line)) for line in array2print])
 
 def test_PlotScript():
     data_low_mut = _load('/home/ashishbhatt/Documents/matplotlib_for_papers/src/data/low_mut')

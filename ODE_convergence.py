@@ -19,7 +19,7 @@ def test_convergence_and_energy(u_init, u_exact, T, solver, high_order, f=None):
         raise TypeError('u_exact is %s, not a function' % type(u_exact))
 
     mean_error = []
-    dt_space = geomspace(0.01, 0.2, num =5)
+    dt_space = linspace(0.05, 0.2, num =5)
 
     if high_order:
         w_values = [0.28, 0.62546642846767004501]

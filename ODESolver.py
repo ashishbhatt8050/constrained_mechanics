@@ -372,12 +372,19 @@ class Derivative:
 
 def test_exact_numerical_solution():
     a = 0.2; b = 3
-
-    def f(u, t):
-        return a + (u - u_exact(t))**5
-
-    def dfdu(u, t, dt):
-        return 5*(u - u_exact(t))**4
+    alg = lambda solver_class: solver_class.__name__
+    
+    class fun(object):
+        def __init__(self, method=None):
+            self.u_init = u_exact(0)
+            self.beta = 0
+    
+        def __call__(self, u, t):
+            return a + (u - u_exact(t))**5
+            
+    class funJac(fun):
+        def __call__(self, u, t, dt=0):
+            return 5*(u - u_exact(t))**4
 
     def u_exact(t):
         """Exact u(t) corresponding to f above."""
@@ -391,6 +398,7 @@ def test_exact_numerical_solution():
     registered_solver_classes = [ImplicitMidpoint, ConformalImplicitMidpoint]
 
     for solver_class in registered_solver_classes:
+        f, dfdu = fun(alg(solver_class)), funJac(alg(solver_class))
         solver = solver_class(f)
         solver.set_initial_condition(U0)
         u, t = solver.solve(t_points)

@@ -23,6 +23,30 @@ def Newton(f, x, dfdx, epsilon=1.0E-7, N=100, store=False):
         return x, info
     else:
         return x, n, f_value
+    
+def RootFind(f, x, dfdx, epsilon=1.0E-10, N=100, store=False):
+    f_value = f(x)
+    n = 0
+    if store: info = [(x, f_value, LA.norm(dfdx(x)))]
+    while LA.norm(f_value) > epsilon and n <= N:
+        dfdx_value = dfdx(x)
+        if LA.norm(dfdx_value) < 1E-14:
+            raise ValueError("Newton: f'(%g)=%g" % (x, LA.norm(dfdx_value)))
+
+        try:
+            x = x - LA.solve(dfdx_value, f_value)
+        except LA.LinAlgError:
+            x = x - f_value/dfdx_value
+        except:
+            raise LA.LinAlgError("Unable to solve the system")
+
+        n += 1
+        f_value = f(x)
+        if store: info.append((x, f_value, dfdx_value))
+    if store:
+        return x, info
+    else:
+        return x, n, f_value
 
 
 def _g(x):

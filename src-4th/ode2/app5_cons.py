@@ -15,6 +15,7 @@ from scitools.std import *
 from pylab import *
 import ODESolver
 from PlotScript import plot_data, tex_table
+from scipy import optimize
 #import scipy
 #from scipy.integrate import solve_ivp
 
@@ -40,7 +41,7 @@ class MechSystem(object):
             f = [u, -Omega2.dot(sin(x))]
         elif method in ['ConformalImplicitMidpoint']:
             f = reshape([u, -Omega2.dot(sin(x)) -beta*u], (2*nosc,)) +beta/2*y
-        elif method in ['ImplicitMidpoint', 'ForwardEuler']:
+        elif method in ['ImplicitMidpoint', 'ForwardEuler','StormerVerlet']:
             f = reshape([u, -Omega2.dot(sin(x)) -beta*u], (2*nosc,))
         else:
             NameError('Undefined method - %s' % method)
@@ -70,27 +71,37 @@ alpha[2] = sqrt(1 -alpha[0]**2 - alpha[1]**2)
 beta = 0.1
 
 y_init = [0.2, 0.4, float('nan'), 0., 0., 0.]
-y_init[2] = -(np.array(y_init[:2]).dot(alpha[:2]))/alpha[2] # project on the manifold
+# y_init[2] = -(np.array(y_init[:2]).dot(alpha[:2]))/alpha[2] # project on the manifold
+y_init[2] = sqrt(1 -np.array(alpha[:2]).dot(np.array(y_init[:2])**2))/sqrt(alpha[2]) # sperical constraint
 
 en_err = EnergyError()
 r_form = lambda numer, denom: (log(roll(numer, -1)/numer)/log(roll(denom, -1)/denom))[:-1]
 C_form = lambda numer, denom, r: numer[:-1]/(denom[:-1]**r)
 
 nosc = int(size(y_init)/2)     # number of oscillators
-_g = lambda y: y[:, :nosc].dot(alpha)
-_G = lambda y: np.array(alpha)
+
+# # linear constraints
+# _g = lambda y: y[:, :nosc].dot(alpha)
+# _G = lambda y: np.array(alpha)
+
+# spherical constraints
+_g = lambda y: (y[:nosc]**2).dot(alpha) -1.0
+_G = lambda y: 2*np.array(y[:nosc])*np.array(alpha)
+
 alg = lambda solver_class: solver_class.__name__
 fig = figure()
 
 T_final = 20
 dt_space = concatenate(([], linspace(0.05, 0.2, num=1)))
+
+# higher order composition coefficients
 w_values = [0.28, 0.62546642846767004501]
 w_values.append(1.0 -2.0*(sum(w_values)))
 w_values.append(w_values[1])
 w_values.append(w_values[0])
 # w_values = [1]
 
-registered_solver_classes = [ODESolver.ConformalImplicitMidpoint, ODESolver.ImplicitMidpoint]
+registered_solver_classes = [ODESolver.ConformalImplicitMidpoint, ODESolver.ImplicitMidpoint, ODESolver.ConformalStormerVerlet, ODESolver.StormerVerlet]
 
 #%% Solve the system and find convergence rates
 r_values, C_values = [],[]
@@ -101,14 +112,14 @@ for solver_class in registered_solver_classes:
         n = int(round(T_final/dt))
         t_points = linspace(0, T_final, n+1)
 
-        M, store, epsilon, var, var_store, plt_res = 100, False, 1.0E-10, True, False, True
+        M, store, epsilon, var, var_store, plt_res = 100, False, 1.0E-14, True, False, True
 
         if store: info = []
         if var_store: var_info  = []
 
         f, dfdu = MechSystem(alg(solver_class)), Jacobian(alg(solver_class))
 
-        if solver_class in [ODESolver.ConformalStormerVerlet, ODESolver.ForwardEuler]:
+        if solver_class in [ODESolver.ConformalStormerVerlet, ODESolver.StormerVerlet]:
             solver = solver_class(f)
         elif solver_class in [ODESolver.ConformalImplicitMidpoint, ODESolver.ImplicitMidpoint]:
             solver = solver_class(f, dfdu)
@@ -127,86 +138,42 @@ for solver_class in registered_solver_classes:
             for w_val in w_values:
                 solver.set_initial_condition(y_[1])
                 y_, tp = solver.solve(w_val*t_points[k:k+2])
+                
+                y_[1,:nosc] = optimize.newton(_g, y_[1,:nosc], tol=1e-10)
+                y_[1,nosc:] = optimize.newton(lambda Y: (_G(y_[1,:nosc]).dot(Y.T)), y_[1,nosc:])
+                
+# =============================================================================
+#                 Y, Yp = reshape(y_[1], (1,2*nosc)), reshape(y[0], (1,2*nosc))
+#                 Delta_Lambda, m = delta_lambda_g(Y, Yp), 0
+#                 if store: info.append((Y[0,:nosc], Delta_Lambda, m))
+# 
+#                 while _g(Y) > epsilon and m <= M:
+#                     Y[0, :nosc] = Y[0, :nosc] -_G(Yp)*Delta_Lambda
+# 
+#                     m += 1
+#                     Delta_Lambda = delta_lambda_g(Y, Yp)
+#                     if store: info.append((Y[0,:nosc], Delta_Lambda, m))
+# 
+#                 y_[1, :nosc] = Y[0,:nosc]
+# 
+#                 Delta_Lambda, m = delta_lambda_G(Y, Yp), 0
+#                 if store: info.append((Y[0,nosc:], Delta_Lambda, m))
+# 
+#                 while _G(Y).dot(Y[0,nosc:]) > epsilon and m <= M:
+#                     Y[0, nosc:] = Y[0, nosc:] -_G(Yp)*Delta_Lambda
+# 
+#                     m += 1
+#                     Delta_Lambda = delta_lambda_G(Y, Yp)
+#                     if store: info.append((Y[0, nosc:], Delta_Lambda, m))
+# 
+#                 y_[1, nosc:] = Y[0, nosc:]
+# =============================================================================
 
-                Delta_LambdaX, X, m = _g(reshape(y_[1], (1, 2*nosc))), y_[1, :nosc], 0
-                if store: info.append((X, Delta_LambdaX, m))
-
-                while abs(Delta_LambdaX) > epsilon and m <= M:
-                    X = X -np.transpose(_G(y_[0]))*Delta_LambdaX
-
-                    m += 1
-                    Delta_LambdaX = _g(reshape(X, (1, nosc)))
-                    if store: info.append((X, Delta_LambdaX, m))
-
-                y_[1, :nosc] = X
-
-                Delta_LambdaU, U, m = _G(y_[1]).dot(y_[1, nosc:]), y_[1, nosc:], 0
-                if store: info.append((U, Delta_LambdaU, m))
-
-                while abs(Delta_LambdaU) > epsilon and m <= M:
-                    U = U -np.transpose(_G(y_[1]))*Delta_LambdaU
-
-                    m += 1
-                    Delta_LambdaU = _G(y_[1]).dot(U)
-                    if store: info.append((U, Delta_LambdaU, m))
-
-                y_[1, nosc:] = U
-
-            y[k+1] = reshape([X, U],(2*nosc,))
+            y[k+1] = y_[1]
 
             if var:
                 dpsi_, tp = solver.var_solve(y_, t_points[k:k+2])
                 dpsi[k+1] = dpsi_[1]
-#                dpsi[k+1, :nosc, :nosc] = dpsi_[1, :nosc, :nosc] -dt/2.0*reshape(alpha,(nosc, 1)).dot(reshape(alpha,(1, nosc)).dot(dpsi_[1, :nosc, :nosc]))
-#                dpsi[k+1, nosc:, nosc:] = dpsi_[1, nosc:, nosc:] -dt/2.0*reshape(alpha,(nosc, 1)).dot(reshape(alpha,(1, nosc)).dot(dpsi_[1, nosc:, nosc:]))
-#                dpsi[k+1] = dpsi_[1] -reshape([alpha,alpha],(2*nosc, 1)).dot(reshape([alpha,alpha],(1, 2*nosc)).dot(dpsi_[1]))
-
-                '''
-                d_Delta_Lambda = (dpsi_[1].T).dot(np.concatenate([alpha,alpha]))
-                dY = dpsi_[1]
-                m = 0
-
-                while LA.norm(d_Delta_Lambda) > epsilon and m <= M:
-                    dY = dY - [[p*q for p in np.concatenate([alpha,alpha])] for q in d_Delta_Lambda]
-
-                    m += 1
-                    d_Delta_Lambda = (dY.T).dot(np.concatenate([alpha,alpha]))
-                    if var_store: var_info.append((dY, LA.norm(d_Delta_Lambda), m))
-                if m > M:
-                    print "Solver failed to converge at t=%g "\
-                          "(%d iterations, %d)" % (t_points[k+1], m, LA.norm(d_Delta_Lambda))
-                dpsi_[1] = dY
-
-                d_Delta_LambdaX = (dpsi_[1, :nosc, :nosc].T).dot(alpha)
-                dX = dpsi_[1, :nosc, :nosc]
-                m = 0
-
-                while LA.norm(d_Delta_LambdaX) > epsilon and m <= M:
-                    dX = dX -[[p*q for p in _G(y_[0])] for q in d_Delta_LambdaX]
-
-                    m += 1
-                    d_Delta_LambdaX = _g(dX.T)
-                    if var_store: var_info.append((dX, LA.norm(d_Delta_LambdaX), m))
-
-                dpsi_[1, :nosc, :nosc] = dX
-
-                d_Delta_LambdaU = (dpsi_[1, nosc:, nosc:].T).dot(alpha)
-                dU = dpsi_[1, nosc:, nosc:]
-                m = 0
-
-                while LA.norm(d_Delta_LambdaU) > epsilon and m <= M:
-                    dU = dU -[[p*q for p in _G(y_[0])] for q in d_Delta_LambdaU]
-
-                    m += 1
-                    d_Delta_LambdaU = _g(dU.T)
-                    if var_store: var_info.append((dU, LA.norm(d_Delta_LambdaU), m))
-
-                dpsi_[1, nosc:, nosc:] = dU
-
-                dpsi_[1, nosc:, nosc:] = (np.eye(nosc) -[[dt**2/4*p*q for p in alpha] for q in alpha]).dot(dpsi_[1, nosc:, nosc:])
-                dpsi_[1, :nosc, :nosc] = dpsi_[1, nosc:, nosc:]
-                '''
-                #dpsi[k+1] = np.concatenate(((1 -dt**2)*dpsi_[1,:nosc,:],(1-dt)*dpsi_[1,nosc:,:]))
 
         if dt == dt_space[0]:
             y_interp = lambda t_, t_points, y: np.interp(t_, t_points, y)
@@ -227,27 +194,33 @@ for solver_class in registered_solver_classes:
         if plt_res and dt == dt_space[-1]:
             if solver_class == ODESolver.ConformalImplicitMidpoint:
                 ax = fig.add_subplot(121)
-                ax.set_ylim(0,1.0E-10)
+            elif solver_class == ODESolver.ImplicitMidpoint:
+                ax = fig.add_subplot(122)
+                ax.set_ylim(0,0.014)
+                #ax.set_ylim(0,1.0E-5)
                 # plot_data(ax1, t_points, y, True, False)
                 # ax1.legend(['$q_1$','$q_2$','$q_3$','$p_1$','$p_2$','$p_3$'],loc=1)
                 # ax1.set_xlabel('time')
                 
+                g_list = lambda y: np.array([_g(x) for x in y])
+                G_list = lambda y: np.array([_G(x) for x in y])
+                temp = lambda y: sum(G_list(y)*y[:,nosc:], axis=1)
+                
                 if not beta:
-                    plot_data(ax, t_points, np.array([reshape(sym_error[-1:],(n+1,)), en_err(y), _g(y), y[:, nosc:].dot(_G(y))]).T, True, True)
+                    plot_data(ax, t_points, np.array([reshape(sym_error[-1:],(n+1,)), en_err(y), g_list(y), temp(y)]).T, True, True)
                     # ax2.legend([r'$\boldmath{E}_{cs}$', r'$\boldmath{E}_I$', r'$\bolmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], loc=1)
                 elif var:
-                    plot_data(ax, t_points, np.array([reshape(sym_error[-1:],(n+1,)), _g(y), y[:, nosc:].dot(_G(y))]).T, True, True)
+                    plot_data(ax, t_points, np.array([reshape(sym_error[-1:],(n+1,)), g_list(y), temp(y)]).T, True, True)
                     # ax2.legend([r'$\boldmath{E}_{cs}$', r'$\bolmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], loc=1)
                 # ax2.set_xlabel('time')
-            elif solver_class == ODESolver.ImplicitMidpoint:
-                ax = fig.add_subplot(122)
-                ax.set_ylim(0,0.014)
-                if not beta:
-                    plot_data(ax, t_points, np.array([reshape(sym_error[-1:],(n+1,)), en_err(y), _g(y), y[:, nosc:].dot(_G(y))]).T, True, True)
-                    # ax2.legend([r'$\boldmath{E}_{cs}$', r'$\boldmath{E}_I$', r'$\bolmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], loc=1)
-                elif var:
-                    plot_data(ax, t_points, np.array([reshape(sym_error[-1:],(n+1,)), _g(y), y[:, nosc:].dot(_G(y))]).T, True, True)
-                    # ax2.legend([r'$\boldmath{E}_{cs}$', r'$\bolmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], loc=1)
+            
+                # if not beta:
+                #     plot_data(ax, t_points, np.array([reshape(sym_error[-1:],(n+1,)), en_err(y), g_list(y), temp(y)]).T, True, True)
+                #     # ax2.legend([r'$\boldmath{E}_{cs}$', r'$\boldmath{E}_I$', r'$\bolmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], loc=1)
+                # elif var:
+                #     plot_data(ax, t_points, np.array([reshape(sym_error[-1:],(n+1,)), g_list(y), temp(y)]).T, True, True)
+                #     # ax2.legend([r'$\boldmath{E}_{cs}$', r'$\bolmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], loc=1)
+            
             ax.set_xlabel('time')
                 
             if not beta:

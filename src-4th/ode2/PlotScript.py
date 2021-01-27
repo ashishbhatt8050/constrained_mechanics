@@ -31,7 +31,7 @@ params = {
 }
 rcParams.update(params)
 
-def plot_data(ax, x_data, y_data, use_y_labels, use_legend):
+def plot_data(ax, x_data, y_data, use_y_labels=True, use_legend=True):
     # now all plot function should be applied to ax
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)

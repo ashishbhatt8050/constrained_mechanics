@@ -226,8 +226,8 @@ for solver_class in registered_solver_classes:
         # plot the results
         if plt_res and dt == dt_space[-1]:
             if solver_class == ODESolver.ConformalImplicitMidpoint:
-                ax = fig.add_subplot(121)
-                ax.set_ylim(0,1.0E-10)
+                # ax = fig.add_subplot(221)
+                # ax.set_ylim(-1.0E-10,1.0E-10)
                 # plot_data(ax1, t_points, y, True, False)
                 # ax1.legend(['$q_1$','$q_2$','$q_3$','$p_1$','$p_2$','$p_3$'],loc=1)
                 # ax1.set_xlabel('time')
@@ -236,28 +236,48 @@ for solver_class in registered_solver_classes:
                     plot_data(ax, t_points, np.array([reshape(sym_error[-1:],(n+1,)), en_err(y), _g(y), y[:, nosc:].dot(_G(y))]).T, True, True)
                     # ax2.legend([r'$\boldmath{E}_{cs}$', r'$\boldmath{E}_I$', r'$\bolmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], loc=1)
                 elif var:
-                    plot_data(ax, t_points, np.array([reshape(sym_error[-1:],(n+1,)), _g(y), y[:, nosc:].dot(_G(y))]).T, True, True)
+                    ax = fig.add_subplot(321)
+                    ax.set_ylim(0,2.0E-15)
+                    ax.set_yticks([0,1.0E-15,2.0E-15])
+                    ax.set_ylabel(r'$\boldmath{E}_{cs}$')
+                    plot_data(ax, t_points, reshape(sym_error[-1:],(n+1,)).T)
+                    ax = fig.add_subplot(323)
+                    ax.set_ylabel(r'$\boldmath{g}(\boldmath{q}^{n+1})$')
+                    ax.set_ylim(-1.0E-10,1.0E-10)
+                    plot_data(ax, t_points, _g(y).T)
+                    ax = fig.add_subplot(325)
+                    ax.set_ylabel(r'$\boldmath{G}^\top \boldmath{p}^{n+1}$')
+                    ax.set_ylim(-0.3E-10,0.3E-10)
+                    plot_data(ax, t_points, (y[:, nosc:].dot(_G(y))).T)
                     # ax2.legend([r'$\boldmath{E}_{cs}$', r'$\bolmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], loc=1)
                 # ax2.set_xlabel('time')
             elif solver_class == ODESolver.ImplicitMidpoint:
-                ax = fig.add_subplot(122)
-                ax.set_ylim(0,0.014)
+                # ax = fig.add_subplot(222)
+                # ax.set_ylim(-0.001,0.014)
                 if not beta:
                     plot_data(ax, t_points, np.array([reshape(sym_error[-1:],(n+1,)), en_err(y), _g(y), y[:, nosc:].dot(_G(y))]).T, True, True)
                     # ax2.legend([r'$\boldmath{E}_{cs}$', r'$\boldmath{E}_I$', r'$\bolmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], loc=1)
                 elif var:
-                    plot_data(ax, t_points, np.array([reshape(sym_error[-1:],(n+1,)), _g(y), y[:, nosc:].dot(_G(y))]).T, True, True)
-                    # ax2.legend([r'$\boldmath{E}_{cs}$', r'$\bolmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], loc=1)
+                    ax = fig.add_subplot(322)
+                    ax.set_ylim(0,0.015)
+                    ax.set_yticks([0,0.01,0.02])
+                    plot_data(ax, t_points, reshape(sym_error[-1:],(n+1,)).T)
+                    ax = fig.add_subplot(324)
+                    ax.set_ylim(-1.0E-10,1.0E-10)
+                    plot_data(ax, t_points, _g(y).T)
+                    ax = fig.add_subplot(326)
+                    ax.set_ylim(-0.3E-10,0.3E-10)
+                    plot_data(ax, t_points, (y[:, nosc:].dot(_G(y))).T)
             ax.set_xlabel('time')
                 
             if not beta:
                 fig.legend([r'$\boldmath{E}_{cs}$', r'$\boldmath{E}_I$', r'$\boldmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], \
                            bbox_to_anchor=(0.5,-0.08), loc='lower center',ncol=2,bbox_transform=fig.transFigure)
-            elif var:
+            elif not var:
                 fig.legend([r'$\boldmath{E}_{cs}$', r'$\boldmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], \
                            bbox_to_anchor=(0.5,-0.08), loc='lower center',ncol=3,bbox_transform=fig.transFigure)
 
-            # fig.savefig('app5_err_inv.pdf', bbox_inches='tight')
+            fig.savefig('app5_err_inv.pdf', bbox_inches='tight')
 
     # Estimate Convergence rate r and coefficient C
     if not beta:

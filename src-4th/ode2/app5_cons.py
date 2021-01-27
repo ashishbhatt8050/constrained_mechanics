@@ -72,7 +72,7 @@ beta = 0.1
 
 y_init = [0.2, 0.4, float('nan'), 0., 0., 0.]
 # y_init[2] = -(np.array(y_init[:2]).dot(alpha[:2]))/alpha[2] # project on the manifold
-y_init[2] = sqrt(1 -np.array(alpha[:2]).dot(np.array(y_init[:2])**2))/sqrt(alpha[2]) # sperical constraint
+y_init[2] = sqrt(1 -np.array(alpha[:2]).dot(np.array(y_init[:2])**2))/sqrt(alpha[2]) # spherical constraint
 
 en_err = EnergyError()
 r_form = lambda numer, denom: (log(roll(numer, -1)/numer)/log(roll(denom, -1)/denom))[:-1]
@@ -101,7 +101,7 @@ w_values.append(w_values[1])
 w_values.append(w_values[0])
 # w_values = [1]
 
-registered_solver_classes = [ODESolver.ConformalImplicitMidpoint, ODESolver.ImplicitMidpoint, ODESolver.ConformalStormerVerlet, ODESolver.StormerVerlet]
+registered_solver_classes = [ODESolver.ConformalImplicitMidpoint, ODESolver.ImplicitMidpoint]
 
 #%% Solve the system and find convergence rates
 r_values, C_values = [],[]
@@ -119,7 +119,7 @@ for solver_class in registered_solver_classes:
 
         f, dfdu = MechSystem(alg(solver_class)), Jacobian(alg(solver_class))
 
-        if solver_class in [ODESolver.ConformalStormerVerlet, ODESolver.StormerVerlet]:
+        if solver_class in [ODESolver.ConformalStormerVerlet]:
             solver = solver_class(f)
         elif solver_class in [ODESolver.ConformalImplicitMidpoint, ODESolver.ImplicitMidpoint]:
             solver = solver_class(f, dfdu)
@@ -192,45 +192,61 @@ for solver_class in registered_solver_classes:
 
         # plot the results
         if plt_res and dt == dt_space[-1]:
-            if solver_class == ODESolver.ConformalImplicitMidpoint:
-                ax = fig.add_subplot(121)
-            elif solver_class == ODESolver.ImplicitMidpoint:
-                ax = fig.add_subplot(122)
-                ax.set_ylim(0,0.014)
-                #ax.set_ylim(0,1.0E-5)
-                # plot_data(ax1, t_points, y, True, False)
-                # ax1.legend(['$q_1$','$q_2$','$q_3$','$p_1$','$p_2$','$p_3$'],loc=1)
-                # ax1.set_xlabel('time')
-                
-                g_list = lambda y: np.array([_g(x) for x in y])
-                G_list = lambda y: np.array([_G(x) for x in y])
-                temp = lambda y: sum(G_list(y)*y[:,nosc:], axis=1)
-                
-                if not beta:
-                    plot_data(ax, t_points, np.array([reshape(sym_error[-1:],(n+1,)), en_err(y), g_list(y), temp(y)]).T, True, True)
-                    # ax2.legend([r'$\boldmath{E}_{cs}$', r'$\boldmath{E}_I$', r'$\bolmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], loc=1)
-                elif var:
-                    plot_data(ax, t_points, np.array([reshape(sym_error[-1:],(n+1,)), g_list(y), temp(y)]).T, True, True)
-                    # ax2.legend([r'$\boldmath{E}_{cs}$', r'$\bolmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], loc=1)
-                # ax2.set_xlabel('time')
+            g_list = lambda y: np.array([_g(x) for x in y])
+            G_list = lambda y: np.array([_G(x) for x in y])
+            temp = lambda y: sum(G_list(y)*y[:,nosc:], axis=1)
             
-                # if not beta:
-                #     plot_data(ax, t_points, np.array([reshape(sym_error[-1:],(n+1,)), en_err(y), g_list(y), temp(y)]).T, True, True)
-                #     # ax2.legend([r'$\boldmath{E}_{cs}$', r'$\boldmath{E}_I$', r'$\bolmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], loc=1)
-                # elif var:
-                #     plot_data(ax, t_points, np.array([reshape(sym_error[-1:],(n+1,)), g_list(y), temp(y)]).T, True, True)
-                #     # ax2.legend([r'$\boldmath{E}_{cs}$', r'$\bolmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], loc=1)
+            if solver_class == ODESolver.ConformalImplicitMidpoint:
+                ax = fig.add_subplot(321)
+                ax.set_ylim(0,2.0E-15)
+                ax.set_yticks([0,1.0E-15,2.0E-15])
+                ax.set_ylabel(r'$\boldmath{E}_{cs}$')
+                plot_data(ax, t_points, reshape(sym_error[-1:],(n+1,)).T)
+                ax = fig.add_subplot(323)
+                ax.set_ylabel(r'$\boldmath{g}(\boldmath{q}^{n+1})$')
+                ax.set_ylim(-1.0E-15,1.0E-15)
+                plot_data(ax, t_points, g_list(y).T)
+                ax = fig.add_subplot(325)
+                ax.set_ylabel(r'$\boldmath{G}^\top \boldmath{p}^{n+1}$')
+                ax.set_ylim(-1E-15,1E-15)
+                plot_data(ax, t_points, temp(y).T)
+            elif solver_class == ODESolver.ImplicitMidpoint:
+                ax = fig.add_subplot(322)
+                ax.set_ylim(0,0.02)
+                ax.set_yticks([0,0.01,0.02])
+                plot_data(ax, t_points, reshape(sym_error[-1:],(n+1,)).T)
+                ax = fig.add_subplot(324)
+                ax.set_ylim(-1.0E-15,1.0E-15)
+                plot_data(ax, t_points, g_list(y).T)
+                ax = fig.add_subplot(326)
+                ax.set_ylim(-1.0E-15,1.0E-15)
+                plot_data(ax, t_points, temp(y).T)
+                
+            if not beta:
+                plot_data(ax, t_points, np.array([reshape(sym_error[-1:],(n+1,)), en_err(y), g_list(y), temp(y)]).T, True, True)
+                # ax2.legend([r'$\boldmath{E}_{cs}$', r'$\boldmath{E}_I$', r'$\bolmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], loc=1)
+            elif not var:
+                plot_data(ax, t_points, np.array([reshape(sym_error[-1:],(n+1,)), g_list(y), temp(y)]).T, True, True)
+                # ax2.legend([r'$\boldmath{E}_{cs}$', r'$\bolmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], loc=1)
+            # ax2.set_xlabel('time')
+        
+            # if not beta:
+            #     plot_data(ax, t_points, np.array([reshape(sym_error[-1:],(n+1,)), en_err(y), g_list(y), temp(y)]).T, True, True)
+            #     # ax2.legend([r'$\boldmath{E}_{cs}$', r'$\boldmath{E}_I$', r'$\bolmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], loc=1)
+            # elif var:
+            #     plot_data(ax, t_points, np.array([reshape(sym_error[-1:],(n+1,)), g_list(y), temp(y)]).T, True, True)
+            #     # ax2.legend([r'$\boldmath{E}_{cs}$', r'$\bolmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], loc=1)
             
             ax.set_xlabel('time')
                 
             if not beta:
                 fig.legend([r'$\boldmath{E}_{cs}$', r'$\boldmath{E}_I$', r'$\boldmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], \
                            bbox_to_anchor=(0.5,-0.08), loc='lower center',ncol=2,bbox_transform=fig.transFigure)
-            elif var:
+            elif not var:
                 fig.legend([r'$\boldmath{E}_{cs}$', r'$\boldmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], \
                            bbox_to_anchor=(0.5,-0.08), loc='lower center',ncol=3,bbox_transform=fig.transFigure)
 
-            # fig.savefig('app5_err_inv.pdf', bbox_inches='tight')
+            fig.savefig('app5_err_inv_sph.pdf', bbox_inches='tight')
 
     # Estimate Convergence rate r and coefficient C
     if not beta:

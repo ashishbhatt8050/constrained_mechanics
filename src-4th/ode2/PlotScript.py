@@ -31,7 +31,7 @@ params = {
 }
 rcParams.update(params)
 
-def plot_data(ax, x_data, y_data, use_y_labels, use_legend):
+def plot_data(ax, x_data, y_data, use_y_labels=True, use_legend=True):
     # now all plot function should be applied to ax
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
@@ -52,7 +52,7 @@ def plot_data(ax, x_data, y_data, use_y_labels, use_legend):
 #    ax.fill_between(x, perc_25_high_mut, perc_75_high_mut, alpha=0.25, linewidth=0, color=colors[1])
 
 
-    ax.plot(x_data, y_data, linewidth=2)
+    ax.plot(x_data, y_data, linewidth=3)
 #    ax.plot(x, med_high_mut, linewidth=2, linestyle='--', color=colors[1])
 
     # change xlim to set_xlim

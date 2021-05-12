@@ -93,6 +93,9 @@ class ODESolver(object):
         self.u = u
         self.t = np.asarray(time_points)
         n = self.t.size
+        if self.U0.shape != self.u[0].shape:
+            self.neq = self.u[0].size
+            
         if self.neq%2 == 1:  # odd number of equations
             raise ValueError('ODESolver.var_solve requires even number of equations')
         else:              # systems of ODEs

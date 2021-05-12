@@ -34,21 +34,19 @@ class MechSystem(object):
         self.T = Params.T_final
         
         self.RB = Params.RB
-        if self.RB is None:
-            self._g = lambda y: y[:, :self.nosc].dot(Params.alpha)
-            self._G = lambda y=None: np.array(Params.alpha) if y is None else y[:, self.nosc:].dot(Params.alpha)
-        else:
-            self._g = lambda y: (y.dot(self.RB)[:, :self.nosc]).dot(Params.alpha)
-            self._G = lambda y=None: np.array(Params.alpha) if y is None else y[:, self.nosc:].dot(Params.alpha)
-            
-        self.RB = Params.RB
+        # if self.RB is None:
+        self._g = lambda y: y[:, :self.nosc].dot(Params.alpha)
+        self._G = lambda y=None: np.array(Params.alpha) if y is None else y[:, self.nosc:].dot(Params.alpha)
+        # else:
+        #     self._g = lambda y: (y.dot(self.RB)[:, :self.nosc]).dot(Params.alpha)
+        #     self._G = lambda y=None: np.array(Params.alpha) if y is None else y.dot(self.RB)[:, self.nosc:].dot(Params.alpha)
 
     def __call__(self, y, t):
         method, Omega2, nosc, beta = self.method, self.Omega2, self.nosc, self.beta
         RB = self.RB
 
         if RB is not None:
-            y = y.dot(RB.T)
+            y = y.dot(RB)
             
         x, u = y[:nosc], y[nosc:]
 
@@ -61,19 +59,26 @@ class MechSystem(object):
         else:
             NameError('Undefined method - %s' % method)
 
-        if RB is not None: f = RB.T.dot(f)
-        return f
+        # if RB is not None: f = f.dot(RB.T)
+        return f if RB is None else f.dot(RB.T)
 
     def jacobian(self, y, t, dt=0):
         "Jacobian of the function f"
         Omega2, nosc, beta, RB = self.Omega2, self.nosc, self.beta, self.RB
         if RB is not None:
-            y = RB.dot(y)
+            y = y.dot(RB)
         x, u = y[:nosc], y[nosc:]
-        dfdu = np.concatenate([np.concatenate([beta/2*eye(nosc), eye(nosc)], axis=1), \
-                               np.concatenate([-Omega2.dot(np.diag(cos(x))), -beta/2*eye(nosc)], axis=1)])
-        if RB is not None: dfdu = RB.T.dot(dfdu)
-        return dfdu
+        if self.method in [ODESolver.ConformalImplicitMidpoint]:
+            dfdu = np.concatenate([np.concatenate([beta/2*eye(nosc), eye(nosc)], axis=1), \
+                                   np.concatenate([-Omega2.dot(diag(cos(x))), -beta/2*eye(nosc)], axis=1)])
+        elif self.method in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
+            dfdu = r_[c_[zeros((nosc, nosc)), eye(nosc)], \
+                                   c_[-Omega2.dot(diag(cos(x))), -beta*eye(nosc)]]
+        else:
+            NameError('Jacobian undefined for the method - %s' % self.method)
+            
+        # if RB is not None: dfdu = dfdu.dot(RB.T)
+        return dfdu if RB is None else RB.dot(dfdu.dot(RB.T))
 
     def en_err(self, y, t=0):
         "Energy error"
@@ -114,14 +119,14 @@ class MechSystemSolver(object):
 
     def solve(self):
         if self.RB is None:
-            nosc = self.f.nosc
+            nosc2 = 2*self.f.nosc
         else:
-            nosc = self.RB.shape[0]
+            nosc2 = self.RB.shape[0] # 2*nosc
             
         self.n = int(round(self.f.T/self.dt))
 
         self.t_points = linspace(0, self.f.T, self.n+1)
-        self.y = np.zeros((self.n+1, 2*nosc))
+        self.y = np.zeros((self.n+1, nosc2))
         self.y[0] = self.f.u_init
         if self.store: self.info = []
 
@@ -165,39 +170,39 @@ class MechSystemSolver(object):
 # =============================================================================
                 
                 
-                Delta_LambdaX, Delta_LambdaU = self.f._g(reshape(y_[1], (1, 2*nosc))), self.f._G(reshape(y_[1], (1, 2*nosc)))
-                X, U, = y_[1, :nosc], y_[1, nosc:]
                 m = 0
                 if self.RB is None:
-                    X, U = y_[1, :nosc], y_[1, nosc:]
+                    X_U = y_[1]
                 else:
-                    X, U = y_.dot(self.RB)[1, :self.f.nosc], y_.dot(self.RB)[1, self.f.nosc:]
-                if self.store: self.info.append((X, U, Delta_LambdaX, Delta_LambdaU, m))
+                    X_U = y_.dot(self.RB)[1]
+                X_U = reshape(X_U, (1, 2*self.f.nosc))
+                Delta_LambdaX, Delta_LambdaU = self.f._g(X_U), self.f._G(X_U)
+                
+                if self.store: self.info.append((X_U, Delta_LambdaX, Delta_LambdaU, m))
 
                 while abs(max((Delta_LambdaX, Delta_LambdaU))) > self.tol and m <= self.M:
-                    X, U = X -np.transpose(self.f._G())*Delta_LambdaX, U -np.transpose(self.f._G())*Delta_LambdaU
+                    X_U = X_U -r_[np.transpose(self.f._G())*Delta_LambdaX, np.transpose(self.f._G())*Delta_LambdaU]
 
                     m += 1
-                    if self.RB is not None:
-                        X_U = r_[X,U].dot(self.RB.T)
-                        X, U = X_U[1, :nosc], X_U[1, nosc:]
-                    else:
-                        X_U = r_[X,U]
+                    # if self.RB is not None:
+                    #     X_U = X_U.dot(self.RB.T)
                         
-                    Delta_LambdaX, Delta_LambdaU = self.f._g(reshape(X_U, (1, 2*nosc))), self.f._G(reshape(X_U, (1, 2*nosc)))
-                    if self.store: self.info.append((X, U, Delta_LambdaX, Delta_LambdaU, m))
+                    Delta_LambdaX, Delta_LambdaU = self.f._g(X_U), self.f._G(X_U)
+                    if self.store: self.info.append((X_U, Delta_LambdaX, Delta_LambdaU, m))
 
-                y_[1, :nosc], y_[1, nosc:] = X, U
-                
-                
+                y_[1] = X_U if self.RB is None else X_U.dot(self.RB.T)
 
             if self.RB is None:
-                self.y[k+1] = reshape([X, U],(2*nosc,))
+                self.y[k+1] = reshape(X_U, (nosc2,))
             else:
-                self.y[k+1] = (reshape([X, U],(2*nosc,))).dot(self.RB)
+                self.y[k+1] = reshape(X_U.dot(self.RB.T), (nosc2,))
 
+        if self.RB is not None: self.y = self.y.dot(self.RB)
+        
         if self.var == True:
+            RB, self.f.RB = self.f.RB, None # temporarily set RB to None
             self.var_solve()
+            self.f.RB = RB # Turn RB back on
 
         self.measures()
 
@@ -266,8 +271,8 @@ def demo1(registered_solver_classes=[ODESolver.ConformalImplicitMidpoint], nosc=
             if RB is not None:
                 self.y_init = np.asarray(y_init).dot(RB.T)
             
-            self.T_final = 2
-            self.dt_space = concatenate(([], linspace(0.05, 0.2, num=1)))
+            self.T_final = 1
+            self.dt_space = concatenate(([], linspace(0.005, 0.05, num=5)))
             
             w_values = [0.28, 0.62546642846767004501]
             w_values.append(1.0 -2.0*(sum(w_values)))
@@ -279,7 +284,7 @@ def demo1(registered_solver_classes=[ODESolver.ConformalImplicitMidpoint], nosc=
             self.tol, self.M, self.var, self.store = 1.0E-14, 100, True, False
     
     for tile, solver_class in enumerate(registered_solver_classes, start=131):
-        eng_error, fig, params = [], figure(), Params(nosc, RB)
+        eng_error, sym_error, fig, params = [], [], figure(), Params(nosc, RB)
         for dt in params.dt_space:
             params.dt = dt
             problem = MechSystem(params, method=solver_class)
@@ -290,21 +295,27 @@ def demo1(registered_solver_classes=[ODESolver.ConformalImplicitMidpoint], nosc=
             print(end -start)
 
             eng_error.append(MSsolver.eng_error)
+            sym_error.append(sqrt(dt)*LA.norm(MSsolver.sym_error))
 
         # Estimate Convergence rate r and coefficient C
+        r_form = lambda numer, denom: (log(roll(numer, -1)/numer)/log(roll(denom, -1)/denom))[:-1]
+        C_form = lambda numer, denom, r: numer[:-1]/(denom[:-1]**r)
         if not params.beta and params.dt_space.size > 1:
-            r_form = lambda numer, denom: (log(roll(numer, -1)/numer)/log(roll(denom, -1)/denom))[:-1]
-            C_form = lambda numer, denom, r: numer[:-1]/(denom[:-1]**r)
             r_values.append(r_form(eng_error,params.dt_space))
             C_values.append(C_form(eng_error,params.dt_space,r_values[-1]))
+            
+        if params.dt_space.size > 1:
+            r_values.append(r_form(sym_error,params.dt_space))
+            C_values.append(C_form(sym_error,params.dt_space,r_values[-1]))
 
         # Plot the measures
         MSsolver.plot(fig)
 
     # Display convergence table
-    if not params.beta and params.dt_space.size > 1:
-        temp = np.array((params.dt_space, np.concatenate(([np.float('nan')],r_values[0])),\
-                          np.concatenate(([np.float('nan')], r_values[1])))).T
+    if params.dt_space.size > 1:
+        temp = r_[ reshape(params.dt_space, (1,params.dt_space.size)), c_[np.reshape([np.float('nan')]*len(r_values), (len(r_values),1)), r_values]].T
+        # temp = np.array((params.dt_space, np.concatenate(([np.float('nan')],r_values[0])),\
+        #                   np.concatenate(([np.float('nan')], r_values[1])))).T
         # temp = np.asarray([params.dt_space, [np.float('nan')]+r_values[0], [np.float('nan')]+r_values[1]]).T
         tex_table(solver_class.__name__, temp)
 
@@ -329,5 +340,5 @@ def mor_demo():
     nosc_r = 5
     RB = vh[:nosc_r, :]
     y_r = demo1(registered_solver_classes, nosc=100, RB=RB)
-    print np.amax(y-y_r), np.amin(y-y_r)
+    print np.amax(abs(y-y_r))
     

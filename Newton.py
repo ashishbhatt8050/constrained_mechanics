@@ -24,32 +24,35 @@ def Newton(f, x, dfdx, epsilon=1.0E-7, N=100, store=False):
     else:
         return x, n, f_value
 
-
+#%% Testing
+from numpy import sin, cos, exp, linspace, pi, array
+import matplotlib.pyplot as plt
+    
 def _g(x):
-    from scitools.std import exp, sin, pi
     return exp(-0.1*x**2)*sin(pi/2*x)
 
 def _dg(x):
-    from scitools.std import exp, sin, cos, pi
     return -2*0.1*x*exp(-0.1*x**2)*sin(pi/2*x) + \
            pi/2*exp(-0.1*x**2)*cos(pi/2*x)
 
 def _test():
-    from scitools.std import sin, cos, exp, linspace, plot, pi
     import sys
 
     #x0 = float(sys.argv[1])
     x0 = 0.1
     x, info = Newton(_g, x0, _dg, store=True)
-    print 'root: %.16g' % x
+    print('root: %.16g' % x)
     for i in range(len(info)):
-        print 'Iteration %2d: f(%g)=%g, dF(%g) =%g' % \
-              (i, info[i][0], info[i][1], info[i][0], info[i][2])
+        print('Iteration %2d: f(%g)=%g, dF(%g) =%g' % \
+              (i, info[i][0], info[i][1], info[i][0], info[i][2]))
 
-    x = linspace(-7, 7, 401)
+    x = array(info[:][0])
     y = _g(x)
-    plot(x, y, 'b.', xlabel='x', ylabel='y',
-     title="Newton Iterates", savefig='tmp.pdf')
+    plt.plot(x, y, 'r.', linspace(-7, 7, 100), _g(linspace(-7, 7, 100)), 'b.')
+    plt.xlabel('x')
+    plt.ylabel('y')
+    plt.title('Newton iterates')
+    plt.savefig('tmp.pdf')
 
 if __name__ == '__main__':
     _test()

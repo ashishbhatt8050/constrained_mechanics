@@ -1,4 +1,4 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Created on Mon May 11 15:30:30 2020
@@ -31,7 +31,7 @@ params = {
 }
 rcParams.update(params)
 
-def plot_data(ax, x_data, y_data, use_y_labels, use_legend):
+def plot_data(ax, x_data, y_data, use_y_labels=True, use_legend=False):
     # now all plot function should be applied to ax
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
@@ -71,11 +71,12 @@ def plot_data(ax, x_data, y_data, use_y_labels, use_legend):
         frame.set_edgecolor('1.0')
 
 def tex_table(solver_name, array2print):
-    print solver_name, "\n", " \\\\\n".join([" & ".join(map('{0:.3f}'.format, line)) for line in array2print])
+    print(solver_name, "\n", " \\\\\n".join([" & ".join(map('{0:.3f}'.format, line)) for line in array2print]))
 
+#%% Testing
 def test_PlotScript():
-    data_low_mut = _load('/home/ashishbhatt/Documents/matplotlib_for_papers/src/data/low_mut')
-    data_high_mut = _load('/home/ashishbhatt/Documents/matplotlib_for_papers/src/data/high_mut')
+    data_low_mut = _load('/home/ashish/Documents/scipro-primer/src-4th/ode2/data/low_mut')
+    data_high_mut = _load('/home/ashish/Documents/scipro-primer/src-4th/ode2/data/high_mut')
 
     n_generations = data_low_mut.shape[1]
     x = np.arange(0, n_generations)
@@ -115,4 +116,4 @@ def _perc(data):
     return median, perc_25, perc_75
 
 if __name__ == '__main__':
-    _test()
+    test_PlotScript()

@@ -1,4 +1,4 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Created on Sat Apr 11 11:49:50 2020
@@ -11,12 +11,14 @@ classes in the ODESolver hierarchy of methods.
 
 import numpy as np
 from numpy import linalg as LA
-from scitools.std import *
+# from numpy import reshape, sin, cos, diag, zeros, eye, linspace, sqrt, concatenate
+# import warnings
+#from scitools.std import *
 from pylab import *
 import ODESolver
 from PlotScript import plot_data, tex_table
 from timeit import default_timer as timer
-#import scipy
+from scipy import optimize
 #from scipy.integrate import solve_ivp
 
 #%% Define the system
@@ -32,11 +34,17 @@ class MechSystem(object):
         self.method = method
         self.u_init = Params.y_init
         self.T = Params.T_final
+        self.constraint_type = Params.constraint_type
         
         self.RB = Params.RB
         # if self.RB is None:
-        self._g = lambda y: y[:, :self.nosc].dot(Params.alpha)
-        self._G = lambda y=None: np.array(Params.alpha) if y is None else y[:, self.nosc:].dot(Params.alpha)
+        if Params.constraint_type == 'linear':
+            self._g = lambda y: y[:, :self.nosc].dot(self.alpha)
+            self._G = lambda y=None: np.array(self.alpha) if y is None else y[:, self.nosc:].dot(self.alpha)
+        else:
+            self._g = lambda y: (y[:, :self.nosc]**2).dot(self.alpha) -1.0
+            self._G = lambda y: sum(y[:, self.nosc:]*(2*y[:, :self.nosc]*np.array(self.alpha)), axis=1)
+        
         # else:
         #     self._g = lambda y: (y.dot(self.RB)[:, :self.nosc]).dot(Params.alpha)
         #     self._G = lambda y=None: np.array(Params.alpha) if y is None else y.dot(self.RB)[:, self.nosc:].dot(Params.alpha)
@@ -86,14 +94,13 @@ class MechSystem(object):
             raise ValueError('Energy is only defined for beta = 0')
 
         Omega2, nosc = self.Omega2, self.nosc
-        # if self.RB is not None:
-        #     y = self.RB.dot(y)
         x, u = y[:, :nosc], y[:, nosc:]
 
         T = lambda u: sum((u**2), axis=1)/2.0
         V = lambda x: -sum(Omega2.dot(cos(x).T), axis=0)
         E = lambda x, u: V(x) +T(u)
-        return E(x, u) - E(reshape(x[0, :], (1, nosc)), reshape(u[0, :], (1, nosc)))
+        return log(E(x, u)/E(x[0:1, :], u[None, 0, :]))
+        #return E(x, u) -E(x[0:1, :], u[None, 0, :])
 
 #%% Solve the system and find convergence rates
 class MechSystemSolver(object):
@@ -118,15 +125,17 @@ class MechSystemSolver(object):
             NameError('Unknown solver class - %s' % method.__name__)
 
     def solve(self):
-        if self.RB is None:
-            nosc2 = 2*self.f.nosc
-        else:
-            nosc2 = self.RB.shape[0] # 2*nosc
+        nosc = self.f.nosc
             
         self.n = int(round(self.f.T/self.dt))
 
         self.t_points = linspace(0, self.f.T, self.n+1)
-        self.y = np.zeros((self.n+1, nosc2))
+        
+        if self.RB is None:
+            self.y = np.zeros((self.n+1, 2*nosc))
+        else:
+            self.y = np.zeros((self.n+1, self.RB.shape[0]))
+            
         self.y[0] = self.f.u_init
         if self.store: self.info = []
 
@@ -169,33 +178,32 @@ class MechSystemSolver(object):
 #                 y_[1, nosc:] = U
 # =============================================================================
                 
-                
-                m = 0
                 if self.RB is None:
                     X_U = y_[1]
                 else:
                     X_U = y_.dot(self.RB)[1]
-                X_U = reshape(X_U, (1, 2*self.f.nosc))
-                Delta_LambdaX, Delta_LambdaU = self.f._g(X_U), self.f._G(X_U)
-                
-                if self.store: self.info.append((X_U, Delta_LambdaX, Delta_LambdaU, m))
-
-                while abs(max((Delta_LambdaX, Delta_LambdaU))) > self.tol and m <= self.M:
-                    X_U = X_U -r_[np.transpose(self.f._G())*Delta_LambdaX, np.transpose(self.f._G())*Delta_LambdaU]
-
-                    m += 1
-                    # if self.RB is not None:
-                    #     X_U = X_U.dot(self.RB.T)
-                        
-                    Delta_LambdaX, Delta_LambdaU = self.f._g(X_U), self.f._G(X_U)
+                X_U = reshape(X_U, (1, -1))
+                    
+                if self.f.constraint_type == 'linear':
+                    m, Delta_LambdaX, Delta_LambdaU = 0, self.f._g(X_U), self.f._G(X_U)
+                    
                     if self.store: self.info.append((X_U, Delta_LambdaX, Delta_LambdaU, m))
-
+    
+                    while abs(max((Delta_LambdaX, Delta_LambdaU))) > self.tol and m <= self.M:
+                        X_U = X_U -r_[np.transpose(self.f._G())*Delta_LambdaX, np.transpose(self.f._G())*Delta_LambdaU]
+    
+                        m, Delta_LambdaX, Delta_LambdaU = m+1, self.f._g(X_U), self.f._G(X_U)
+                        if self.store: self.info.append((X_U, Delta_LambdaX, Delta_LambdaU, m))
+                    
+                else:
+                    X = optimize.root(self.f._g, X_U[:, :nosc], method='broyden1')
+                    U = optimize.root(lambda y: self.f._G(c_[X,y]), X_U[:, nosc:], method='broyden1')
+                    X_U = c_[X, U]
+                    raise NotImplementedError
+                
                 y_[1] = X_U if self.RB is None else X_U.dot(self.RB.T)
 
-            if self.RB is None:
-                self.y[k+1] = reshape(X_U, (nosc2,))
-            else:
-                self.y[k+1] = reshape(X_U.dot(self.RB.T), (nosc2,))
+            self.y[k+1] = y_[1]
 
         if self.RB is not None: self.y = self.y.dot(self.RB)
         
@@ -225,27 +233,27 @@ class MechSystemSolver(object):
             self.sym_error.append(self.solver.symplectic_error(self.dpsi, self.t_points))
 
         if not self.f.beta:
-            self.eng_error = sqrt(self.dt)*LA.norm(self.f.en_err(self.y))
+            self.eng_error.append(self.f.en_err(self.y))
 
     def plot(self, fig, tile=131):
         "plot the results"
         ax = fig.add_subplot(tile)
-        if not self.f.beta:
-            plot_data(ax, self.t_points, np.array([reshape(self.sym_error[-1:],(self.n+1,)), self.f.en_err(self.y), self.f._g(self.y), self.f._G(self.y)]).T, True, True)
+        if hasattr(self, 'eng_error'):
+            plot_data(ax, self.t_points, c_[self.sym_error[-1], self.eng_error[-1], self.f._g(self.y), self.f._G(self.y)])
             # ax2.legend([r'$\boldmath{E}_{cs}$', r'$\boldmath{E}_I$', r'$\bolmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], loc=1)
             fig.legend([r'$\boldmath{E}_{cs}$', r'$\boldmath{E}_I$', r'$\boldmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], \
                        bbox_to_anchor=(0.5,-0.08), loc='lower center',ncol=2,bbox_transform=fig.transFigure)
         elif self.var:
-            plot_data(ax, self.t_points, np.array([reshape(self.sym_error[-1:],(self.n+1,)), self.f._g(self.y), self.f._G(self.y)]).T, True, True)
+            plot_data(ax, self.t_points, c_[self.sym_error[-1], self.f._g(self.y), self.f._G(self.y)])
             # ax2.legend([r'$\boldmath{E}_{cs}$', r'$\bolmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], loc=1)
             fig.legend([r'$\boldmath{E}_{cs}$', r'$\boldmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], \
                        bbox_to_anchor=(0.5,-0.08), loc='lower center',ncol=3,bbox_transform=fig.transFigure)
         ax.set_xlabel('time')
 
         ax = fig.add_subplot(tile+1)
-        plot_data(ax, self.t_points, self.y[:,:self.f.nosc], True, True)
+        plot_data(ax, self.t_points, self.y[:,:self.f.nosc])
         ax = fig.add_subplot(tile+2)
-        plot_data(ax, self.t_points, self.y[:,self.f.nosc:], True, True)
+        plot_data(ax, self.t_points, self.y[:,self.f.nosc:])
 
         # fig.savefig('app5_err_inv.pdf', bbox_inches='tight')
 
@@ -260,25 +268,33 @@ def demo1(registered_solver_classes=[ODESolver.ConformalImplicitMidpoint], nosc=
             self.Omega = list(linspace(1,5,num=nosc))
             alpha = list(linspace(0.001,0.01,num=nosc))
             alpha[-1] = sqrt(1 -sum(np.array(alpha[:-1])**2))
+            assert np.isclose(np.array(alpha).dot(alpha), 1), "alpha**2 must be equal to 1"
             self.alpha = alpha
-            self.beta = 0.1
+            self.beta = 0.
+            self.constraint_type = 'linear'
             
-            y_init = list(linspace(0.1,0.5,num=nosc)) +list(np.zeros(nosc))
-            y_init[nosc-1] = -(np.array(y_init[:nosc-1]).dot(alpha[:nosc-1]))/alpha[nosc-1] # project on the manifold
-            self.y_init = y_init
+            y_init = r_[linspace(0.1,0.5,num=nosc), np.zeros(nosc)]
+            
+            if self.constraint_type == 'linear':
+                y_init[nosc-1] = -(y_init[:nosc-1].dot(alpha[:nosc-1]))/alpha[nosc-1] # project on the manifold
+                assert np.isclose(y_init[:nosc].dot(alpha[:nosc]), 0), "alpha:y should be 0" 
+            else:
+                y_init[nosc-1] = sqrt((1- (y_init[:nosc-1]**2).dot(alpha[:nosc-1]))/alpha[nosc-1]) # project on the manifold
+                assert np.isclose((y_init[:nosc]**2).dot(alpha[:nosc]), 1), "alpha:y^2 should be 1" 
+                
+            self.y_init = y_init if RB is None else y_init.dot(RB.T)
             
             self.RB = RB            
-            if RB is not None:
-                self.y_init = np.asarray(y_init).dot(RB.T)
-            
-            self.T_final = 1
-            self.dt_space = concatenate(([], linspace(0.005, 0.05, num=5)))
+             
+            self.T_final = 0.5
+            self.dt_space = concatenate(([], linspace(0.05, 0.1, num=5)))
             
             w_values = [0.28, 0.62546642846767004501]
             w_values.append(1.0 -2.0*(sum(w_values)))
             w_values.append(w_values[1])
             w_values.append(w_values[0])
-            w_values = [1]
+            #w_values = [1]
+            assert np.isclose(sum(w_values), 1), 'sum_i w_i must be 1'
             self.w_values = w_values
             
             self.tol, self.M, self.var, self.store = 1.0E-14, 100, True, False
@@ -292,19 +308,20 @@ def demo1(registered_solver_classes=[ODESolver.ConformalImplicitMidpoint], nosc=
             start = timer()
             MSsolver.solve()
             end = timer()
-            print(end -start)
+            print('Execution time: %s' %(end-start))
 
-            eng_error.append(MSsolver.eng_error)
-            sym_error.append(sqrt(dt)*LA.norm(MSsolver.sym_error))
+            if params.dt_space.size > 1:
+                eng_error.append(sqrt(dt)*LA.norm(MSsolver.eng_error))
+                sym_error.append(sqrt(dt)*LA.norm(MSsolver.sym_error))
 
         # Estimate Convergence rate r and coefficient C
         r_form = lambda numer, denom: (log(roll(numer, -1)/numer)/log(roll(denom, -1)/denom))[:-1]
         C_form = lambda numer, denom, r: numer[:-1]/(denom[:-1]**r)
-        if not params.beta and params.dt_space.size > 1:
+        if 'eng_error' in locals():
             r_values.append(r_form(eng_error,params.dt_space))
             C_values.append(C_form(eng_error,params.dt_space,r_values[-1]))
             
-        if params.dt_space.size > 1:
+        if solver_class == ODESolver.ImplicitMidpoint and params.beta != 0 and 'sym_error' in locals():
             r_values.append(r_form(sym_error,params.dt_space))
             C_values.append(C_form(sym_error,params.dt_space,r_values[-1]))
 
@@ -313,7 +330,7 @@ def demo1(registered_solver_classes=[ODESolver.ConformalImplicitMidpoint], nosc=
 
     # Display convergence table
     if params.dt_space.size > 1:
-        temp = r_[ reshape(params.dt_space, (1,params.dt_space.size)), c_[np.reshape([np.float('nan')]*len(r_values), (len(r_values),1)), r_values]].T
+        temp = r_[ reshape(params.dt_space, (1,-1)), c_[np.reshape([float('nan')]*len(r_values), (len(r_values),1)), r_values]].T
         # temp = np.array((params.dt_space, np.concatenate(([np.float('nan')],r_values[0])),\
         #                   np.concatenate(([np.float('nan')], r_values[1])))).T
         # temp = np.asarray([params.dt_space, [np.float('nan')]+r_values[0], [np.float('nan')]+r_values[1]]).T
@@ -324,14 +341,14 @@ def demo1(registered_solver_classes=[ODESolver.ConformalImplicitMidpoint], nosc=
 
 #%% MOR
 def mor_demo():
-    registered_solver_classes = [ODESolver.ConformalImplicitMidpoint]
+    registered_solver_classes = [ODESolver.ImplicitMidpoint]
     
     y = demo1(registered_solver_classes, nosc=100)
     
     u, s, vh = LA.svd(y, full_matrices=False)
-    print np.allclose(y, np.dot(u * s, vh))
+    assert np.allclose(y, np.dot(u * s, vh)), "SVD was unsuccessful"
     smat = np.diag(s)
-    print np.allclose(y, np.dot(u, np.dot(smat, vh)))
+    assert np.allclose(y, np.dot(u, np.dot(smat, vh))), "SVD was unsuccessful"
     
     fig = figure()
     ax = fig.add_subplot(111)
@@ -340,5 +357,8 @@ def mor_demo():
     nosc_r = 5
     RB = vh[:nosc_r, :]
     y_r = demo1(registered_solver_classes, nosc=100, RB=RB)
-    print np.amax(abs(y-y_r))
+    print(np.amax(abs(y-y_r)))
     
+
+if __name__ == '__main__':
+    mor_demo()

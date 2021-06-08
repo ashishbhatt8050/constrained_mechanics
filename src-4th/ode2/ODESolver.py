@@ -1,5 +1,5 @@
 import numpy as np
-from scitools.std import *
+from pylab import *
 from numpy import linalg as LA
 
 class ODESolver(object):
@@ -41,7 +41,7 @@ class ODESolver(object):
         try:
             f0 = self.f(self.U0, 0)
         except IndexError:
-            raise IndexError('Index of u out of bounds in f(u,t) func. Legal indices are %s' % (str(range(self.neq))))
+            raise IndexError('Index of u out of bounds in f(u,t) func. Legal indices are %s' % (str(list(range(self.neq)))))
         if f0.size != self.neq:
             raise ValueError('f(u,t) returns %d components, while u has %d components' % (f0.size, self.neq))
 
@@ -122,15 +122,15 @@ class ODESolver(object):
         Ecoeff = self.Ecoeff
         neq = self.neq
 
-        J_mat = np.concatenate([np.concatenate([np.zeros((neq/2,neq/2)), np.eye(neq/2)], axis=1)\
-                          ,np.concatenate([-np.eye(neq/2), np.zeros((neq/2,neq/2))], axis=1)])
+        J_mat = np.concatenate([np.concatenate([np.zeros((neq//2,neq//2)), np.eye(neq//2)], axis=1)\
+                          ,np.concatenate([-np.eye(neq//2), np.zeros((neq//2,neq//2))], axis=1)])
         J_mat_inv = J_mat.T
         symp_error = np.zeros(n)
 
         for k in range(n-1):
             dt = t[k+1] -t[k]
             symp_error[k+1] = LA.norm((du[k+1].T).dot(J_mat_inv.dot(du[k+1])) -Ecoeff(-dt)**4*J_mat_inv)
-
+            
         return symp_error
 
 class ForwardEuler(ODESolver):
@@ -156,7 +156,7 @@ class ConformalStormerVerlet(ODESolver):
     def __init__(self, f):
         ODESolver.__init__(self, f)
 
-        self.Ecoeff = lambda dt: exp(f.beta*dt/2)
+        self.Ecoeff = lambda dt: np.exp(f.beta*dt/2)
 
     def advance(self):
         u, f, k, t, Ecoeff, neq = self.u, self.f, self.k, self.t, self.Ecoeff, \
@@ -206,7 +206,7 @@ Could not import module "Newton". Place Newton.py in this directory
 
             self.discrete_derivative =True
         else:
-            neq = size(f.u_init)
+            neq = np.size(f.u_init)
             self.discrete_derivative = False
             self.dfdw = lambda u, t, dt: np.eye(neq)-dt*np.asarray(dfdu(u, t, dt), float)
 
@@ -230,8 +230,8 @@ Could not import module "Newton". Place Newton.py in this directory
             self.Newton_iter = []
         self.Newton_iter.append(n)
         if n >= 30:
-            print "Newton's failed to converge at t=%g "\
-                  "(%d iterations)" % (t[k+1], n)
+            print("Newton's failed to converge at t=%g "\
+                  "(%d iterations)" % (t[k+1], n))
         return u_new
 
 class ImplicitMidpoint(ODESolver):
@@ -240,7 +240,7 @@ class ImplicitMidpoint(ODESolver):
         self.dfdu = lambda u, t: np.asarray(dfdu(u,t), float)
 
         # Define Ecoeff for computing symplectic error
-        self.Ecoeff = lambda dt: exp(f.beta*dt/4)
+        self.Ecoeff = lambda dt: np.exp(f.beta*dt/4)
 
         # BackwardEuler needs to import function Newton from Newton.py:
         try:
@@ -261,7 +261,7 @@ Could not import module "Newton". Place Newton.py in this directory
 
             self.discrete_derivative =True
         else:
-            neq = size(f.u_init)
+            neq = np.size(f.u_init)
             self.discrete_derivative = False
             self.dfdw = lambda u, t, dt: \
                             np.eye(neq)-dt/2*np.asarray(dfdu((u[1]+u[0])/2, (t[1]+t[0])/2, dt), float)
@@ -286,8 +286,8 @@ Could not import module "Newton". Place Newton.py in this directory
             self.Newton_iter = []
         self.Newton_iter.append(n)
         if n >= 30:
-            print "Newton's failed to converge at t=%g "\
-                  "(%d iterations)" % (t[k+1], n)
+            print("Newton's failed to converge at t=%g "\
+                  "(%d iterations)" % (t[k+1], n))
         return u_new
 
     def var_advance(self):
@@ -303,7 +303,7 @@ class ConformalImplicitMidpoint(ODESolver):
         ODESolver.__init__(self, f)
 
         self.beta = f.beta
-        self.Ecoeff = Ecoeff = lambda dt: exp(f.beta*dt/4)
+        self.Ecoeff = Ecoeff = lambda dt: np.exp(f.beta*dt/4)
         self.dfdu = lambda u, t: np.asarray(dfdu(u, t), float)
 
         # BackwardEuler needs to import function Newton from Newton.py:
@@ -326,7 +326,7 @@ class ConformalImplicitMidpoint(ODESolver):
             self.discrete_derivative =True
         else:
             self.discrete_derivative = False
-            neq = size(f.u_init)
+            neq = np.size(f.u_init)
             self.dfdw = lambda u, t, dt: \
                             Ecoeff(dt)*(np.eye(neq)-dt/2*np.asarray(dfdu((Ecoeff(dt)*u[1] +Ecoeff(-dt)*u[0])/2, (Ecoeff(dt)*t[1] +Ecoeff(-dt)*t[0])/2, dt), float))
 
@@ -351,8 +351,8 @@ class ConformalImplicitMidpoint(ODESolver):
             self.Newton_iter = []
         self.Newton_iter.append(n)
         if n >= 30:
-            print "Newton's failed to converge at t=%g "\
-                  "(%d iterations)" % (t[k+1], n)
+            print("Newton's failed to converge at t=%g "\
+                  "(%d iterations)" % (t[k+1], n))
         return u_new
 
     def var_advance(self):
@@ -373,6 +373,7 @@ class Derivative:
         f, h = self.f, self.h      # make short forms
         return (f(x+h) - f(x-h))/(2*h)
 
+#%% Testing
 def test_exact_numerical_solution():
     a = 0.2; b = 3
     alg = lambda solver_class: solver_class.__name__

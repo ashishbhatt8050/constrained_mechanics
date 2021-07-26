@@ -39,11 +39,16 @@ class MechSystem(object):
         self.RB = Params.RB
         # if self.RB is None:
         if Params.constraint_type == 'linear':
-            self._g = lambda y: y[:, :self.nosc].dot(self.alpha)
-            self._G = lambda y=None: np.array(self.alpha) if y is None else y[:, self.nosc:].dot(self.alpha)
+            self._g = lambda y: r_[y[:, :self.nosc].dot(self.alpha), y[:, self.nosc:].dot(self.alpha)]
+            self._g_prime = lambda y: r_[c_[np.array(self.alpha, ndmin=2), zeros((1,self.nosc))],\
+                                        c_[zeros((1,self.nosc)), np.array(self.alpha, ndmin=2)]]
+            #self._G = lambda y=None: np.array(self.alpha) if y is None else y[:, self.nosc:].dot(self.alpha)
         else:
-            self._g = lambda y: (y[:, :self.nosc]**2).dot(self.alpha) -1.0
-            self._G = lambda y: sum(y[:, self.nosc:]*(2*y[:, :self.nosc]*np.array(self.alpha)), axis=1)
+            self._g = lambda y: r_[(y[:, :self.nosc]**2).dot(self.alpha) -1.0,\
+                                   diag(y[:, self.nosc:].dot((2*y[:, :self.nosc]*self.alpha).T)).reshape(-1)]
+            self._g_prime = lambda y: r_[c_[2*y[:, :self.nosc]*self.alpha, zeros((1,self.nosc))],\
+                                         c_[zeros((1,self.nosc)), 2*y[:, :self.nosc]*self.alpha]]
+            #self._G = lambda y: sum(y[:, self.nosc:]*(2*y[:, :self.nosc]*np.array(self.alpha)), axis=1)
         
         # else:
         #     self._g = lambda y: (y.dot(self.RB)[:, :self.nosc]).dot(Params.alpha)
@@ -179,21 +184,22 @@ class MechSystemSolver(object):
 # =============================================================================
                 
                 if self.RB is None:
-                    X_U = y_[1]
+                    X_U = y_
                 else:
-                    X_U = y_.dot(self.RB)[1]
-                X_U = reshape(X_U, (1, -1))
+                    X_U = y_.dot(self.RB)
+                #X_U = reshape(X_U, (1, -1))
                     
-                if self.f.constraint_type == 'linear':
-                    m, Delta_LambdaX, Delta_LambdaU = 0, self.f._g(X_U), self.f._G(X_U)
+                if self.f.constraint_type == self.f.constraint_type:
+                    m, Delta_Lambda = 0, self.f._g(X_U[1:2])/sum(self.f._g_prime(X_U[1:2])*self.f._g_prime(X_U[0:1]), axis=1)
                     
-                    if self.store: self.info.append((X_U, Delta_LambdaX, Delta_LambdaU, m))
+                    if self.store: self.info.append((m, Delta_Lambda, X_U[1]))
     
-                    while abs(max((Delta_LambdaX, Delta_LambdaU))) > self.tol and m <= self.M:
-                        X_U = X_U -r_[np.transpose(self.f._G())*Delta_LambdaX, np.transpose(self.f._G())*Delta_LambdaU]
+                    while max(abs(self.f._g(X_U))) > self.tol and m < self.M:
+                        X_U[1] = X_U[1] -self.f._g_prime(X_U[0:1]).T.dot(Delta_Lambda)
     
-                        m, Delta_LambdaX, Delta_LambdaU = m+1, self.f._g(X_U), self.f._G(X_U)
-                        if self.store: self.info.append((X_U, Delta_LambdaX, Delta_LambdaU, m))
+                        m, Delta_Lambda = m+1, self.f._g(X_U[1:2])/sum(self.f._g_prime(X_U[1:2])*self.f._g_prime(X_U[0:1]), axis=1)
+                        if self.store: self.info.append((m, Delta_Lambda, X_U[1]))
+                    assert m <= self.M, "Constraints not satisfied"
                     
                 else:
                     X = optimize.root(self.f._g, X_U[:, :nosc], method='broyden1')
@@ -201,7 +207,7 @@ class MechSystemSolver(object):
                     X_U = c_[X, U]
                     raise NotImplementedError
                 
-                y_[1] = X_U if self.RB is None else X_U.dot(self.RB.T)
+                y_[1] = X_U[1] if self.RB is None else X_U[1].dot(self.RB.T)
 
             self.y[k+1] = y_[1]
 
@@ -237,25 +243,45 @@ class MechSystemSolver(object):
 
     def plot(self, fig, tile=131):
         "plot the results"
-        ax = fig.add_subplot(tile)
-        if hasattr(self, 'eng_error'):
-            plot_data(ax, self.t_points, c_[self.sym_error[-1], self.eng_error[-1], self.f._g(self.y), self.f._G(self.y)])
-            # ax2.legend([r'$\boldmath{E}_{cs}$', r'$\boldmath{E}_I$', r'$\bolmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], loc=1)
-            fig.legend([r'$\boldmath{E}_{cs}$', r'$\boldmath{E}_I$', r'$\boldmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], \
-                       bbox_to_anchor=(0.5,-0.08), loc='lower center',ncol=2,bbox_transform=fig.transFigure)
-        elif self.var:
-            plot_data(ax, self.t_points, c_[self.sym_error[-1], self.f._g(self.y), self.f._G(self.y)])
-            # ax2.legend([r'$\boldmath{E}_{cs}$', r'$\bolmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], loc=1)
-            fig.legend([r'$\boldmath{E}_{cs}$', r'$\boldmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], \
-                       bbox_to_anchor=(0.5,-0.08), loc='lower center',ncol=3,bbox_transform=fig.transFigure)
-        ax.set_xlabel('time')
+                
+        # ax = fig.add_subplot(tile)
+        
+        # if hasattr(self, 'eng_error'):
+        #     plot_data(ax, self.t_points, c_[self.sym_error[-1], self.eng_error[-1], self.f._g(self.y).reshape(2,-1).T])
+        #     # ax2.legend([r'$\boldmath{E}_{cs}$', r'$\boldmath{E}_I$', r'$\bolmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], loc=1)
+        #     fig.legend([r'$\boldmath{E}_{cs}$', r'$\boldmath{E}_I$', r'$\boldmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], \
+        #                bbox_to_anchor=(0.5,-0.08), loc='lower center',ncol=2,bbox_transform=fig.transFigure)
+                
+        # elif self.var:
+        #     plot_data(ax, self.t_points, c_[self.sym_error[-1], self.f._g(self.y).reshape(2,-1).T])
+        #     # ax2.legend([r'$\boldmath{E}_{cs}$', r'$\bolmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], loc=1)
+        #     fig.legend([r'$\boldmath{E}_{cs}$', r'$\boldmath{g}(\boldmath{q}^{n+1})$', r'$\boldmath{G}^\top \boldmath{p}^{n+1}$'], \
+        #                bbox_to_anchor=(0.5,-0.08), loc='lower center',ncol=3,bbox_transform=fig.transFigure)
+        # ax.set_xlabel('time')
 
-        ax = fig.add_subplot(tile+1)
-        plot_data(ax, self.t_points, self.y[:,:self.f.nosc])
-        ax = fig.add_subplot(tile+2)
-        plot_data(ax, self.t_points, self.y[:,self.f.nosc:])
+        # ax = fig.add_subplot(tile+1)
+        # plot_data(ax, self.t_points, self.y[:,:self.f.nosc])
+        # ax = fig.add_subplot(tile+2)
+        # plot_data(ax, self.t_points, self.y[:,self.f.nosc:])
 
         # fig.savefig('app5_err_inv.pdf', bbox_inches='tight')
+        
+        gs = fig.add_gridspec(4, 2, hspace=1)
+        ax = gs.subplots(sharex=True)
+        if hasattr(self, 'sym_error'):
+            plot_data(ax[0,0], self.t_points, self.sym_error[-1])
+        if hasattr(self, 'eng_error'):
+            plot_data(ax[1,0], self.t_points, self.eng_error[-1])
+            
+        plot_data(ax[2,0], self.t_points, self.f._g(self.y).reshape(2,-1)[0])
+        plot_data(ax[3,0], self.t_points, self.f._g(self.y).reshape(2,-1)[1])
+        ax[3,0].set_xlabel('time')
+        plot_data(ax[0,1], self.t_points, self.y[:,:self.f.nosc])
+        plot_data(ax[1,1], self.t_points, self.y[:,self.f.nosc:])
+        ax[3,1].set_xlabel('time')
+        
+        for ax in fig.get_axes():
+            ax.label_outer()
 
 #%% Convergence analysis
 def demo1(registered_solver_classes=[ODESolver.ConformalImplicitMidpoint], nosc=100, RB=None):
@@ -271,7 +297,7 @@ def demo1(registered_solver_classes=[ODESolver.ConformalImplicitMidpoint], nosc=
             assert np.isclose(np.array(alpha).dot(alpha), 1), "alpha**2 must be equal to 1"
             self.alpha = alpha
             self.beta = 0.
-            self.constraint_type = 'linear'
+            self.constraint_type = 'spherical'
             
             y_init = r_[linspace(0.1,0.5,num=nosc), np.zeros(nosc)]
             

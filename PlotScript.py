@@ -72,6 +72,18 @@ def plot_data(ax, x_data, y_data, use_y_labels=True, use_legend=False):
 
 def tex_table(solver_name, array2print):
     print(solver_name, "\n", " \\\\\n".join([" & ".join(map('{0:.3f}'.format, line)) for line in array2print]))
+    
+
+    
+def plot_3dsurface(fig, ax, xx, yy, zz):
+    surf = ax.plot_surface(xx, yy, zz,\
+                           cmap = cm.coolwarm, linewidth=0, antialiased=False)
+    fig.colorbar(surf, shrink=0.5, aspect=5)
+    cset = ax.contour(xx, yy, zz, zdir='z', offset=-1, cmap=cm.coolwarm)
+    ax.view_init(30, -135)
+    ax.set_xticks([0,1])
+    ax.set_yticks([0,1])
+    ax.set_zlim3d(-1, abs(zz).max())
 
 #%% Testing
 def test_PlotScript():

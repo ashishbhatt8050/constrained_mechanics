@@ -99,6 +99,7 @@ class ODESolver(object):
         if self.neq%2 == 1:  # odd number of equations
             raise ValueError('ODESolver.var_solve requires even number of equations')
         else:              # systems of ODEs
+            # TODO: define sparse arrays
             self.du = np.zeros((n, self.neq, self.neq))
             self.I_mat = np.eye(self.neq)
 
@@ -237,7 +238,10 @@ Could not import module "Newton". Place Newton.py in this directory
 class ImplicitMidpoint(ODESolver):
     def __init__(self, f, dfdu=None):
         ODESolver.__init__(self, f)
-        self.dfdu = lambda u, t: np.asarray(dfdu(u,t), float)
+        # try:
+        #     self.dfdu = lambda u, t: np.asarray(dfdu(u,t), float)
+        # except (TypeError, ValueError):
+        self.dfdu = lambda u, t: dfdu(u,t)
 
         # Define Ecoeff for computing symplectic error
         self.Ecoeff = lambda dt: np.exp(f.beta*dt/4)
@@ -263,8 +267,12 @@ Could not import module "Newton". Place Newton.py in this directory
         else:
             neq = np.size(f.u_init)
             self.discrete_derivative = False
+            # try:
+            #     self.dfdw = lambda u, t, dt: \
+            #                     np.eye(neq)-dt/2*np.asarray(dfdu((u[1]+u[0])/2, (t[1]+t[0])/2, dt), float)
+            # except TypeError:
             self.dfdw = lambda u, t, dt: \
-                            np.eye(neq)-dt/2*np.asarray(dfdu((u[1]+u[0])/2, (t[1]+t[0])/2, dt), float)
+                            np.eye(neq)-dt/2*dfdu((u[1]+u[0])/2, (t[1]+t[0])/2, dt)
 
     def advance(self):
         u, f, k, t = self.u, self.f, self.k, self.t

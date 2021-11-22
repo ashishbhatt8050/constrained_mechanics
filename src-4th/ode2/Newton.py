@@ -1,21 +1,33 @@
-from numpy import linalg as LA
+import numpy as np
+import scipy as sp
+from pylab import sum
+from scipy.sparse import issparse
+from scipy.sparse.linalg import spsolve, ArpackNoConvergence, ArpackError
 
 def Newton(f, x, dfdx, epsilon=1.0E-7, N=100, store=False):
     f_value = f(x)
     n = 0
-    if store: info = [(x, f_value, LA.norm(dfdx(x)))]
-    while LA.norm(f_value) > epsilon and n <= N:
+    if store: info = [(x, f_value, np.linalg.norm(dfdx(x)))]
+    while np.linalg.norm(f_value) > epsilon and n <= N:
         dfdx_value = dfdx(x)
-        if LA.norm(dfdx_value) < 1E-14:
-            raise ValueError("Newton: f'(%g)=%g" % (x, LA.norm(dfdx_value)))
+        if np.linalg.norm(dfdx_value) < 1E-14:
+            raise ValueError("Newton: f'(%g)=%g" % (x, np.linalg.norm(dfdx_value)))
 
-        try:
-            x = x - LA.solve(dfdx_value, f_value)
-        except LA.LinAlgError:
-            x = x - f_value/dfdx_value
-        except:
-            raise LA.LinAlgError("Unable to solve the system")
-
+        if not issparse(dfdx_value):
+            try:
+                x = x - np.linalg.solve(dfdx_value, f_value)
+            except np.linalg.LinAlgError:
+                x = x - f_value/dfdx_value
+            except:
+                raise np.linalg.LinAlgError("Unable to solve the system")
+        else:
+            try:
+                x = x - sp.linalg.solve(dfdx_value.todense(), f_value)
+            except sp.linalg.LinAlgError:
+                x = x - f_value/dfdx_value
+            except:
+                raise ArpackError("Unable to solve the sparse system")
+            
         n += 1
         f_value = f(x)
         if store: info.append((x, f_value, dfdx_value))
@@ -23,6 +35,33 @@ def Newton(f, x, dfdx, epsilon=1.0E-7, N=100, store=False):
         return x, info
     else:
         return x, n, f_value
+    
+def fixed_point(g, x, dgdx, tol, M, store):
+    # TODO: convert * to matrix multiplication
+    # update x[0] below
+    # try to avoid .T
+    # m, Delta_Lambda = 0, g(x[1:2])/sum(dgdx(x[1:2])*dgdx(x[0:1]), axis=1)
+    m, Delta_Lambda = 0, g(x[1:2])/((dgdx(x[1:2]).dot(dgdx(x[0:1]).T)).diagonal())
+    
+    if store: info = [(m, Delta_Lambda, x[1])]
+
+    while ((max(abs(g(x))) > tol) and (m < M)):
+        x[1] = x[1] -dgdx(x[0:1]).T.dot(Delta_Lambda)
+
+        # m, Delta_Lambda = m+1, g(x[1:2])/sum(dgdx(x[1:2])*dgdx(x[0:1]), axis=1)
+        m, Delta_Lambda = m+1, g(x[1:2])/((dgdx(x[1:2]).dot(dgdx(x[0:1]).T)).diagonal())
+        x[0] = x[1] # TODO: needs further justification
+        if store: info.append((m, Delta_Lambda, x[1]))
+        
+    # print('%s' %m)
+        
+    assert m < M, "Nonlinear solver did not converge"
+    
+    
+    if store:
+        return x, info
+    else:
+        return x, m, g(x[1:2])
 
 #%% Testing
 from numpy import sin, cos, exp, linspace, pi, array

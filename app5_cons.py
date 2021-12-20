@@ -16,8 +16,9 @@ import ODESolver
 from podDEIM import rb_svd, DEIM
 from PlotScript import plot_data, tex_table
 from timeit import default_timer as timer
-from scipy import optimize
+from time import process_time
 from scipy.sparse import block_diag, identity, bmat, diags
+import gc
 
 from Newton import fixed_point
 
@@ -28,18 +29,29 @@ class Params(object):
         "Oscillator properties"
         self.nosc = nosc = kwds['nosc']
             
-        self.Omega2 = linspace(1,1.5,num=nosc)**2
+        self.Omega2_space_dim = 1
+        self.Omega2_space = [np.linspace(1,2,nosc)]
+        # self.Omega2_space = [(1 +np.random.rand(nosc))**2 for i in range(self.Omega2_space_dim)]
+        self.Omega2 = None
         alpha = list(linspace(0.1,0.5,num=nosc))
         alpha /= sqrt(sum(np.array(alpha)**2))
         assert np.isclose(np.array(alpha).dot(alpha), 1), "alpha**2 must be equal to 1"
         self.alpha = alpha
-        self.beta = 0.1
-        self.constraint_type = 'spherical'
+        self.beta = (1e-10 +np.random.rand())*0
+        self.constraint_type = None
         self.f2 = lambda y: sin(y)
-        self.f2_jac = lambda y: cos(y)
+        self.f2_jac = lambda y: diag(cos(y))
+
+        "Energy"
+        kin = lambda u: sum((u**2), axis=1)/2.0
+        pot = lambda x, Omega2: -sum(array([diag(self.f2_jac(Omega2*x[i])) for i in range(x.shape[0])]), axis=1) 
+        self.E = lambda x, u, Omega2: pot(x, Omega2) +kin(u)
         
         "Initial conditions"
-        y_init = r_[linspace(1,5,num=nosc), np.zeros(nosc)]
+        # temp = True
+        # while temp:
+        y_init = r_[np.linspace(1,5,nosc), np.zeros(nosc)]
+        # y_init = r_[1 +4*np.random.rand(nosc), np.zeros(nosc)]
         
         if self.constraint_type == 'linear':
             y_init[nosc-1] = -(y_init[:nosc-1].dot(alpha[:nosc-1]))/alpha[nosc-1] # project on the manifold
@@ -47,6 +59,18 @@ class Params(object):
         elif self.constraint_type == 'spherical':
             y_init /= sqrt((y_init[:nosc]**2).dot(alpha[:nosc])) # project on the manifold
             assert np.isclose((y_init[:nosc]**2).dot(alpha[:nosc]), 1), "alpha:y^2 should be 1" 
+        elif self.constraint_type == None:
+            pass
+        else:
+            raise NameError
+                
+            # for Omega2 in self.Omega2_space:
+                
+            #     if np.isclose(pot(y_init[:nosc].reshape(1,nosc), Omega2),0):
+            #         print('Energy is zero')
+            #         if np.array_equal(Omega2, self.Omega2_space[-1]):
+            #             temp = False
+            #         break
             
         self.y_init = y_init
         
@@ -56,7 +80,7 @@ class Params(object):
             # self._g_prime = lambda y: r_[c_[np.array(alpha, ndmin=2), zeros((1,nosc))],\
             #                             c_[zeros((1,nosc)), np.array(alpha, ndmin=2)]]
             self._g_prime = lambda y: block_diag((np.array(alpha, ndmin=2), np.array(alpha, ndmin=2)), format="csr")
-        else:
+        elif self.constraint_type == 'spherical':
             self._g = lambda y: r_[(y[:, :nosc]**2).dot(alpha) -1.0,\
                                    diag(y[:, nosc:].dot((2*y[:, :nosc]*alpha).T)).reshape(-1)]
             # self._g_prime = lambda y: r_[c_[2*y[:, :nosc]*alpha, zeros((1,nosc))],\
@@ -81,16 +105,17 @@ class Params(object):
         else:
             self.P = None
         
-        "Numerical solver ant its properties"
+        "Numerical solver and its properties"
         self.registered_solver_classes = kwds['registered_solver_classes']
             
         self.solver_class = kwds['solver_class']
         
-        self.dt_space = linspace(0.05, 0.1, num=5)
+        self.dt_space_dim = 5
+        self.dt_space = linspace(0.05, 0.1, num=self.dt_space_dim)
         
         self.dt = None
          
-        self.T_final = 2
+        self.T_final = 10
         
         w_values = [0.28, 0.62546642846767004501]
         w_values.append(1.0 -2.0*(sum(w_values)))
@@ -113,6 +138,11 @@ class Params(object):
         "various measures"
         self.r_values, self.C_values = [], []
         self.sym_error_, self.eng_error_ = [], []
+        self.time_lapsed = []
+        
+        
+        self.r_form = lambda numer, denom: (log(roll(numer, -1)/numer)/log(roll(denom, -1)/denom))[:-1]
+        self.C_form = lambda numer, denom, r: numer[:-1]/(denom[:-1]**r)
 
     "y_init alias"
     @property
@@ -158,7 +188,6 @@ class MechSystem(Params):
             return f
 
     def jacobian(self, y, t, *arg):
-        # TODO: what is purpose of dt=0?
         "Jacobian of the function f"
         Omega2, beta, f2_jac = self.Omega2, self.beta, self.f2_jac
         P, U, RB = self.P, self.U, self.RB
@@ -169,19 +198,17 @@ class MechSystem(Params):
         nosc = len(x)
         
         if P is not None:
-            f_hat_jac = U @ LA.solve(P.T @ U, f2_jac(P.T @ (Omega2 * x)))
+            f_hat_jac = U @ LA.solve(P.T @ U, f2_jac(P.T @ (Omega2 * x)) @ P.T * Omega2)
         else:
-            f_hat_jac = f2_jac(Omega2 * x)
-        
-        # TODO: define sparse dfdy
-        eye_nosc = identity(nosc, format='csr')
+            f_hat_jac = f2_jac(Omega2 * x) * Omega2
+            
         if self.solver_class in [ODESolver.ConformalImplicitMidpoint]:
             dfdy = np.concatenate([np.concatenate([beta/2*eye(nosc), eye(nosc)], axis=1), \
-                                    np.concatenate([-diag(Omega2*Omega2*f_hat_jac), -beta/2*eye(nosc)], axis=1)])
+                                    np.concatenate([-Omega2*f_hat_jac, -beta/2*eye(nosc)], axis=1)])
             # dfdy = bmat([[beta/2*eye_nosc, eye_nosc], [-diags(Omega2*Omega2*f_hat_jac), -beta/2*eye_nosc]], format='csr')
         elif self.solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
-            dfdy = r_[c_[zeros((nosc, nosc)),             eye(nosc)], \
-                      c_[-diag(Omega2*Omega2*f_hat_jac), -beta*eye(nosc)]]
+            dfdy = r_[c_[zeros((nosc, nosc)),   eye(nosc)], \
+                      c_[-Omega2*f_hat_jac,     -beta*eye(nosc)]]
             # dfdy = bmat([[None, eye_nosc], [-diags(Omega2*Omega2*f_hat_jac), -beta*eye_nosc]], format='csr')
         else:
             NameError('Jacobian undefined for the solver_class - %s' % self.solver_class)
@@ -194,15 +221,10 @@ class MechSystem(Params):
     def en_err(self):
         "Energy error"
         assert self.beta == 0, 'Energy is only defined for beta = 0'
-
-        nosc = self.nosc
-        # TODO: use split() instead
+        
         x, u = np.split(self.y, 2, axis=1)
-
-        T = lambda u: sum((u**2), axis=1)/2.0
-        V = lambda x: -sum(self.f2_jac(Omega2*x), axis=1)
-        E = lambda x, u: V(x) +T(u)
-        return log(E(x, u)/E(x[0:1, :], u[None, 0, :]))
+        
+        return log(self.E(x, u, self.Omega2)/self.E(x[0:1, :], u[None, 0, :], self.Omega2))
 
 #%% Solve the system and find convergence rates
 class MechSystemSolver(MechSystem):
@@ -216,7 +238,6 @@ class MechSystemSolver(MechSystem):
         self.n = int(round(self.T_final/self.dt))
 
         self.t_points = linspace(0, self.T_final, self.n+1)
-        # TODO: remove F
         
         if self.RB is None:
             self.y = np.zeros((self.n+1, 2*nosc))
@@ -236,15 +257,15 @@ class MechSystemSolver(MechSystem):
                     X_U = y_
                 else:
                     X_U = y_.dot(self.RB)
-                    
-                # TODO: move to newton.py
                 
                 if self.constraint_type in ['spherical','linear']:
                     start = timer()
                     X_U, _, _ = fixed_point(self._g, X_U, self._g_prime, self.tol, self.M, self.store)
                     end = timer()
+                elif self.constraint_type == None:
+                    pass
                 else:
-                    raise NotImplementedError
+                    print('Unknwon constraint type')
                 
                 y_[1] = X_U[1] if self.RB is None else X_U[1].dot(self.RB.T)
 
@@ -253,14 +274,11 @@ class MechSystemSolver(MechSystem):
         if self.RB is not None: self.y = self.y.dot(self.RB)
         
         if self.var == True:
-            # TODO: why set variables off
             RB, self.RB = self.RB, None # temporarily set RB to None
             P, self.P = self.P, None # temporarily set P to None
             self.var_solve()
             self.RB = RB # Turn RB back on
             self.P = P
-
-        self.measures()
 
     def var_solve(self):
         if not self.var:
@@ -268,94 +286,106 @@ class MechSystemSolver(MechSystem):
             return
         else:
             nosc = self.nosc
-            # TODO: make this sparse
-            self.dpsi = np.zeros((self.n+1, 2*nosc, 2*nosc))
+            self.dpsi = np.zeros((2, 2*nosc, 2*nosc))
             self.dpsi[0] = np.eye(2*nosc)
+            self.sym_error = np.zeros(self.n+1)
 
             for k in range(self.n):
-                dpsi_, tp = self.solver.var_solve(self.y[k:k+2], self.t_points[k:k+2])
-                self.dpsi[k+1] = dpsi_[1]
-                # TODO: evaluate sym_error here and loose dpsi
+                dpsi_, _ = self.solver.var_solve(self.y[k:k+2], self.t_points[k:k+2])
+                self.dpsi[1] = dpsi_[1]
+                sym_error_ =self.solver.symplectic_error(self.dpsi, self.t_points[k:k+2])
+                self.sym_error[k+1] = sym_error_[1]
 
     def measures(self):
         "Various measurements based on the solution"
-        if self.var:
-            self.sym_error =self.solver.symplectic_error(self.dpsi, self.t_points)
+        
+        if self.eng_error_:
+            "Compute convergence rates from the error in Energy"
+            self.r_values.append(self.r_form(self.eng_error_,self.dt_space))
+            self.C_values.append(self.C_form(self.eng_error_,self.dt_space,self.r_values[-1]))
+            
+        if self.solver_class == ODESolver.ImplicitMidpoint and self.beta != 0 and hasattr(self, 'sym_error_'):
+            '''Compute convergence rate from the error in symplecticness
+            Only applicable if the error is non-zero'''
+            self.r_values.append(self.r_form(self.sym_error_,self.dt_space))
+            self.C_values.append(self.C_form(self.sym_error_,self.dt_space,self.r_values[-1]))
 
-        if (not self.beta) and (self.constraint_type is None):
-            "Energy (Hamiltonian) is an invariant for unconstrained conservative system"
-            # TODO: no need to pass the arguments to inherited class methods
-            self.eng_error =self.en_err()
+        # Plot the measures
+        fig = figure()
+        self.plot(fig)
 
     def plot(self, fig):
-        # TODO: remove unnecessary input arguments
         "plot the results"
         
         gs = fig.add_gridspec(4, 2, hspace=1)
-        ax = gs.subplots(sharex=True)
-        if hasattr(self, 'sym_error_'):
+        ax = gs.subplots()
+        if hasattr(self, 'sym_error'):
             plot_data(ax[0,0], self.t_points, self.sym_error)
         if self.eng_error_:
             plot_data(ax[1,0], self.t_points, self.eng_error)
             
-        plot_data(ax[2,0], self.t_points, self._g(self.y).reshape(2,-1)[0])
-        plot_data(ax[3,0], self.t_points, self._g(self.y).reshape(2,-1)[1])
+        if hasattr(self, '_g'):
+            plot_data(ax[2,0], self.t_points, self._g(self.y).reshape(2,-1)[0])
+            plot_data(ax[3,0], self.t_points, self._g(self.y).reshape(2,-1)[1])
         ax[3,0].set_xlabel('time')
-        plot_data(ax[0,1], self.t_points, self.y[:,:self.nosc])
-        plot_data(ax[1,1], self.t_points, self.y[:,self.nosc:])
+            
+        # plot_data(ax[0,1], self.t_points, )
+        ax3 = fig.add_subplot(gs[:, -1])
+        for i in range(10): #range(self.y.shape[0]):
+            plot_data(ax3, self.y[:,i], self.y[:,self.nosc+i])
         ax[3,1].set_xlabel('time')
         # fig.savefig('app5_err_inv.pdf', bbox_inches='tight')
         
         # for ax in fig.get_axes():
         #     ax.label_outer()
         
-    def demo1(self):
+    def convergence_rates(self):
             
-        for dt in self.dt_space:            
-            self.dt = dt
-            start = timer()
+        dt_ = self.dt_space[0]
+        dt_counter = 0
+            
+        if self.RB is None:
+            self.y_list = self.y_init.reshape((1,len(self.y_init)))
+        else:
+            # self.Omega2_selector = np.random.randint(0, self.Omega2_space_dim)
+            self.Omega2_selector = self.Omega2_space_dim-1
+            self.Omega2_space = [self.Omega2_space[self.Omega2_selector]]
+            self.Omega2_space_dim = 1
+                
+        for dt, Omega2 in [(x,y) for x in self.dt_space for y in self.Omega2_space]:            
+            self.dt, self.Omega2 = dt, Omega2
+            start = process_time()
             self.solve()
-            end = timer()
-            print('Execution time: %s' %(end-start))
+            end = process_time()
+            self.time_lapsed.append(end-start)
             
-            if self.dt_space.size > 1:
-                if hasattr(self, 'eng_error'):
+            if self.dt_space.size > 1 and mod(dt_counter, self.Omega2_space_dim) == 0 :
+                 # compute errors only for fixed Omega2
+                if (not self.beta) and (self.constraint_type is None):
+                    "Energy (Hamiltonian) is an invariant for unconstrained conservative system"
+                    self.eng_error =self.en_err()
                     self.eng_error_.append(sqrt(dt)*LA.norm(self.eng_error))
+                    
                 self.sym_error_.append(sqrt(dt)*LA.norm(self.sym_error))
-
-        # Estimate Convergence rate r and coefficient C
-        r_form = lambda numer, denom: (log(roll(numer, -1)/numer)/log(roll(denom, -1)/denom))[:-1]
-        C_form = lambda numer, denom, r: numer[:-1]/(denom[:-1]**r)
-        if self.eng_error_:
-            "Compute convergence rates from the error in Energy"
-            self.r_values.append(r_form(self.eng_error_,self.dt_space))
-            self.C_values.append(C_form(self.eng_error_,self.dt_space,self.r_values[-1]))
+            dt_counter += 1
             
-        if self.solver_class == ODESolver.ImplicitMidpoint and self.beta != 0 and hasattr(self, 'sym_error_'):
-            '''Compute convergence rate from the error in symplecticness
-            Only applicable if the error is non-zero'''
-            self.r_values.append(r_form(self.sym_error_,self.dt_space))
-            self.C_values.append(C_form(self.sym_error_,self.dt_space,self.r_values[-1]))
-
-        # Plot the measures
-        fig = figure()
-        self.plot(fig)
-    
+            if self.RB is None and dt == dt_:
+                self.y_list = np.append(self.y_list, self.y, axis=0)
+                
+        self.measures()
   
-#%% Convergence rates
+#%% Main driver function
 def mor_demo():
     "Model order reduction of the MechSystem using MechSystemSolver"
-    # TODO: make it a class
-    # Full order model
     
     registered_solver_classes, nosc = [ODESolver.ImplicitMidpoint], 100
     
-    for tile, solver_class in enumerate(registered_solver_classes, start=131):
+    for solver_class in registered_solver_classes:
         
         kwds = {'nosc': nosc, 'registered_solver_classes': registered_solver_classes, 'solver_class': solver_class}
         
         MSsolver = MechSystemSolver(**kwds)
-        MSsolver.demo1()
+        MSsolver.convergence_rates()
         
         # Display convergence rates if available
         if MSsolver.r_values:
@@ -365,21 +395,29 @@ def mor_demo():
             tex_table(solver_class.__name__, temp)
     
         # Reuced model
-        _, s, RB = rb_svd(MSsolver.y)
+        F = MSsolver.f2(MSsolver.Omega2 * np.split(MSsolver.y_list, 2, axis=1)[0])
+
+        _, s, RB = rb_svd(MSsolver.y_list)
         fig = figure()
         ax = fig.add_subplot(111)
         ax.semilogy(s)
         
-        nosc_r = 2*5 # ensure nosc_r is even
+        nosc_r = argmin(abs(np.asarray([norm(s[:i])/norm(s) for i in range(len(s))]) -0.99))
+        if nosc_r%2 != 0:
+            nosc_r += 1  # ensure nosc_r is even
+        if nosc_r == 2: nosc_r += 2
+        print('nosc_r = %s' %nosc_r)
         RB = RB[:nosc_r, :]
         
         y = MSsolver.y
+        time_lapsed = [reshape(MSsolver.time_lapsed, (MSsolver.dt_space_dim, MSsolver.Omega2_space_dim))]
+        del MSsolver
+        gc.collect()
         
         kwds.update({'RB': RB})
     
         MSsolver_r = MechSystemSolver(**kwds)
-        del MSsolver
-        MSsolver_r.demo1()
+        MSsolver_r.convergence_rates()
         
         # Display convergence rates if available
         if MSsolver_r.r_values:
@@ -390,28 +428,30 @@ def mor_demo():
             
         print(np.amax(abs(y -MSsolver_r.y)))
         
+        time_lapsed.append(reshape(MSsolver_r.time_lapsed, (MSsolver_r.dt_space_dim, MSsolver_r.Omega2_space_dim)))
+        time_lapsed[1] = (time_lapsed[1].reshape(-1)/time_lapsed[0][:,MSsolver_r.Omega2_selector]*100).reshape(MSsolver_r.dt_space_dim,1)
+        del MSsolver_r
+        gc.collect()
+        
         # Hyper-reduced model
-        # TODO define F only once
-        F = MSsolver_r.f2(MSsolver_r.Omega2 * np.split(MSsolver_r.y, 2, axis=1)[0])
         _, s, U = rb_svd(F)
         del F
         ax.semilogy(s)
         U = U.T
         
-        fig = figure()
-        ax = fig.add_subplot(111)
-        ax.plot(range(U.shape[0]), U[:,:6])
+        # fig = figure()
+        # ax = fig.add_subplot(111)
+        # ax.plot(range(U.shape[0]), U[:,:nosc_r])
         
-        P, idx_list = DEIM(U, plot_deim=True)
+        P, idx_list = DEIM(U, plot_deim=False)
         
-        U = U[:, :nosc_r]
-        P = P[:, :nosc_r]
+        U = U[:, :nosc_r-2]
+        P = P[:, :nosc_r-2]
                 
         # POD-DEIM reduced model
         kwds.update({'U': U, 'P': P})
         MSsolver_dr = MechSystemSolver(**kwds)
-        del MSsolver_r
-        MSsolver_dr.demo1()
+        MSsolver_dr.convergence_rates()
         
         # Display convergence rates if available
         if MSsolver_dr.r_values:
@@ -421,6 +461,15 @@ def mor_demo():
             tex_table(solver_class.__name__, temp)
             
         print(np.amax(abs(y -MSsolver_dr.y)))
+        
+        time_lapsed.append(reshape(MSsolver_dr.time_lapsed, time_lapsed[1].shape))
+        # time_lapsed = [np.average(time_lapsed[i], axis=1) for i in range(1)]
+        time_lapsed[2] = (time_lapsed[2].reshape(-1)/time_lapsed[0][:,MSsolver_dr.Omega2_selector]*100).reshape(MSsolver_dr.dt_space_dim,1)
+        del MSsolver_dr
+        gc.collect()
+        
+        # tex_table('', time_lapsed)
+        print(time_lapsed)
     
         # What works:
             # Results are sensitive to parameters
@@ -429,8 +478,10 @@ def mor_demo():
             # Spherical constraints with dissipatation giver order ~3 for implicit midpoint for both full and reduced models. But not time gain.
             
         # Next steps:
-            # impletement hyper-reduction
-
+            # DONE: implement hyper-reduction
+            # Implement structure-preserving reduction for unconstrained problem
+            # Implement structure-preserving reduction for constrained problem
+            
 if __name__ == '__main__':
     mor_demo()
     

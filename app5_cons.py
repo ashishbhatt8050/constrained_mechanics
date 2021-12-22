@@ -23,7 +23,7 @@ import gc
 from Newton import fixed_point
 
 #%% Parameters class
-class Params(object):
+class Params(object)
     """ Class of parameters """
     def __init__(self, **kwds):
         "Oscillator properties"

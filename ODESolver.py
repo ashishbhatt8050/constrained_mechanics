@@ -23,6 +23,11 @@ class ODESolver(object):
         # that first calls f(u,t) and then ensures that the
         # result is an array of floats.
         self.f = lambda u, t: np.asarray(f(u, t), float)
+        
+        if hasattr(f, 'JJ_r'):
+            self.JJ_r = f.JJ_r
+        if hasattr(f, 'JJ'):
+            self.JJ = f.JJ
 
     def advance(self):
         """Advance solution one time step."""
@@ -123,14 +128,22 @@ class ODESolver(object):
         Ecoeff = self.Ecoeff
         neq = self.neq
 
-        J_mat = np.concatenate([np.concatenate([np.zeros((neq//2,neq//2)), np.eye(neq//2)], axis=1)\
-                          ,np.concatenate([-np.eye(neq//2), np.zeros((neq//2,neq//2))], axis=1)])
-        J_mat_inv = J_mat.T
+        if hasattr(self, 'JJ_r'):
+            J_mat = self.JJ_r
+        elif hasattr(self, 'JJ'):
+            J_mat = self.JJ()
+        else:
+            J_mat = np.concatenate([np.concatenate([np.zeros((neq//2,neq//2)), np.eye(neq//2)], axis=1)\
+                              ,np.concatenate([-np.eye(neq//2), np.zeros((neq//2,neq//2))], axis=1)])
+            # J_mat_inv = J_mat.T
+        # else:
+        #     J_mat_inv = LA.inv(self.JJ_r)
+            
         symp_error = np.zeros(n)
 
         for k in range(n-1):
             dt = t[k+1] -t[k]
-            symp_error[k+1] = LA.norm((du[k+1].T).dot(J_mat_inv.dot(du[k+1])) -Ecoeff(-dt)**4*J_mat_inv)
+            symp_error[k+1] = LA.norm((du[k+1].T).dot(LA.solve(J_mat, du[k+1])) -Ecoeff(-dt)**4*LA.solve(J_mat, eye(J_mat.shape[0])))
             
         return symp_error
 
@@ -289,11 +302,11 @@ Could not import module "Newton". Place Newton.py in this directory
                 return dfdw([w, u[k]], [t[k+1], t[k]], dt)
 
         w_start = u[k] + dt*f(u[k], t[k])  # Forward Euler step
-        u_new, n, F_value = self.Newton(F, w_start, dFdw, N=30)
+        u_new, n, F_value = self.Newton(F, w_start, dFdw, N=100)
         if k == 0:
             self.Newton_iter = []
         self.Newton_iter.append(n)
-        if n >= 30:
+        if n >= 100:
             print("Newton's failed to converge at t=%g "\
                   "(%d iterations)" % (t[k+1], n))
         return u_new

@@ -61,6 +61,36 @@ def DEIM(Ub, plot_deim=False):
 
     return P, idx_list
 
+#%%
+def orthogonalize(W, V):
+    """Orthogonalize W with respect to V such that V.T @ W = I
+
+    Arguments
+      W: n x r array
+      V: n x r array
+    
+    Returns
+      Q: n x r array such that Q.T @ V = I
+    """
+    eps = 1e-12
+    r = W.shape[1]
+    Q = np.zeros(W.shape)
+    
+    for k in range(r):
+        w = W[:,k]  # a new candidate vector
+        
+        for j in range(r):  # Subtract the projections on V vectors
+            if j != k:          # except the k-th vector
+                h = np.dot(V[:,j].T, w)/np.dot(V[:,j].T, V[:,j])
+                w = w - h* V[:,j]
+            
+        h = w.T @ V[:,k]
+        if abs(h) > eps:  # Add the produced vector to the list, unless
+            Q[:,k] = w/h # the k-th vector
+        else:  # If that happens, stop iterating.
+            return Q
+    return Q
+
 #%% Testing
 def test_1D():
     'Test DEIM on a 1D function'

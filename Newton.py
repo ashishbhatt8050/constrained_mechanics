@@ -22,7 +22,7 @@ def Newton(f, x, dfdx, epsilon=1.0E-7, N=100, store=False):
                 raise np.linalg.LinAlgError("Unable to solve the system")
         else:
             try:
-                x = x - sp.linalg.solve(dfdx_value.todense(), f_value)
+                x = x - sp.sparse.linalg.spsolve(dfdx_value, f_value)
             except sp.linalg.LinAlgError:
                 x = x - f_value/dfdx_value
             except:

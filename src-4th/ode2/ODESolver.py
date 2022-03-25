@@ -1,6 +1,8 @@
 import numpy as np
+import scipy as sp
 from pylab import *
 from numpy import linalg as LA
+from scipy.sparse import identity, issparse
 
 class ODESolver(object):
     """
@@ -140,6 +142,9 @@ class ODESolver(object):
         #     J_mat_inv = LA.inv(self.JJ_r)
             
         symp_error = np.zeros(n)
+        
+        if issparse(J_mat) and not issparse(du[-1]):
+            J_mat = J_mat.toarray()
 
         for k in range(n-1):
             dt = t[k+1] -t[k]
@@ -243,7 +248,7 @@ Could not import module "Newton". Place Newton.py in this directory
         if k == 0:
             self.Newton_iter = []
         self.Newton_iter.append(n)
-        if n >= 30:
+        if n >= 100:
             print("Newton's failed to converge at t=%g "\
                   "(%d iterations)" % (t[k+1], n))
         return u_new
@@ -371,7 +376,7 @@ class ConformalImplicitMidpoint(ODESolver):
         if k == 0:
             self.Newton_iter = []
         self.Newton_iter.append(n)
-        if n >= 30:
+        if n >= 100:
             print("Newton's failed to converge at t=%g "\
                   "(%d iterations)" % (t[k+1], n))
         return u_new

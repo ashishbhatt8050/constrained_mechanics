@@ -137,12 +137,12 @@ class Params(object):
             
         self.solver_class = kwds['solver_class']
         
-        self.dt_space_dim = 2
+        self.dt_space_dim = 1
         self.dt_space = linspace(0.05, 0.1, num=self.dt_space_dim)
         
         self.dt = None
          
-        self.T_final = 10
+        self.T_final = 100
         
         w_values = [0.28, 0.62546642846767004501]
         w_values.append(1.0 -2.0*(sum(w_values)))
@@ -355,36 +355,27 @@ class MechSystemSolver(MechSystem):
             self.y = self.y.dot(self.RB)
         
         if self.var == True:
-            # TODO: need to turn off RB and P for var_solve of the reconstructed solution
-            # RB, self.RB = self.RB, None # temporarily set RB to None
-            # P, self.P = self.P, None # temporarily set P to None
             self.var_solve()
-            # self.RB = RB # Turn RB back on
-            # self.P = P
 
     def var_solve(self):
-        if not self.var:
-            warnings.warn('Variatinoal equation solve is set to False')
-            return
-        else:
-            nosc = self.nosc
-            if hasattr(self, 'y_red'):
-                nosc = self.y_red.shape[1]//2
-                
-            self.dpsi = np.zeros((2, 2*nosc, 2*nosc))
-            self.dpsi[0] = np.eye(2*nosc)
-            self.sym_error = np.zeros(self.n+1)
+        nosc = self.nosc
+        if hasattr(self, 'y_red'):
+            nosc = self.y_red.shape[1]//2
+            
+        self.dpsi = np.zeros((2, 2*nosc, 2*nosc))
+        self.dpsi[0] = np.eye(2*nosc)
+        self.sym_error = np.zeros(self.n+1)
 
-            for k in range(self.n):
-                if hasattr(self, 'y_red'):
-                    # if hasattr(self, 'JJ_r'):
-                    #     self.solver.J_mat = self.JJ_r
-                    dpsi_, _ = self.solver.var_solve(self.y_red[k:k+2], self.t_points[k:k+2])
-                else:
-                    dpsi_, _ = self.solver.var_solve(self.y[k:k+2], self.t_points[k:k+2])
-                self.dpsi[1] = dpsi_[1]
-                sym_error_ =self.solver.symplectic_error(self.dpsi, self.t_points[k:k+2])
-                self.sym_error[k+1] = sym_error_[1]
+        for k in range(self.n):
+            if hasattr(self, 'y_red'):
+                # if hasattr(self, 'JJ_r'):
+                #     self.solver.J_mat = self.JJ_r
+                dpsi_, _ = self.solver.var_solve(self.y_red[k:k+2], self.t_points[k:k+2])
+            else:
+                dpsi_, _ = self.solver.var_solve(self.y[k:k+2], self.t_points[k:k+2])
+            self.dpsi[1] = dpsi_[1]
+            sym_error_ =self.solver.symplectic_error(self.dpsi, self.t_points[k:k+2])
+            self.sym_error[k+1] = sym_error_[1]
 
     def measures(self):
         "Various measurements based on the solution"
@@ -440,16 +431,16 @@ class MechSystemSolver(MechSystem):
         
     def convergence_rates(self):
             
-        dt_ = self.dt_space[0]
-        dt_counter = 0
-            
         if self.RB is None:
             self.y_list = self.y_init.reshape((1,len(self.y_init)))
-        else:
+            self.F2 = np.array([self.ham_z(self.y_list[i,:self.nosc], self.y_list[i,self.nosc:], self.Omega2_space[0]) for i in range(self.y_list.shape[0])])
+            self.F3 = np.array([self.non_quad_z(self.Q_spd(self.Omega2_space[0]), self.y_list[i,:self.nosc], self.y_list[i,self.nosc:], self.Omega2_space[0]) for i in range(self.y_list.shape[0])])
+        
+        # else:
             # self.Omega2_selector = np.random.randint(0, self.Omega2_space_dim)
-            self.Omega2_selector = self.Omega2_space_dim-1
-            self.Omega2_space = [self.Omega2_space[self.Omega2_selector]]
-            self.Omega2_space_dim = 1
+        self.Omega2_selector = self.Omega2_space_dim-1
+        self.Omega2_space = [self.Omega2_space[self.Omega2_selector]]
+        self.Omega2_space_dim = 1
                 
         for dt, Omega2 in [(x,y) for x in self.dt_space for y in self.Omega2_space]:            
             self.dt, self.Omega2 = dt, Omega2
@@ -458,7 +449,7 @@ class MechSystemSolver(MechSystem):
             end = process_time()
             self.time_lapsed.append(end-start)
             
-            if self.dt_space.size > 1 and mod(dt_counter, self.Omega2_space_dim) == 0 :
+            if self.dt_space.size > 1 and np.allclose(self.Omega2, self.Omega2_space[self.Omega2_selector]):
                  # compute errors only for fixed Omega2
                 if (not self.beta) and (self.constraint_type is None):
                     "Energy (Hamiltonian) is an invariant for unconstrained conservative system"
@@ -466,10 +457,11 @@ class MechSystemSolver(MechSystem):
                     self.eng_error_.append(sqrt(dt)*LA.norm(self.eng_error))
                     
                 self.sym_error_.append(sqrt(dt)*LA.norm(self.sym_error))
-            dt_counter += 1
             
             if self.RB is None:
                 self.y_list = np.append(self.y_list, self.y, axis=0)
+                self.F2 = np.append(self.F2, np.array([self.ham_z(self.y_list[i,:self.nosc], self.y_list[i,self.nosc:], self.Omega2) for i in range(self.y_list.shape[0])]), axis=0)
+                self.F3 = np.append(self.F3, np.array([self.non_quad_z(self.Q_spd(self.Omega2), self.y_list[i,:self.nosc], self.y_list[i,self.nosc:], self.Omega2) for i in range(self.y_list.shape[0])]), axis=0)
                 
         self.measures()
   
@@ -492,16 +484,10 @@ def mor_demo():
                       c_[np.reshape([float('nan')]*len(MSsolver.r_values), (len(MSsolver.r_values),1)), MSsolver.r_values]].T
                 
             tex_table(solver_class.__name__, temp)
-    
-        # Reuced model
-        # F = MSsolver.f2(MSsolver.Omega2 * np.split(MSsolver.y_list, 2, axis=1)[0])
-        F2 = np.array([MSsolver.ham_z(MSsolver.y_list[i,:nosc], MSsolver.y_list[i,nosc:], MSsolver.Omega2) for i in range(MSsolver.y_list.shape[0])])
-        F3 = np.array([MSsolver.non_quad_z(MSsolver.Q_spd(MSsolver.Omega2), MSsolver.y_list[i,:nosc], MSsolver.y_list[i,nosc:], MSsolver.Omega2) for i in range(MSsolver.y_list.shape[0])])
-        # TODO: dimensions mismatch
         
         _, s, RB = rb_svd(MSsolver.y_list)
-        _, s_F2, W_r = rb_svd(F2)
-        del F2
+        _, s_F2, W_r = rb_svd(MSsolver.F2)
+        # del F2
         fig = figure()
         ax = fig.add_subplot(111)
         ax.semilogy(s)
@@ -533,7 +519,7 @@ def mor_demo():
         
         y = MSsolver.y
         time_lapsed = [reshape(MSsolver.time_lapsed, (MSsolver.dt_space_dim, MSsolver.Omega2_space_dim))]
-        del MSsolver
+        # del MSsolver
         gc.collect()
         
         kwds.update({'RB': RB, 'W_r': W_r.T})
@@ -554,8 +540,9 @@ def mor_demo():
         time_lapsed[1] = (time_lapsed[1].reshape(-1)/time_lapsed[0][:,MSsolver_r.Omega2_selector]*100).reshape(MSsolver_r.dt_space_dim,1)
         
         # Hyper-reduced model
-        _, s, U = rb_svd(F3)
-        del F3
+        _, s, U = rb_svd(MSsolver.F3)
+        del MSsolver
+        # del F3
         ax.semilogy(s)
         U = U.T
         
@@ -576,7 +563,7 @@ def mor_demo():
         gc.collect()
         
         # POD-DEIM reduced model
-        kwds.update({'U': eye(2*nosc), 'P': eye(2*nosc), 'W_r': W_r.T})
+        kwds.update({'U': U, 'P': P, 'W_r': W_r.T})
         MSsolver_dr = MechSystemSolver(**kwds)
         MSsolver_dr.convergence_rates()
         

@@ -37,8 +37,7 @@ def rb_svd(y):
 def POD(S, Xh, eps=None):
     
     if np.allclose(Xh, np.eye(Xh.shape[0])):
-        _, Sigma, Chi = rb_svd(S)
-        Chi = Chi.T
+        Chi, Sigma, _ = rb_svd(S)
         Sigma2 = Sigma**2
     else:
         Nh, ns = S.shape
@@ -61,7 +60,7 @@ def POD(S, Xh, eps=None):
     else:
         N = Sigma2.size
         
-    return Chi[:N], np.sqrt(Sigma2)
+    return Chi[:, :N], np.sqrt(Sigma2)
 # %%
 
 

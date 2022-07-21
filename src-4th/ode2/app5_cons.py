@@ -32,12 +32,13 @@ class Params(object):
         
         self.Omega2 = kwds['Omega2']
         Omega2 = self.Omega2
+        self.Omega2_00 = lambda Omega2=Omega2: r_[Omega2, np.ones_like(Omega2)]
         
         alpha = list(linspace(0.1,0.5,num=nosc))
         alpha /= sqrt(sum(np.array(alpha)**2))
         assert np.isclose(np.array(alpha).dot(alpha), 1), "alpha**2 must be equal to 1"
         self.alpha = alpha
-        self.beta = (max(1e-2, 0*np.random.rand()/10))
+        self.beta = (max(1e-2, 0*np.random.rand()/10))*0
         self.f2 = lambda y: sin(y)
         self.f2_jac = lambda y: diag(cos(y))
 
@@ -45,21 +46,30 @@ class Params(object):
         kin = lambda u: sum((u**2), axis=1)/2.0
         pot = lambda x: -sum(array([diag(self.f2_jac(Omega2*x[i])) for i in range(x.shape[0])]), axis=1) 
         self.ham = lambda x, u: pot(x) +kin(u) +self.beta/2 * sum(x*u, axis=1)
-        self.ham_z = lambda x, u, Omega2=Omega2: r_[Omega2*sin(Omega2*x), u] +self.beta/2 * r_[u, x]
-        self.ham_zz = lambda x, u, Omega2=Omega2: r_[c_[diag(Omega2**2*cos(Omega2*x)), zeros(x.shape*2)],\
-                                              c_[zeros(x.shape*2), eye(x.shape[0])]] \
+        # self.ham_z = lambda x, u, Omega2=Omega2: r_[Omega2*sin(Omega2*x), u] +self.beta/2 * r_[u, x]
+        # self.ham_zz = lambda x, u, Omega2=Omega2: r_[c_[diag(Omega2**2*cos(Omega2*x)), zeros(x.shape*2)],\
+        #                                       c_[zeros(x.shape*2), eye(x.shape[0])]] \
+        #                                     + self.beta/2 * r_[c_[zeros(x.shape*2), eye(x.shape[0])],\
+        #                                       c_[eye(x.shape[0]), zeros(x.shape*2)]]
+                                                
+        self.ham_z = lambda x, u, Omega2=Omega2: self.Omega2_00(Omega2) * r_[sin(Omega2*x), u] \
+                                                +self.beta/2 * r_[u, x]
+        self.ham_zz = lambda x, u, Omega2=Omega2: diag(self.Omega2_00(Omega2) * r_[cos(Omega2*x), np.ones_like(x)] *self.Omega2_00(Omega2)) \
                                             + self.beta/2 * r_[c_[zeros(x.shape*2), eye(x.shape[0])],\
-                                              c_[eye(x.shape[0]), zeros(x.shape*2)]]
-        self.Q_spd = lambda _=None: self.ham_zz(0*Omega2,0*Omega2)
+                                                               c_[eye(x.shape[0]), zeros(x.shape*2)]]
+            
+                                                
+        self.Q_spd = lambda Omega2=Omega2: self.ham_zz(0*Omega2,0*Omega2, Omega2)
         self.JJ = lambda d=nosc: r_[c_[zeros((d,d)), eye(d)],\
                                       c_[-eye(d), zeros((d,d))]]
         self.drag = lambda x, u: self.beta/2 * r_[x, u]
         self.drag_z = lambda x, u: self.beta/2 * r_[c_[eye(x.shape[0]), zeros(x.shape*2)],\
                                               c_[zeros(x.shape*2), eye(x.shape[0])]]
             
-        self.non_quad = lambda Q, x, u: self.ham(x,u) -1/2 *r_[x, u].T @ Q @ r_[x, u]
-        self.non_quad_z = lambda Q, x, u: self.ham_z(x,u) - Q @ r_[x, u]
-        self.non_quad_zz = lambda Q, x, u: self.ham_zz(x,u) - Q
+        self.non_quad = lambda x, u: self.ham(x,u) -1/2 *r_[x, u].T @ self.Q_spd() @ r_[x, u]
+        self.non_quad_z = lambda x, u, Omega2=Omega2: self.ham_z(x,u,Omega2) - self.Q_spd(Omega2) @ r_[x, u]
+        self.non_quad_zz = lambda x, u, Omega2=Omega2: self.ham_zz(x,u,Omega2) - self.Q_spd(Omega2)
+        self.non_quad = None
         
         "Initial conditions"
         # temp = True
@@ -67,7 +77,7 @@ class Params(object):
         y_init = r_[np.linspace(1,5,nosc), 0*np.linspace(1,5,nosc)]
         # y_init = r_[1 +4*np.random.rand(nosc), np.zeros(nosc)]
         
-        self.constraint_type = 'spherical'
+        self.constraint_type = None
         if self.constraint_type == 'linear':
             y_init[nosc-1] = -(y_init[:nosc-1].dot(alpha[:nosc-1]))/alpha[nosc-1] # project on the manifold
             assert np.isclose(y_init[:nosc].dot(alpha[:nosc]), 0), "alpha:y should be 0" 
@@ -107,20 +117,24 @@ class Params(object):
         "Projection matrices"
         if 'RB' in kwds:
             self.RB = kwds['RB']
-            self.y_init = self.RB.T @ y_init
             
-            self._g = lambda y, alpha=[self.RB.T @A_mat @self.RB,\
-                                       self.RB.T @B_mat @self.RB]: _g(y, alpha)
-            
-            self._g_prime = lambda y, alpha=[self.RB.T @A_mat @self.RB,\
-                                       self.RB.T @B_mat @self.RB]: _g_prime(y, alpha)
+            if self.constraint_type:
+                A_mat_ = self.RB.T @A_mat @self.RB
+                B_mat_ = self.RB.T @B_mat @self.RB
+                
+                self._g = lambda y, alpha=[A_mat_, B_mat_]: _g(y, alpha)
+                
+                self._g_prime = lambda y, alpha=[A_mat_, B_mat_]: _g_prime(y, alpha)
         else:
             self.RB = None
-            self._g = _g
-            self._g_prime = _g_prime
+            
+            if self.constraint_type:
+                self._g = _g
+                self._g_prime = _g_prime
             
         if 'W_r' in kwds:
             self.W_r = kwds['W_r']
+            self.y_init = self.W_r.T @ y_init
         else:
             self.W_r = None
             
@@ -131,7 +145,18 @@ class Params(object):
             
         if 'P' in kwds:
             self.P = kwds['P']
-            self.IP = self.U @ LA.solve(self.P.T @ self.U, self.P.T)
+            self.RBxU = self.RB.T @ self.U
+            self.UxRB = self.RBxU.T
+            self.PxU = self.P.T @ self.U
+            self.UxP = self.PxU.T
+            self.PxP = self.P.T @ self.P
+            self.PxIPxRB = lambda y: self.PxP @ LA.solve(self.UxP, self.UxRB @ y)
+            self.PxIPxRBxI = self.PxP @ LA.solve(self.UxP, self.UxRB)
+            # self.PxIPxRBxP = lambda y: self.PxP @ LA.solve(self.UxP, self.UxRB @ y) @self.P.T
+            self.hat = lambda foPxIPxRBxy: self.RBxU @ LA.solve(self.PxU, foPxIPxRBxy)
+            self.hhat = lambda ffoPxIPxRBxy: self.hat(ffoPxIPxRBxy) @ self.PxIPxRBxI
+            
+            self.IP = self.U @ LA.solve(self.PxU, self.P.T)
         else:
             self.P = None
             
@@ -182,9 +207,10 @@ class Params(object):
 #%% Define the system
 class MechSystem(Params):
     "Define the Mechanical system as a sub-class of Params"
+    #TODO: have the __call__ return jacobian as well.
         
     def __call__(self, y, t):
-        solver_class, beta, f2 = self.solver_class, self.beta, self.f2
+        solver_class, beta = self.solver_class, self.beta
         P, U, RB, W_r = self.P, self.U, self.RB, self.W_r
         
         if RB is None:
@@ -202,69 +228,64 @@ class MechSystem(Params):
             elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
                 f = self.JJ_r @ RB.T @ self.ham_z(x, u)
                 
-        elif P is not None:
+        elif P is not None and self.non_quad is None:
             # IP = self.IP
             # self.U @ LA.solve(self.P.T @ self.U, self.P.T)
-            y = P @ LA.solve(U.T @ P, U.T @ RB @ y)
-            x_, u_ = np.split(y, 2)
-            x, u = np.split(P.T @ y, 2)
-            # Omega2 = P.T @ r_[self.Omega2, self.Omega2]
-            # Omega2, _ = np.split(Omega2, 2)
-            Omega2 = np.split(P, 2, axis=1)[0].T @self.Omega2
+            x_, u_ = np.split(RB @y, 2)
+            # y = P @ LA.solve(U.T @ P, U.T @ RB @ y)
+            
+            # x, u = np.split(self.IP.T @ RB @y, 2)
+            # # Omega2 = P.T @ r_[self.Omega2, self.Omega2]
+            # # Omega2, _ = np.split(Omega2, 2)
+            # # Omega2 = np.split(np.split(P, 2, axis=1)[0],2)[0].T @self.Omega2
+            
+            # if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
+            #     f = self.JJ_r @ RB.T @self.IP @self.ham_z(x, u) - self.W_r.T @self.drag(x_, u_)
+            # elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
+            #     f = self.JJ_r @ RB.T @self.IP @self.ham_z(x, u)
+            
+            x, u = np.split(self.PxIPxRB(y), 2)
+            
+            if x.shape != self.Omega2.shape:
+                Omega2 = P.T @ r_[self.Omega2, self.Omega2]
+                Omega2, _ = np.split(Omega2, 2)
+            else:
+                Omega2 = self.Omega2
             
             if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
-                f = self.JJ_r @ RB.T @ U @ LA.solve(P.T @ U, self.ham_z(x, u, Omega2)) - self.W_r.T @self.drag(x_, u_)
+                f = self.JJ_r @ self.hat(self.ham_z(x, u, Omega2)) - self.W_r.T @self.drag(x_, u_)
             elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
-                f = self.JJ_r @ RB.T @ U @ LA.solve(P.T @ U, self.ham_z(x, u, Omega2))
+                f = self.JJ_r @ self.hat(self.ham_z(x, u, Omega2))
+                
+        elif P is not None and self.non_quad is not None:
+            # IP = self.IP
+            # self.U @ LA.solve(self.P.T @ self.U, self.P.T)
+            x_, u_ = np.split(RB @y, 2)
+            # y = P @ LA.solve(U.T @ P, U.T @ RB @ y)
+            x, u = np.split(self.PxIPxRB(y), 2)
+            
+            if x.shape != self.Omega2.shape:
+                Omega2 = P.T @ r_[self.Omega2, self.Omega2]
+                Omega2, _ = np.split(Omega2, 2)
+            else:
+                Omega2 = self.Omega2
+            # Omega2 = np.split(np.split(P, 2, axis=1)[0],2)[0].T @self.Omega2
+            
+            
+            if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
+                f = self.JJ_r @ (y + self.hat(self.non_quad_z(x, u, Omega2)))\
+                    - self.W_r.T @self.drag(x_, u_)
+            elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
+                f = self.JJ_r @ (y + self.hat(self.non_quad_z(x, u, Omega2)))
                 
         else:
             raise NotImplementedError
             
         return f
-            
-        
-        # if P is not None and self.W_r is None:
-        #     f_hat = U @ LA.solve(P.T @ U, f2(P.T @ (Omega2 * x)))
-        # elif P is not None and self.W_r is not None:
-        #     # IP = U @ LA.solve(P.T @  U, P.T)
-        #     y_select = P.T @ P @ LA.solve(U.T @ P, U.T @ y)
-        #     # y_select = IP.T @ y
-        #     x_select, u_select = np.split(y_select, 2)
-        #     Omega2_select = P.T @ r_[Omega2, Omega2]
-        #     Omega2_select, _ = np.split(Omega2_select, 2)
-        #     Q_select = P.T @ Q @ P
-        #     ham_z = lambda *arg: RB @ Q @ y \
-        #         +RB @ U @ LA.solve(P.T @U, self.non_quad_z(Q_select, x_select, u_select, Omega2_select))
-        # elif P is None and W_r is not None:
-        #     ham_z = lambda x, u, Omega2: RB @ self.ham_z(x, u, Omega2)
-        # else:
-        #     f_hat = f2(Omega2 * x)
-
-        # if self.W_r is None:
-        #     if solver_class in [ODESolver.ConformalStormerVerlet]:
-        #         f = [u, -Omega2 * f_hat]
-        #     elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
-        #         f = reshape([u, -Omega2 * f_hat -beta*u], -1) +beta/2*y
-        #     elif solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
-        #         f = r_[u, -Omega2 * f_hat -beta*u]
-        #     elif solver_class is None:
-        #         ValueError('Unsupported solver_class')
-        #     else:
-        #         NameError('Undefined solver_class - %s' % solver_class)
-        # else:
-        #     if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
-        #         f = self.JJ_r @ ham_z(x, u, Omega2) - self.drag(x_r, u_r)
-        #     elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
-        #         f = self.JJ_r @ ham_z(x, u, Omega2)
-            
-        # if RB is not None and self.W_r is None:
-        #     return RB @ f
-        # else:
-        #     return f
 
     def jacobian(self, y, t, *arg):
         "Jacobian of the function f"
-        solver_class, beta, f2_jac = self.solver_class, self.beta, self.f2_jac
+        solver_class, beta = self.solver_class, self.beta
         P, U, RB, W_r = self.P, self.U, self.RB, self.W_r
         
         if RB is None:
@@ -282,79 +303,72 @@ class MechSystem(Params):
             elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
                 dfdy = self.JJ_r @ RB.T @ self.ham_zz(x, u) @ RB
                 
-        elif P is not None:
+        elif P is not None and self.non_quad is None:
             # IP = self.IP
             # y = IP.T @ RB @ y
-            y = P @ LA.solve(U.T @ P, U.T @ RB @ y)
-            x_, u_ = np.split(y, 2)
-            x, u = np.split(P.T @ y, 2)
-            # Omega2 = P.T @ r_[self.Omega2, self.Omega2]
-            # Omega2, _ = np.split(Omega2, 2)
-            Omega2 = np.split(np.split(P, 2, axis=1)[0],2)[0].T @self.Omega2
+            x_, u_ = np.split(RB @y, 2)
+            # y = P @ LA.solve(U.T @ P, U.T @ RB @ y)
+            
+            # x, u = np.split(self.IP.T @ RB @y, 2)
+            # # Omega2 = P.T @ r_[self.Omega2, self.Omega2]
+            # # Omega2, _ = np.split(Omega2, 2)
+            # # Omega2 = np.split(np.split(P, 2, axis=1)[0],2)[0].T @self.Omega2
+            
+            # if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
+            #     dfdy = self.JJ_r @ RB.T @self.IP @ self.ham_zz(x, u) @self.IP.T @ RB - self.W_r.T @self.drag_z(x_, u_) @ RB
+            # elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
+            #     dfdy = self.JJ_r @ RB.T @self.IP @self.ham_zz(x, u) @ self.IP.T @ RB
+            
+            x, u = np.split(self.PxIPxRB(y), 2)
+            
+            if x.shape != self.Omega2.shape:
+                Omega2 = P.T @ r_[self.Omega2, self.Omega2]
+                Omega2, _ = np.split(Omega2, 2)
+            else:
+                Omega2 = self.Omega2
+            # Omega2 = np.split(np.split(P, 2, axis=1)[0],2)[0].T @self.Omega2
             
             if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
-                dfdy = self.JJ_r @ RB.T @ U @ LA.solve(P.T @ U, self.ham_zz(x, u, Omega2)) @ P.T @ RB - self.W_r.T @self.drag_z(x_, u_) @ RB
+                dfdy = self.JJ_r @ self.hhat(self.ham_zz(x, u, Omega2)) - self.W_r.T @self.drag_z(x_, u_) @ RB
             elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
-                dfdy = self.JJ_r @ RB.T @ U @ LA.solve(P.T @ U, self.ham_zz(x, u, Omega2)) @ P.T @ RB
+                dfdy = self.JJ_r @ self.hhat(self.ham_zz(x, u, Omega2))
+                
+                
+        elif P is not None and self.non_quad is not None:
+            # IP = self.IP
+            # y = IP.T @ RB @ y
+            x_, u_ = np.split(RB @y, 2)
+            # y = P @ LA.solve(U.T @ P, U.T @ RB @ y)
+            x, u = np.split(self.PxIPxRB(y), 2)
+            
+            if x.shape != self.Omega2.shape:
+                Omega2 = P.T @ r_[self.Omega2, self.Omega2]
+                Omega2, _ = np.split(Omega2, 2)
+            else:
+                Omega2 = self.Omega2
+            # Omega2 = np.split(np.split(P, 2, axis=1)[0],2)[0].T @self.Omega2
+            
+            if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
+                dfdy = self.JJ_r @ (np.eye(self.JJ_r.shape[0]) + self.hhat(self.non_quad_zz(x, u, Omega2)))\
+                    - self.W_r.T @self.drag_z(x_, u_)@ RB
+            elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
+                dfdy = self.JJ_r @ (np.eye(self.JJ_r.shape[0]) + self.hhat(self.non_quad_zz(x, u, Omega2)))
                 
         else:
             raise NotImplementedError
             
         return dfdy
-        
-        
-        # if P is not None and W_r is None:
-        #     f_hat_jac = U @ LA.solve(P.T @ U, f2_jac(P.T @ (Omega2 * x)) @ P.T * Omega2)
-        # elif P is not None and self.W_r is not None:
-        #     y_select = P.T @ P @ LA.solve(U.T @ P, U.T @ y)
-        #     x_select, u_select = np.split(y_select, 2)
-        #     Omega2_select = P.T @ r_[Omega2, Omega2]
-        #     Omega2_select, _ = np.split(Omega2_select, 2)
-        #     Q_select = P.T @ Q @ P
-        #     ham_zz = lambda *arg: RB @ Q @ RB.T \
-        #         +RB @ U @ LA.solve(P.T @U, self.non_quad_zz(Q_select, x_select, u_select, Omega2_select)) @ P.T @ P @ LA.solve(U.T @ P, U.T) @ RB.T
-        # elif P is None and W_r is not None:
-        #     ham_zz = lambda x, u, Omega2: RB @ self.ham_zz(x, u, Omega2) @RB.T
-        # else:
-        #     f_hat_jac = f2_jac(Omega2 * x) * Omega2
-            
-        # if self.W_r is None:
-        #     if self.solver_class in [ODESolver.ConformalImplicitMidpoint]:
-        #         dfdy = np.concatenate([np.concatenate([beta/2*eye(nosc), eye(nosc)], axis=1), \
-        #                                 np.concatenate([-Omega2*f_hat_jac, -beta/2*eye(nosc)], axis=1)])
-        #         # dfdy = bmat([[beta/2*eye_nosc, eye_nosc], [-diags(Omega2*Omega2*f_hat_jac), -beta/2*eye_nosc]], format='csr')
-        #     elif self.solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
-        #         dfdy = r_[c_[zeros((nosc, nosc)),   eye(nosc)], \
-        #                   c_[-Omega2*f_hat_jac,     -beta*eye(nosc)]]
-        #         # dfdy = bmat([[None, eye_nosc], [-diags(Omega2*Omega2*f_hat_jac), -beta*eye_nosc]], format='csr')
-        #     else:
-        #         NameError('Jacobian undefined for the solver_class - %s' % self.solver_class)
-        # else:
-        #     if self.solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
-        #         dfdy = self.JJ_r @ ham_zz(x,u,Omega2) - self.drag_z(x_r, u_r)
-        #     elif self.solver_class in [ODESolver.ConformalImplicitMidpoint]:
-        #         dfdy = self.JJ_r @ ham_zz(x,u,Omega2)
-            
-        # if RB is not None and self.W_r is None:
-        #     return RB @ dfdy @ RB.T
-        # else:
-        #     return dfdy
 
     def en_err(self):
         "Energy error"
-        # TODO: define energy for hyper-reduced variables
         assert self.beta == 0, 'Energy is only defined for beta = 0'
-        U, P = self.U, self.P
         
+        
+        # # TODO: define energy for hyper-reduced variables
         # if self.P is not None:
-        #     y_ = P @ LA.solve(U.T @ P, U.T @ self.y.T)
-        #     y = y_.T
-        #     x, u = np.split(y, 2, axis=1)
-        #     # Omega2 = self.P.T @ r_[self.Omega2, self.Omega2]
-        #     # Omega2, _ = np.split(Omega2, 2)
-        #     # ham = lambda x, u, Omega2: self.U @ LA.solve(self.P.T @ self.U, self.ham(x, u, Omega2))
-        #     ham = lambda x, u, Omega2: 1/2 * self.y @ self.Q_spd(Omega2) @ self.y.T + self.non_quad(self.Q_spd(Omega2), x, u, Omega2)
+        #     x, u = np.split((self.IP.T @self.y.T).T, 2, axis=1)
         # else:
+            
         x, u = np.split(self.y, 2, axis=1)
         
         return log(self.ham(x, u)/self.ham(x[0:1, :], u[None, 0, :]))
@@ -376,9 +390,11 @@ class MechSystemSolver(MechSystem):
             self.y = np.zeros((self.n+1, 2*nosc))
         else:
             self.y = np.zeros((self.n+1, self.RB.shape[1]))
-            X_U = np.array([self.y_init, self.y_init])
-            X_U, _, _ = fixed_point(self._g, X_U, self._g_prime, self.tol, self.M, self.store)
-            self.y_init = X_U[1]
+            
+            if self.constraint_type:
+                X_U = np.array([self.y_init, self.y_init])
+                X_U, _, _ = fixed_point(self._g, X_U, self._g_prime, self.tol, self.M, self.store)
+                self.y_init = X_U[1]
             
         self.y[0] = self.y_init
         if self.store: self.info = []
@@ -389,28 +405,20 @@ class MechSystemSolver(MechSystem):
                 self.solver.set_initial_condition(y_[1])
                 y_, _ = self.solver.solve(w_val*self.t_points[k:k+2])
                 
-                # Apply constraints
-                if self.constraint_type in ['spherical','linear']:
-                
-                    if self.RB is None:
-                        X_U = y_
-                        X_U, _, _ = fixed_point(self._g, X_U, self._g_prime, self.tol, self.M, self.store)
-                    else:
-                        # X_U = (self.RB @ y_.T).T
-                        X_U = y_
-                        X_U, _, _ = fixed_point(self._g, X_U, self._g_prime, self.tol, self.M, self.store)
+                # enforce constraints
+                if self.constraint_type:
                     
-                    y_[1] = X_U[1] #if self.RB is None else self.RB.T @ X_U[1]
-                elif self.constraint_type == None:
-                    pass
-                else:
-                    print('Unknwon constraint type')
+                    y_, _, _ = fixed_point(self._g, y_, self._g_prime, self.tol, self.M, self.store)
+                    
 
             self.y[k+1] = y_[1]
 
         if self.RB is not None:
             self.y_red = self.y
             self.y = (self.RB @ self.y.T).T
+            
+            # if self.P:
+            #     self.y = (self.IP.T @ self.y.T).T
         
         if self.var == True:
             self.var_solve()
@@ -426,8 +434,6 @@ class MechSystemSolver(MechSystem):
 
         for k in range(self.n):
             if hasattr(self, 'y_red'):
-                # if hasattr(self, 'JJ_r'):
-                #     self.solver.J_mat = self.JJ_r
                 dpsi_, _ = self.solver.var_solve(self.y_red[k:k+2], self.t_points[k:k+2])
             else:
                 dpsi_, _ = self.solver.var_solve(self.y[k:k+2], self.t_points[k:k+2])
@@ -475,14 +481,6 @@ class MechSystemSolver(MechSystem):
         # for ax in fig.get_axes():
         #     ax.label_outer()
         
-    def convergence_rates(self):
-                
-        start = process_time()
-        self.solve()
-        end = process_time()
-        self.time_lapsed.append(end-start)
-        
-
 
     def measures(self, eng_error_, sym_error_, dt_space):
         "Various measurements based on the solution"
@@ -520,14 +518,14 @@ class MechSystemSolver(MechSystem):
 def mor_demo():
     "Model order reduction of the MechSystem using MechSystemSolver"
     
-    registered_solver_classes, nosc = [ODESolver.ConformalImplicitMidpoint], 200
+    registered_solver_classes, nosc = [ODESolver.ImplicitMidpoint], 200
         
     dt_space_dim = 3
     dt_space = linspace(0.05, 0.1, num=dt_space_dim)
             
-    Omega2_space_dim = 3
+    Omega2_space_dim = 1
     # Omega2_space = [np.linspace(1,2,nosc)]
-    Omega2_space = [(1 +np.random.rand(nosc)/1000)**2 for i in range(Omega2_space_dim)]
+    Omega2_space = [(1 +0*np.random.rand(nosc)/1000)**2 for i in range(Omega2_space_dim)]
     
     MSsolvers = []
     eng_error_ = []
@@ -542,7 +540,12 @@ def mor_demo():
                 'Omega2': Omega2}
         
         MSsolver = MechSystemSolver(**kwds)
-        MSsolver.convergence_rates()
+        # MSsolver.convergence_rates()
+                
+        start = process_time()
+        MSsolver.solve()
+        end = process_time()
+        MSsolver.time_lapsed.append(end-start)
         
         if dt_space.size > 1 and np.allclose(MSsolver.Omega2, Omega2_space[-1]):
              # compute errors only for fixed Omega2
@@ -553,12 +556,11 @@ def mor_demo():
                 
             sym_error_.append(sqrt(dt)*LA.norm(MSsolver.sym_error))
             
-        # MSsolver[i].y_list = np.append(MSsolver[i].y_list, MSsolver[i].y, axis=0)
         MSsolver.F2 = np.array([MSsolver.ham_z(MSsolver.y[k,:nosc], MSsolver.y[k,nosc:])\
                                                              for k in range(MSsolver.y.shape[0])]).T
             
-        # MSsolver.F3 = np.array([MSsolver.non_quad_z(MSsolver.Q_spd(), MSsolver.y[k,:nosc],\
-        #                         MSsolver.y[k,nosc:]) for k in range(MSsolver.y.shape[0])]).T
+        MSsolver.F3 = np.array([MSsolver.non_quad_z(MSsolver.y[k,:nosc],\
+                                MSsolver.y[k,nosc:]) for k in range(MSsolver.y.shape[0])]).T
             
         MSsolvers.append(MSsolver)
         
@@ -569,59 +571,92 @@ def mor_demo():
         
     y_list = np.hstack([MSsolvers[i].y.T for i in range(len(MSsolvers))])
     F2 = np.hstack([MSsolvers[i].F2 for i in range(len(MSsolvers))])
-    # F3 = np.hstack([MSsolvers[i].F3 for i in range(len(MSsolvers))])
+    F3 = np.hstack([MSsolvers[i].F3 for i in range(len(MSsolvers))])
     
-    # X = MSsolver.Q_spd(MSsolver.Omega2)
-    X = np.eye(2*nosc)
-    RB1, s1 = POD(y_list[:nosc, :], X)
-    RB2, s2 = POD(y_list[-nosc:, :], X)
-    W_r_1, s_F2_1 = POD(F2[:nosc, :], X)
-    W_r_2, s_F2_2 = POD(F2[-nosc:, :], X)
-    del y_list, F2
-    gc.collect()
+    X = {'Q': MSsolver.Q_spd(), \
+         'sqrt': sp.linalg.sqrtm(MSsolver.Q_spd()), \
+         'eye': np.eye(2*nosc)}
+    # X = np.eye(2*nosc)
+    # RB1, s1 = POD(c_[y_list[:nosc, :], F3[:nosc, :]], X)
+    # RB2, s2 = POD(c_[y_list[-nosc:, :], F3[-nosc:, :]], X)
+    # W_r_1, s_F2_1 = POD(F2[:nosc, :], X)
+    # W_r_2, s_F2_2 = POD(F2[-nosc:, :], X)
     
     fig = figure()
     ax = fig.add_subplot(111)
-    ax.semilogy(s1)
-    ax.semilogy(s2)
-    ax.semilogy(s_F2_1)
-    ax.semilogy(s_F2_2)
     
-    nosc_r = argmin(abs(np.asarray([norm(s1[:i])/norm(s1) for i in range(len(s1))]) -0.99))
-    if nosc_r <  10:
-        nosc_r = 40  # ensure nosc_r is even
+    if MSsolvers[-1].non_quad:
+        RB, s = POD(X['sqrt'] @ y_list, X['eye'])
+        RB = LA.solve(X['sqrt'], RB)
+    
+        nosc_r = argmin(abs(np.asarray([norm(s[:i])/norm(s) for i in range(len(s))]) -0.99))
+        if nosc_r <  10:
+            nosc_r = 150  # ensure nosc_r is even
+            
+        if not np.isclose(nosc_r%2, 0):
+            nosc_r = nosc_r+1
+            
+        X.update({'eye_r': np.eye(nosc_r)})
+            
+        print('nosc_r = %s' %nosc_r)
+        # RB = RB[:, :nosc_r]
+        # RB1 = RB1[:, :nosc_r//2]
+        # RB2 = RB2[:, :nosc_r//2]
+        # RB = r_[c_[RB1, np.zeros_like(RB1)],\
+        #         c_[np.zeros_like(RB2), RB2]]
+        RB = RB[:, :nosc_r]
+    
+        # Orthogonalize RB wrt Q_spd
+        # U = sp.linalg.cholesky(RB.T @ X['Q'] @ RB) # upper triangular Cholesky factor
+        # RB = RB @ sp.linalg.solve(U, X['eye_r'])
+        assert np.allclose(RB.T @ X['Q'] @ RB, X['eye_r'])
         
-    if not np.isclose(nosc_r%2, 0):
-        nosc_r = nosc_r+1
+        # W_r1 = W_r_1[:, :nosc_r//2]
+        # W_r2 = W_r_2[:, :nosc_r//2]
+        # W_r_ = r_[c_[W_r1, np.zeros_like(W_r1)],\
+        #         c_[np.zeros_like(W_r2), W_r2]]
+        W_r_, s = POD(F2, X['eye'])
+        # W_r_ = LA.solve(X['sqrt'], W_r_)
+        W_r_ = W_r_[:, :nosc_r]
+        ax.semilogy(s)
+        # W_r = RB
         
-    print('nosc_r = %s' %nosc_r)
-    # RB = RB[:, :nosc_r]
-    RB1 = RB1[:, :nosc_r//2]
-    RB2 = RB2[:, :nosc_r//2]
-    RB = r_[c_[RB1, np.zeros_like(RB1)],\
-            c_[np.zeros_like(RB2), RB2]]
-    W_r1 = W_r_1[:, :nosc_r//2]
-    W_r2 = W_r_2[:, :nosc_r//2]
-    W_r_ = r_[c_[W_r1, np.zeros_like(W_r1)],\
-            c_[np.zeros_like(W_r2), W_r2]]
+        # Orthognalize W_r_ wrt RB
+        W_r = orthogonalize(W_r_, RB, X['eye'])
+        assert (W_r.shape == RB.shape)
+        
+        M = W_r.T @ RB
+        assert (M.shape[0] == M.shape[1]) and np.allclose(M, X['eye_r'])
+        # ax.semilogy(s2)
+        # ax.semilogy(s_F2_1)
+        # ax.semilogy(s_F2_2)
     
-    # Orthogonalize RB wrt Q_spd
-    # U = sp.linalg.cholesky(RB @ MSsolver.Q_spd(MSsolver.Omega2) @ RB.T) # upper triangular Cholesky factor
-    # RB = (RB.T @ sp.linalg.solve(U, eye(U.shape[0]))).T
-    # assert np.allclose(RB @ MSsolver.Q_spd(MSsolver.Omega2) @ RB.T, np.eye(RB.shape[0]))
+    else:
+        RB, s = POD(c_[y_list, F2], X['eye'])
     
-    # M = RB @ W_r.T
-    # assert (M.shape[0] == M.shape[1]) and np.allclose(M, np.eye(M.shape[0]))
+        nosc_r = argmin(abs(np.asarray([norm(s[:i])/norm(s) for i in range(len(s))]) -0.99))
+        if nosc_r <  10:
+            nosc_r = 100  # ensure nosc_r is even
+            
+        if not np.isclose(nosc_r%2, 0):
+            nosc_r = nosc_r+1
+            
+        X.update({'eye_r': np.eye(nosc_r)})
+            
+        print('nosc_r = %s' %nosc_r)
+        
+        RB = RB[:, :nosc_r]
+        W_r = RB
+        
+        # assert that W_r and RB are orthogonal
+        M = W_r.T @ RB
+        assert (M.shape[0] == M.shape[1]) and np.allclose(M, X['eye_r'])
+            
+    del y_list
+    gc.collect()
     
-    # Orthognalize W_r wrt RB
-    W_r = orthogonalize(W_r_, RB, X)
-    # W_r = (MSsolver.Q_spd(MSsolver.Omega2) @ RB.T).T
-    assert (W_r.shape == RB.shape)
-    
-    M = W_r.T @ RB
-    assert (M.shape[0] == M.shape[1]) and np.allclose(M, np.eye(M.shape[0]))
-    
-    
+    ax.semilogy(s)
+
     # del MSsolver
     # gc.collect()
     MSsolvers_r = []
@@ -639,7 +674,12 @@ def mor_demo():
                 'W_r': W_r}
 
         MSsolver_r = MechSystemSolver(**kwds)
-        MSsolver_r.convergence_rates()
+        # MSsolver_r.convergence_rates()
+                
+        start = process_time()
+        MSsolver_r.solve()
+        end = process_time()
+        MSsolver_r.time_lapsed.append(end-start)
         
         if dt_space.size > 1 and np.allclose(MSsolver_r.Omega2, Omega2_space[-1]):
              # compute errors only for fixed Omega2
@@ -659,35 +699,34 @@ def mor_demo():
     time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
                                (dt_space_dim, Omega2_space_dim)))
     time_lapsed[1] = (time_lapsed[1]/time_lapsed[0]*100)
-    #time_lapsed.append(nan*time_lapsed[0])
+    
+    '''
+    time_lapsed.append(nan*time_lapsed[0])
+    '''
     
 
     # Hyper-reduced model
-    # _, s, U = rb_svd(MSsolver.F3)
-    # U, s = POD(MSsolver.F3.T, X)
-    # U = U.T
-    # del MSsolver
-    # # del F3
-    # ax.semilogy(s)
-    # U = U.T
+    
+    if MSsolvers[-1].non_quad:
+        U, s = POD(X['sqrt'] @F3, X['eye'])
+        U = LA.solve(X['sqrt'], U)
+        U = U[:, :nosc_r]
+    
+        # Orthogonalize U wrt Q_spd
+        # U_ = sp.linalg.cholesky(U.T @ X['Q'] @ U) # upper triangular Cholesky factor
+        # U = U @ sp.linalg.solve(U_, X['eye_r'])
+        assert np.allclose(U.T @ X['Q'] @ U, X['eye_r'])
+    else:
+        U, s = POD(F2, X['eye'])
+        U = U[:, :nosc_r]
+        
+    
     
     # fig = figure()
-    # ax = fig.add_subplot(111)
-    # ax.plot(range(U.shape[0]), U[:,:nosc_r])
-    
-    
-    P1, _ = DEIM(W_r1, plot_deim=False)
-    P2, _ = DEIM(W_r2, plot_deim=False)
-    
-    U = r_[c_[W_r1, np.zeros_like(W_r1)],\
-           c_[np.zeros_like(W_r2), W_r2]]
-    P = r_[c_[P1, np.zeros_like(P1)],\
-           c_[np.zeros_like(P2), P2]]
-    
-    # Orthogonalize U wrt Q_spd
-    # U_ = sp.linalg.cholesky(U.T @ MSsolver_r.Q_spd(MSsolver_r.Omega2) @ U) # upper triangular Cholesky factor
-    # U = U @ sp.linalg.solve(U_, eye(U_.shape[0]))
-    # assert np.allclose(U.T @ MSsolver_r.Q_spd(MSsolver_r.Omega2) @ U, np.eye(U.shape[1]))
+    # ax.semilogy(s1)
+    ax.semilogy(s)
+        
+    P, _ = DEIM(U, plot_deim=False)
     
     
     # POD-DEIM reduced model
@@ -708,7 +747,12 @@ def mor_demo():
                 'P': P}
             
         MSsolver_dr = MechSystemSolver(**kwds)
-        MSsolver_dr.convergence_rates()
+        # MSsolver_dr.convergence_rates()
+                
+        start = process_time()
+        MSsolver_dr.solve()
+        end = process_time()
+        MSsolver_dr.time_lapsed.append(end-start)
         
         if dt_space.size > 1 and np.allclose(MSsolver_dr.Omega2, Omega2_space[-1]):
              # compute errors only for fixed Omega2
@@ -720,6 +764,9 @@ def mor_demo():
             sym_error_.append(sqrt(dt)*LA.norm(MSsolver_dr.sym_error))
             
         MSsolvers_dr.append(MSsolver_dr)
+        
+    if MSsolvers_dr[-1].non_quad: # is not None
+        assert Omega2_space_dim == 1
         
     MSsolvers_dr[-1].measures(eng_error_, sym_error_, dt_space)
         
@@ -734,14 +781,20 @@ def mor_demo():
 
     # What works:
         # Results are sensitive to parameters
-        # Unconstrained and conservative system give correct order and plots with Implicit midpoint
-        # Method order cannot be tested with energy error for constrained and dissipative systems because energy is not preserved
-        # Spherical constraints with dissipatation giver order ~3 for implicit midpoint for both full and reduced models. But not time gain.
+        # Reduced model works perfectly: efficient and accurate
+        # Hyper-reduced model is efficient and accurate only for the non-conservative case.
+        # Structure-preserving hyper-reduced model: the solution either doesn't converge or is highly inaccurate
+        # and inefficient when it converges but the symplectic error is zero.
         
     # Next steps:
-        # Q-orthogonality of V and V'W=I cannot be maintained simultaneously. 
-        # Implement structure-preserving reduction for unconstrained problem
-        # Implement structure-preserving reduction for constrained problem
+        # Q-orthogonality of V and V'W=I cannot be maintained simultaneously.
+        # Implement structure-preserving hyper-reduction
+        
+    # TODOs:
+        # Pass Omega as a parameter
+        # Update H for DEIM-reduced system
+        # Simulate with a simpler Hamiltonian
+        # figure out if the weighted projection matrix RB is computed correctly
         
 if __name__ == '__main__':
     mor_demo()

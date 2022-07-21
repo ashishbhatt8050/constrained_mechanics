@@ -43,17 +43,19 @@ def POD(S, Xh, eps=None):
         Nh, ns = S.shape
         if ns <= Nh:
             C_ = S.T @ Xh @ S
-            Sigma2, Psi = np.linalg.eigh(C_)
-            Sigma2, Psi = np.flip(Sigma2), np.flip(Psi, axis=1)
+            Sigma2_, Psi = np.linalg.eigh(C_)
+            # Sigma2, Psi = np.flip(Sigma2), np.flip(Psi, axis=1)
+            Sigma2, Psi = Sigma2_[Sigma2_>0], Psi.T[Sigma2_>0].T
             Chi = S @ Psi/np.sqrt(Sigma2)
         else:
             Xh_half = sp.linalg.sqrtm(Xh)
             K_ = Xh_half @ S @ S.T @ Xh_half
-            Sigma2, Chi_ = np.linalg.eigh(K_)
-            Sigma2, Chi_ = np.flip(Sigma2), np.flip(Chi_, axis=1)
+            Sigma2_, Chi_ = np.linalg.eigh(K_)
+            # Sigma2, Chi_ = np.flip(Sigma2), np.flip(Chi_, axis=1)
+            Sigma2, Chi_ = Sigma2_[Sigma2_>0], Chi_.T[Sigma2_>0].T
             Chi = np.linalg.solve(Xh_half, Chi_)
         
-        assert np.allclose(Chi.T @ Xh @ Chi, np.eye(Nh))
+        assert np.allclose(Chi.T @ Xh @ Chi, np.eye(Chi.shape[1]))
         
     if eps is not None:
         N = np.argmin([sum(Sigma2[:i])/sum(Sigma2) -1 +eps for i in range(Sigma2.size)])

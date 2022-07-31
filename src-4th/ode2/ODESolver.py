@@ -81,10 +81,10 @@ class ODESolver(object):
         # Time loop
         for k in range(n-1):
             self.k = k
-            self.u[k+1] = self.advance()
+            self.u[k+1], info_ = self.advance()
             if terminate(self.u, self.t, self.k+1):
                 break  # terminate loop over k
-        return self.u[:k+2], self.t[:k+2]
+        return self.u[:k+2], self.t[:k+2], info_
 
     def var_solve(self, u, time_points, terminate=None):
         """
@@ -306,16 +306,15 @@ Could not import module "Newton". Place Newton.py in this directory
                 dfdw = self.dfdw
                 return dfdw([w, u[k]], [t[k+1], t[k]], dt)
 
-        
         if w_start is None: w_start = u[k] + dt*f(u[k], t[k])  # Forward Euler step
-        u_new, n, F_value = self.Newton(F, w_start, dFdw, N=100)
+        u_new, n, info = self.Newton(F, w_start, dFdw, N=100, store=True)
         if k == 0:
             self.Newton_iter = []
         self.Newton_iter.append(n)
         if n >= 100:
             print("Newton's failed to converge at t=%g "\
                   "(%d iterations)" % (t[k+1], n))
-        return u_new
+        return u_new, info
 
     def var_advance(self):
         u, dfdu, k, t, I_mat = self.u, self.dfdu, self.k, self.t, self.I_mat
@@ -364,7 +363,10 @@ class ConformalImplicitMidpoint(ImplicitMidpoint):
         self.u[k] = self.Ecoeff(-dt)*self.u[k]
         w_start = self.u[k] + dt*(self.f(self.u[k], self.t[k]) -self.beta/2*self.u[k])  # Forward Euler step
         
-        u_new = self.Ecoeff(-dt)*ImplicitMidpoint.advance(self, w_start=w_start)
+        u_new, info = ImplicitMidpoint.advance(self, w_start=w_start)
+        
+        u_new = self.Ecoeff(-dt)*u_new
+        info = self.Ecoeff(-dt)*np.array(info)
         
         self.u[k] = self.Ecoeff(dt)*self.u[k]
         
@@ -393,7 +395,7 @@ class ConformalImplicitMidpoint(ImplicitMidpoint):
         #     print("Newton's failed to converge at t=%g "\
         #           "(%d iterations)" % (t[k+1], n))
                 
-        return u_new
+        return u_new, info
 
     def var_advance(self):
         u, dfdu, k, t, Ecoeff, I_mat = self.u, self.dfdu, self.k, self.t, \

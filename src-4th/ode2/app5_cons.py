@@ -31,74 +31,8 @@ class Params(object):
         "Oscillator properties"
         self.nosc = nosc = kwds['nosc']
         
-        self.Omega2 = kwds['Omega2']
-        Omega2 = self.Omega2
-        self.Omega2_00 = lambda Omega2=Omega2: r_[Omega2, np.ones_like(Omega2)]
-        
-        alpha = list(linspace(0.1,0.5,num=nosc))
-        alpha /= sqrt(sum(np.array(alpha)**2))
-        assert np.isclose(np.array(alpha).dot(alpha), 1), "alpha**2 must be equal to 1"
-        self.alpha = alpha
-        self.beta = (max(1e-2, 0*np.random.rand()/10))
-
-        "MechSystem constituents"
-        kin = lambda u: sum((u**2), axis=1)/2.0
-        pot = lambda x, Omega2=Omega2: 1-sum(cos(Omega2*x), axis=1)
-        # pot = lambda x, Omega2=Omega2: 1 -sum(1-(Omega2*x)**2/2+(Omega2*x)**4/24, axis=1)
-        
-        "Find symbolic quantities"
-        # def get_equations(d=nosc):
-        #     x_ = sympy.Matrix([sympy.symbols('x%d' % i) for i in range(d)])
-        #     u_ = sympy.Matrix([sympy.symbols('u%d' % i) for i in range(d)])
-        #     Omega2_ = sympy.Matrix([sympy.symbols('Omega2%d' % i) for i in range(d)])
-            
-        #     kin_ = u_.dot(u_)/2
-        #     pot_ = 1 -sum(sympy.Matrix([sympy.cos(\
-        #                             sympy.matrices.dense.matrix_multiply_elementwise(Omega2_, x_)[i])\
-        #                             for i in range(d)]))
-        #     ham_ = kin_ +pot_
-        #     f_ham = sympy.lambdify((x_,u_,Omega2_), ham_, 'numpy')
-            
-        #     ham_z_ = sympy.Matrix([ham_]).jacobian([x_,u_]).T
-        #     f_ham_z = sympy.lambdify((x_,u_,Omega2_), ham_z_, 'numpy')
-            
-        #     ham_zz_ = ham_z_.jacobian([x_,u_])
-        #     f_ham_zz = sympy.lambdify((x_,u_,Omega2_), ham_zz_, 'numpy')
-            
-        #     return f_ham, f_ham_z, f_ham_zz
-        
-        # f_ham, f_ham_z, f_ham_zz = get_equations()
-            
-        # self.ham = lambda x, u, Omega2=Omega2: f_ham(x, u, Omega2)
-        # self.ham_z = lambda x, u, Omega2=Omega2: f_ham_z(x, u, Omega2)
-        # self.ham_zz = lambda x, u, Omega2=Omega2: f_ham_zz(x, u, Omega2)
-        
-        self.ham = lambda x, u, Omega2=Omega2: pot(x, Omega2) +kin(u) +self.beta/2 * sum(x*u, axis=1)
-                                                
-        self.ham_z = lambda x, u, Omega2=Omega2: self.Omega2_00(Omega2) * r_[sin(Omega2*x), u] \
-                                                +self.beta/2 * r_[u, x]
-        self.ham_zz = lambda x, u, Omega2=Omega2: diag(self.Omega2_00(Omega2) * r_[cos(Omega2*x), np.ones_like(x)] *self.Omega2_00(Omega2)) \
-                                            + self.beta/2 * r_[c_[zeros(x.shape*2), eye(x.shape[0])],\
-                                                                c_[eye(x.shape[0]), zeros(x.shape*2)]]
-                                                
-        # self.ham_z = lambda x, u, Omega2=Omega2: self.Omega2_00(Omega2) * r_[(Omega2*x)-(Omega2*x)**3/6, u] \
-        #                                         +self.beta/2 * r_[u, x]
-        # self.ham_zz = lambda x, u, Omega2=Omega2: diag(self.Omega2_00(Omega2) * r_[1-(Omega2*x)**2/2, np.ones_like(x)] *self.Omega2_00(Omega2)) \
-        #                                     + self.beta/2 * r_[c_[zeros(x.shape*2), eye(x.shape[0])],\
-        #                                                         c_[eye(x.shape[0]), zeros(x.shape*2)]]
-            
-                                                
-        self.Q_spd = lambda Omega2=Omega2: self.ham_zz(0*Omega2,0*Omega2, Omega2)
-        self.JJ = lambda d=nosc: r_[c_[zeros((d,d)), eye(d)],\
-                                      c_[-eye(d), zeros((d,d))]]
-        self.drag = lambda x, u: self.beta/2 * r_[x, u]
-        self.drag_z = lambda x, u: self.beta/2 * r_[c_[eye(x.shape[0]), zeros(x.shape*2)],\
-                                              c_[zeros(x.shape*2), eye(x.shape[0])]]
-            
-        self.non_quad = lambda x, u, Omega2=Omega2: self.ham(x,u, Omega2) -1/2 *c_[x, u] @ self.Q_spd() @ c_[x, u].T
-        self.non_quad_z = lambda x, u, Omega2=Omega2: self.ham_z(x,u,Omega2) - self.Q_spd(Omega2) @ r_[x, u]
-        self.non_quad_zz = lambda x, u, Omega2=Omega2: self.ham_zz(x,u,Omega2) - self.Q_spd(Omega2)
-        self.non_quad = None
+        self.system(kwds)
+        alpha = self.alpha
         
         "Initial conditions"
         y_init = r_[np.linspace(1,5,nosc), 0*np.linspace(1,5,nosc)]
@@ -203,7 +137,7 @@ class Params(object):
         
         self.dt = kwds['dt']
          
-        self.T_final = 5
+        self.T_final = 1
         
         w_values = [0.28, 0.62546642846767004501]
         w_values.append(1.0 -2.0*(sum(w_values)))
@@ -234,6 +168,80 @@ class Params(object):
     @u_init.setter
     def u_init(self, value):
         self.y_init = value
+        
+    def system(self, kwds):
+        nosc = self.nosc
+    
+        if 'Omega2' in kwds:
+            self.Omega2 = kwds['Omega2']
+            Omega2 = self.Omega2
+            self.Omega2_00 = lambda Omega2=Omega2: r_[Omega2, np.ones_like(Omega2)]
+            
+            alpha = list(linspace(0.1,0.5,num=nosc))
+            alpha /= sqrt(sum(np.array(alpha)**2))
+            assert np.isclose(np.array(alpha).dot(alpha), 1), "alpha**2 must be equal to 1"
+            self.alpha = alpha
+            self.beta = (max(1e-2, 0*np.random.rand()/10))
+    
+            "MechSystem constituents"
+            kin = lambda u: sum((u**2), axis=1)/2.0
+            pot = lambda x, Omega2=Omega2: 1-sum(cos(Omega2*x), axis=1)
+            # pot = lambda x, Omega2=Omega2: 1 -sum(1-(Omega2*x)**2/2+(Omega2*x)**4/24, axis=1)
+            
+            "Find symbolic quantities"
+            # def get_equations(d=nosc):
+            #     x_ = sympy.Matrix([sympy.symbols('x%d' % i) for i in range(d)])
+            #     u_ = sympy.Matrix([sympy.symbols('u%d' % i) for i in range(d)])
+            #     Omega2_ = sympy.Matrix([sympy.symbols('Omega2%d' % i) for i in range(d)])
+                
+            #     kin_ = u_.dot(u_)/2
+            #     pot_ = 1 -sum(sympy.Matrix([sympy.cos(\
+            #                             sympy.matrices.dense.matrix_multiply_elementwise(Omega2_, x_)[i])\
+            #                             for i in range(d)]))
+            #     ham_ = kin_ +pot_
+            #     f_ham = sympy.lambdify((x_,u_,Omega2_), ham_, 'numpy')
+                
+            #     ham_z_ = sympy.Matrix([ham_]).jacobian([x_,u_]).T
+            #     f_ham_z = sympy.lambdify((x_,u_,Omega2_), ham_z_, 'numpy')
+                
+            #     ham_zz_ = ham_z_.jacobian([x_,u_])
+            #     f_ham_zz = sympy.lambdify((x_,u_,Omega2_), ham_zz_, 'numpy')
+                
+            #     return f_ham, f_ham_z, f_ham_zz
+            
+            # f_ham, f_ham_z, f_ham_zz = get_equations()
+                
+            # self.ham = lambda x, u, Omega2=Omega2: f_ham(x, u, Omega2)
+            # self.ham_z = lambda x, u, Omega2=Omega2: f_ham_z(x, u, Omega2)
+            # self.ham_zz = lambda x, u, Omega2=Omega2: f_ham_zz(x, u, Omega2)
+            
+            self.ham = lambda x, u, Omega2=Omega2: pot(x, Omega2) +kin(u) +self.beta/2 * sum(x*u, axis=1)
+                                                    
+            self.ham_z = lambda x, u, Omega2=Omega2: self.Omega2_00(Omega2) * r_[sin(Omega2*x), u] \
+                                                    +self.beta/2 * r_[u, x]
+            self.ham_zz = lambda x, u, Omega2=Omega2: diag(self.Omega2_00(Omega2) * r_[cos(Omega2*x), np.ones_like(x)] *self.Omega2_00(Omega2)) \
+                                                + self.beta/2 * r_[c_[zeros(x.shape*2), eye(x.shape[0])],\
+                                                                    c_[eye(x.shape[0]), zeros(x.shape*2)]]
+                                                    
+            # self.ham_z = lambda x, u, Omega2=Omega2: self.Omega2_00(Omega2) * r_[(Omega2*x)-(Omega2*x)**3/6, u] \
+            #                                         +self.beta/2 * r_[u, x]
+            # self.ham_zz = lambda x, u, Omega2=Omega2: diag(self.Omega2_00(Omega2) * r_[1-(Omega2*x)**2/2, np.ones_like(x)] *self.Omega2_00(Omega2)) \
+            #                                     + self.beta/2 * r_[c_[zeros(x.shape*2), eye(x.shape[0])],\
+            #                                                         c_[eye(x.shape[0]), zeros(x.shape*2)]]
+                
+                                                    
+            self.Q_spd = lambda Omega2=Omega2: self.ham_zz(0*Omega2,0*Omega2, Omega2)
+            self.JJ = lambda d=nosc: r_[c_[zeros((d,d)), eye(d)],\
+                                          c_[-eye(d), zeros((d,d))]]
+            self.drag = lambda x, u: self.beta/2 * r_[x, u]
+            self.drag_z = lambda x, u: self.beta/2 * r_[c_[eye(x.shape[0]), zeros(x.shape*2)],\
+                                                  c_[zeros(x.shape*2), eye(x.shape[0])]]
+                
+            self.non_quad = lambda x, u, Omega2=Omega2: self.ham(x,u, Omega2) -1/2 *c_[x, u] @ self.Q_spd() @ c_[x, u].T
+            self.non_quad_z = lambda x, u, Omega2=Omega2: self.ham_z(x,u,Omega2) - self.Q_spd(Omega2) @ r_[x, u]
+            self.non_quad_zz = lambda x, u, Omega2=Omega2: self.ham_zz(x,u,Omega2) - self.Q_spd(Omega2)
+            self.non_quad = None
+
  
 #%% Define the system
 class MechSystem(Params):
@@ -518,7 +526,6 @@ class MechSystemSolver(MechSystem):
         r_values = []
         C_values = []
         
-        
         r_form = lambda numer, denom: (log(roll(numer, -1)/numer)/log(roll(denom, -1)/denom))[:-1]
         C_form = lambda numer, denom, r: numer[:-1]/(denom[:-1]**r)
         
@@ -548,7 +555,7 @@ class MechSystemSolver(MechSystem):
 def mor_demo():
     "Model order reduction of the MechSystem using MechSystemSolver"
     
-    registered_solver_classes, nosc = [ODESolver.ImplicitMidpoint], 200
+    registered_solver_classes, nosc = [ODESolver.ConformalImplicitMidpoint], 200
     num_solver_classes = len(registered_solver_classes)
         
     dt_space_dim = 3
@@ -557,50 +564,16 @@ def mor_demo():
     Omega2_space_dim = 3
     Omega2_space = 1 +np.random.rand(Omega2_space_dim, nosc)/1000
     
-    MSsolvers = []
-    eng_error_ = []
-    sym_error_ = []
-    i_range = np.random.randint(0, nosc, 3)
+    kwds = {'nosc': nosc, \
+            'dt_space': dt_space, \
+            'Omega2_space': Omega2_space, \
+            'registered_solver_classes': registered_solver_classes, \
+            'i_range': np.random.randint(0, nosc, 3)}
+        
+    MSsolvers = solver(kwds)
     
-    for solver_class, dt, Omega2 in [(x,y,z) for x in registered_solver_classes for y in dt_space for z in Omega2_space]:
-        
-        kwds = {'nosc': nosc, \
-                'registered_solver_classes': registered_solver_classes, \
-                'solver_class': solver_class, \
-                'dt': dt, \
-                'Omega2': Omega2,
-                'i_range': i_range}
-        
-        MSsolver = MechSystemSolver(**kwds)
-        # MSsolver.convergence_rates()
-                
-        start = process_time()
-        MSsolver.solve()
-        end = process_time()
-        MSsolver.time_lapsed.append(end-start)
-        
-        if dt_space.size > 1 and np.allclose(MSsolver.Omega2, Omega2_space[-1]):
-             # compute errors only for fixed Omega2
-            if (not MSsolver.beta) and (MSsolver.constraint_type is None):
-                "Energy (Hamiltonian) is an invariant for unconstrained conservative system"
-                MSsolver.eng_error =MSsolver.en_err()
-                eng_error_.append(sqrt(dt)*LA.norm(MSsolver.eng_error))
-                
-            sym_error_.append(sqrt(dt)*LA.norm(MSsolver.sym_error))
-            
-        MSsolver.F2 = c_[np.array([MSsolver.ham_z(MSsolver.y[k,:nosc], MSsolver.y[k,nosc:])\
-                                                             for k in range(MSsolver.y.shape[0])]).T, \
-                        np.array([MSsolver.ham_z(MSsolver.info[k,:nosc], MSsolver.info[k,nosc:])\
-                                                             for k in range(MSsolver.info.shape[0])]).T]
-            
-        MSsolver.F3 = c_[np.array([MSsolver.non_quad_z(MSsolver.y[k,:nosc],\
-                                MSsolver.y[k,nosc:]) for k in range(MSsolver.y.shape[0])]).T, \
-                        np.array([MSsolver.non_quad_z(MSsolver.info[k,:nosc],\
-                                MSsolver.info[k,nosc:]) for k in range(MSsolver.info.shape[0])]).T]
-            
-        MSsolvers.append(MSsolver)
-        
-    MSsolvers[-1].measures(eng_error_, sym_error_, dt_space)
+    if MSsolvers[-1].non_quad: # is not None
+        assert Omega2_space_dim == 1
     
     time_lapsed = [reshape([x.time_lapsed for x in MSsolvers],\
                            (num_solver_classes, dt_space_dim, Omega2_space_dim))]
@@ -609,8 +582,8 @@ def mor_demo():
     F2 = np.hstack([MSsolvers[i].F2 for i in range(len(MSsolvers))])
     F3 = np.hstack([MSsolvers[i].F3 for i in range(len(MSsolvers))])
     
-    X = {'Q': MSsolver.Q_spd(), \
-         'sqrt': sp.linalg.sqrtm(MSsolver.Q_spd()), \
+    X = {'Q': MSsolvers[-1].Q_spd(), \
+         'sqrt': sp.linalg.sqrtm(MSsolvers[-1].Q_spd()), \
          'eye': np.eye(2*nosc)}
     
     fig = figure()
@@ -670,52 +643,16 @@ def mor_demo():
     del y_list
     gc.collect()
     
-    # del MSsolver
-    # gc.collect()
-    MSsolvers_r = []
-    eng_error_ = []
-    sym_error_ = []
-    i_range_r = np.random.randint(0, nosc_r, 3)
-    
-    for solver_class, dt, Omega2 in [(x,y,z) for x in registered_solver_classes for y in dt_space for z in Omega2_space]:
-        
-        kwds = {'nosc': nosc, \
-                'registered_solver_classes': registered_solver_classes, \
-                'solver_class': solver_class, \
-                'dt': dt, \
-                'Omega2': Omega2,\
-                'RB': RB,\
+    kwds.update({'RB': RB,\
                 'W_r': W_r,\
-                'i_range_r': i_range_r,\
-                'i_range': i_range}
-
-        MSsolver_r = MechSystemSolver(**kwds)
-        # MSsolver_r.convergence_rates()
-                
-        start = process_time()
-        MSsolver_r.solve()
-        end = process_time()
-        MSsolver_r.time_lapsed.append(end-start)
+                'i_range_r': np.random.randint(0, nosc_r, 3)})
         
-        if dt_space.size > 1 and np.allclose(MSsolver_r.Omega2, Omega2_space[-1]):
-             # compute errors only for fixed Omega2
-            if (not MSsolver_r.beta) and (MSsolver_r.constraint_type is None):
-                "Energy (Hamiltonian) is an invariant for unconstrained conservative system"
-                MSsolver_r.eng_error =MSsolver_r.en_err()
-                eng_error_.append(sqrt(dt)*LA.norm(MSsolver_r.eng_error))
-                
-            sym_error_.append(sqrt(dt)*LA.norm(MSsolver_r.sym_error))
-            
-        MSsolvers_r.append(MSsolver_r)
-        
-    MSsolvers_r[-1].measures(eng_error_, sym_error_, dt_space)
+    MSsolvers_r = solver(kwds)
         
     print(np.amax(abs(MSsolvers[-1].y -MSsolvers_r[-1].y)))
     
     time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
-                               (num_solver_classes, dt_space_dim, Omega2_space_dim)))
-    time_lapsed[-1] = (time_lapsed[-1]/time_lapsed[0]*100)
-    
+                               time_lapsed[0].shape)/time_lapsed[0]*100)    
 
     # Hyper-reduced model
     if MSsolvers[-1].non_quad:
@@ -735,55 +672,16 @@ def mor_demo():
     
     P = P[:, :2*nosc_r]
     
+    kwds.update({'U': U,\
+                'P': P})
     
     # POD-DEIM reduced model
-    MSsolvers_dr = []
-    eng_error_ = []
-    sym_error_ = []
-    
-    for solver_class, dt, Omega2 in [(x,y,z) for x in registered_solver_classes for y in dt_space for z in Omega2_space]:
-        
-        kwds = {'nosc': nosc, \
-                'registered_solver_classes': registered_solver_classes, \
-                'solver_class': solver_class, \
-                'dt': dt, \
-                'Omega2': Omega2,\
-                'RB': RB,\
-                'W_r': W_r,\
-                'U': U,\
-                'P': P,\
-                'i_range_r': i_range_r,\
-                'i_range': i_range}
-            
-        MSsolver_dr = MechSystemSolver(**kwds)
-        # MSsolver_dr.convergence_rates()
-                
-        start = process_time()
-        MSsolver_dr.solve()
-        end = process_time()
-        MSsolver_dr.time_lapsed.append(end-start)
-        
-        if dt_space.size > 1 and np.allclose(MSsolver_dr.Omega2, Omega2_space[-1]):
-             # compute errors only for fixed Omega2
-            if (not MSsolver_dr.beta) and (MSsolver_dr.constraint_type is None):
-                "Energy (Hamiltonian) is an invariant for unconstrained conservative system"
-                MSsolver_dr.eng_error =MSsolver_dr.en_err()
-                eng_error_.append(sqrt(dt)*LA.norm(MSsolver_dr.eng_error))
-                
-            sym_error_.append(sqrt(dt)*LA.norm(MSsolver_dr.sym_error))
-            
-        MSsolvers_dr.append(MSsolver_dr)
-        
-    if MSsolvers_dr[-1].non_quad: # is not None
-        assert Omega2_space_dim == 1
-        
-    MSsolvers_dr[-1].measures(eng_error_, sym_error_, dt_space)
+    MSsolvers_dr = solver(kwds)
         
     print(np.amax(abs(MSsolvers[-1].y -MSsolvers_dr[-1].y)))
     
     time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_dr],\
-                               (num_solver_classes, dt_space_dim, Omega2_space_dim)))
-    time_lapsed[-1] = time_lapsed[-1]/time_lapsed[0]*100
+                               time_lapsed[0].shape)/time_lapsed[0]*100)
     
     # tex_table('', time_lapsed)
     print(time_lapsed)
@@ -805,6 +703,54 @@ def mor_demo():
         # Pass Omega as a parameter
         # find derivatives symbolically 
         # Simulate with a simpler Hamiltonian
+    
+    
+def solver(kwds):
+
+    MSsolvers = []
+    eng_error_ = []
+    sym_error_ = []
+    nosc = kwds['nosc']
+
+    for solver_class, dt, Omega2 in [(x,y,z) for x in kwds['registered_solver_classes'] for y in kwds['dt_space'] for z in kwds['Omega2_space']]:
+        
+        kwds.update({'solver_class': solver_class, \
+                    'dt': dt, \
+                    'Omega2': Omega2})
+        
+        MSsolver = MechSystemSolver(**kwds)
+        # MSsolver.convergence_rates()
+                
+        start = process_time()
+        MSsolver.solve()
+        end = process_time()
+        MSsolver.time_lapsed.append(end-start)
+        
+        if kwds['dt_space'].size > 1 and np.allclose(MSsolver.Omega2, kwds['Omega2_space'][-1]):
+             # compute errors only for fixed Omega2
+            if (not MSsolver.beta) and (MSsolver.constraint_type is None):
+                "Energy (Hamiltonian) is an invariant for unconstrained conservative system"
+                MSsolver.eng_error =MSsolver.en_err()
+                eng_error_.append(sqrt(dt)*LA.norm(MSsolver.eng_error))
+                
+            sym_error_.append(sqrt(dt)*LA.norm(MSsolver.sym_error))
+            
+        if 'RB' not in kwds:
+            MSsolver.F2 = c_[np.array([MSsolver.ham_z(MSsolver.y[k,:nosc], MSsolver.y[k,nosc:])\
+                                                                 for k in range(MSsolver.y.shape[0])]).T, \
+                            np.array([MSsolver.ham_z(MSsolver.info[k,:nosc], MSsolver.info[k,nosc:])\
+                                                                 for k in range(MSsolver.info.shape[0])]).T]
+                
+            MSsolver.F3 = c_[np.array([MSsolver.non_quad_z(MSsolver.y[k,:nosc],\
+                                    MSsolver.y[k,nosc:]) for k in range(MSsolver.y.shape[0])]).T, \
+                            np.array([MSsolver.non_quad_z(MSsolver.info[k,:nosc],\
+                                    MSsolver.info[k,nosc:]) for k in range(MSsolver.info.shape[0])]).T]
+            
+        MSsolvers.append(MSsolver)
+        
+    MSsolver.measures(eng_error_, sym_error_, kwds['dt_space'])
+        
+    return MSsolvers
         
 if __name__ == '__main__':
     mor_demo()

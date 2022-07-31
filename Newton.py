@@ -7,7 +7,7 @@ from scipy.sparse.linalg import spsolve, ArpackNoConvergence, ArpackError
 def Newton(f, x, dfdx, epsilon=1.0E-7, N=100, store=False):
     f_value = f(x)
     n = 0
-    if store: info = [(x, f_value, np.linalg.norm(dfdx(x)))]
+    if store: info = []
     while np.linalg.norm(f_value) > epsilon and n <= N:
         dfdx_value = dfdx(x)
         if np.linalg.norm(dfdx_value) < 1E-14:
@@ -30,9 +30,11 @@ def Newton(f, x, dfdx, epsilon=1.0E-7, N=100, store=False):
             
         n += 1
         f_value = f(x)
-        if store: info.append((x, f_value, dfdx_value))
+        if store:
+            info.append(x)
+    
     if store:
-        return x, info
+        return x, n, info
     else:
         return x, n, f_value
     

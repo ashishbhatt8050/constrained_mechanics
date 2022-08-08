@@ -37,7 +37,7 @@ class Params(object):
         if 'RB' in kwds:
             self.RB = kwds['RB']
             self.nosc_r = kwds['nosc_r']
-            self.i_range_r = kwds['i_range_r']
+            # self.i_range_r = kwds['i_range_r']
         else:
             self.RB = None
                 
@@ -91,7 +91,7 @@ class Params(object):
         
         self.dt = kwds['dt']
          
-        self.T_final = 20
+        self.T_final = 2
         
         w_values = [0.28, 0.62546642846767004501]
         w_values.append(1.0 -2.0*(sum(w_values)))
@@ -241,8 +241,8 @@ class MechSystemSolver(MechSystem):
         ax4 = fig.add_subplot(gs[2:4, -1])
             
         if self.system_type == 'oscillator':
-            if self.RB is not None:
-                plot_data(ax3, self.y_red[:,self.i_range_r], self.y_red[:,self.nosc_r+self.i_range_r])
+            # if self.RB is not None:
+            #     plot_data(ax3, self.y_red[:,self.i_range_r], self.y_red[:,self.nosc_r+self.i_range_r])
                 
             plot_data(ax4, self.y[:,self.i_range], self.y[:,self.nosc+self.i_range])
                 
@@ -293,29 +293,32 @@ class MechSystemSolver(MechSystem):
 def mor_demo():
     "Model order reduction of the MechSystem using MechSystemSolver"
     
-    registered_solver_classes, nosc = [ODESolver.ImplicitMidpoint], 200
+    registered_solver_classes, nosc = [ODESolver.ConformalImplicitMidpoint], 200
     num_solver_classes = len(registered_solver_classes)
         
     dt_space_dim = 3
     
-    kwds = {'system_type': 'KdV'}
+    kwds = {'system_type': 'oscillator'}
     
     if kwds['system_type'] == 'oscillator':
             
         Omega2_space_dim = 3
         Omega2_space = 1 +np.random.rand(Omega2_space_dim, nosc)/1000
+        Omega2_space.sort()
+        
+        i_range = np.random.randint(0, nosc-3, 1)
         
         kwds.update({'nosc': nosc, \
                     'dt_space': linspace(0.05, 0.1, num=dt_space_dim), \
                     'Omega2_space': Omega2_space, \
                     'registered_solver_classes': registered_solver_classes, \
-                    'i_range': np.random.randint(0, nosc, 3)})
+                    'i_range': np.append(i_range, [i_range+1, i_range+2])})
     else:
         Omega2_space_dim = 1
         kwds.update({'dt_space': linspace(0.001, 0.009, num=dt_space_dim), \
                     'Omega2_space': np.ones((Omega2_space_dim,nosc)), \
                     'registered_solver_classes': registered_solver_classes, \
-                    'i_range': np.random.randint(0, nosc, 3)})
+                    'i_range': np.append(i_range, [i_range+1, i_range+2])})
         
     MSsolvers = solver(kwds)
     
@@ -327,7 +330,6 @@ def mor_demo():
         
     y_list = np.hstack([MSsolver.info.T for MSsolver in MSsolvers])
     F2 = np.hstack([MSsolver.F2 for MSsolver in MSsolvers])
-    F3 = np.hstack([MSsolver.F3 for MSsolver in MSsolvers])
     
     X = {'Q': MSsolvers[-1].Q_spd(), \
          'sqrt': sp.linalg.sqrtm(MSsolvers[-1].Q_spd()), \
@@ -394,7 +396,8 @@ def mor_demo():
     kwds.update({'RB': RB,\
                 'W_r': W_r,\
                 'nosc_r': nosc_r,\
-                'i_range_r': np.random.randint(0, nosc_r, 3)})
+                # 'i_range_r': np.random.randint(0, nosc_r, 3),\
+                    })
         
     MSsolvers_r = solver(kwds)
         
@@ -404,17 +407,18 @@ def mor_demo():
                                time_lapsed[0].shape)/time_lapsed[0]*100)    
 
     # Hyper-reduced model
-    
+    '''
     if MSsolvers[-1].non_quad:
+        F3 = np.hstack([MSsolver.F3 for MSsolver in MSsolvers])
         noise = np.random.normal(0, 0, F3.shape)
         U, s = POD(X['sqrt'] @(F3+noise), X['eye'])
         U_ = LA.solve(X['sqrt'], U)
-        U = U_[:, :nosc_r]
+        U = U_[:, :2*nosc_r]
         assert np.allclose(U.T @ X['Q'] @ U, X['eye_r'])
     else:
         noise = np.random.normal(0, 0, F2.shape)
         U_, s = POD(F2+noise, X['eye'])
-        U = U_[:, :nosc_r]
+        U = U_[:, :2*nosc_r]
         
     ax.semilogy(s)
         
@@ -434,7 +438,7 @@ def mor_demo():
                                time_lapsed[0].shape)/time_lapsed[0]*100)
     
     # tex_table('', time_lapsed)
-    
+    '''
     print(time_lapsed)
 
     # What works:
@@ -491,19 +495,16 @@ def solver(kwds):
                 MSsolver.norm_error = r_[0, norm_error[1:]]
             
         if 'RB' not in kwds and MSsolver.system_type == 'oscillator':
-            MSsolver.F2 = c_[np.array([MSsolver.ham_z(MSsolver.y[k,:nosc], MSsolver.y[k,nosc:])\
-                                                                 for k in range(MSsolver.y.shape[0])]).T, \
-                            np.array([MSsolver.ham_z(MSsolver.info[k,:nosc], MSsolver.info[k,nosc:])\
-                                                                 for k in range(MSsolver.info.shape[0])]).T]
+            MSsolver.F2 = np.array([MSsolver.ham_z(*np.split(y,2)) for y in MSsolver.info]).T
                 
-            MSsolver.F3 = c_[np.array([MSsolver.non_quad_z(MSsolver.y[k,:nosc],\
-                                    MSsolver.y[k,nosc:]) for k in range(MSsolver.y.shape[0])]).T, \
-                            np.array([MSsolver.non_quad_z(MSsolver.info[k,:nosc],\
-                                    MSsolver.info[k,nosc:]) for k in range(MSsolver.info.shape[0])]).T]
+            if MSsolver.non_quad:
+                MSsolver.F3 = np.array([MSsolver.non_quad_z(*np.split(y,2)) for y in MSsolver.info]).T
+            
         elif 'RB' not in kwds and MSsolver.system_type == 'KdV':
             MSsolver.F2 = np.array([MSsolver.ham_z(y) for y in MSsolver.info]).T
                 
-            MSsolver.F3 = np.array([MSsolver.non_quad_z(y) for y in MSsolver.info]).T
+            if MSsolver.non_quad:
+                MSsolver.F3 = np.array([MSsolver.non_quad_z(y) for y in MSsolver.info]).T
             
         MSsolvers.append(MSsolver)
         

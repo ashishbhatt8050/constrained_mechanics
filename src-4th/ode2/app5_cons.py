@@ -237,6 +237,7 @@ class MechSystemSolver(MechSystem):
         if hasattr(self, 'sym_error'):
             plot_data(ax0, self.t_points, self.sym_error)
             ax0.set_ylim((-1e-14, max(10*max(abs(self.sym_error)), 1e-14)))
+            ax0.set_xlim((0, self.T_final))
             # ax0.set_yticks([])
             # ax0.set_yticks([0, 2e-15, 4e-15, 6e-15, 8e-15, 10e-15])
         if hasattr(self, 'eng_error'):
@@ -255,6 +256,7 @@ class MechSystemSolver(MechSystem):
                 else:
                     mom = np.hstack([self._g(self.y[i,:], np.zeros_like(self.y_init)) for i in range(self.n+1)])
                     temp = abs(mom)
+                # temp = log(temp/np.roll(temp, 1))
                     
             else:
                 if hasattr(self, 'y_red'):
@@ -263,7 +265,8 @@ class MechSystemSolver(MechSystem):
                     temp = np.hstack([self._g(self.y[i,:]) for i in range(self.n+1)])
                 
             plot_data(ax1, self.t_points, temp)
-            ax1.set_ylim((-1e-14, 10*max(temp)))
+            ax1.set_xlim((0, self.T_final))
+            ax1.set_ylim((-1e-14, max(abs(temp))*1e1))
             # ax1.set_yticks([0, 2e-15, 4e-15, 6e-15, 8e-15, 10e-15])
             # plot_data(ax[3,0], self.t_points, temp[1])
         ax1.set_xlabel('time')
@@ -289,7 +292,7 @@ class MechSystemSolver(MechSystem):
             plot_data(ax4, self.x_points, self.y[::100, :self.nosc].T)
                 
         ax4.set_xlabel('x')
-        ax4.set_ylim((-0.1, np.amax(self.y[::100, :self.nosc])+1))
+        ax4.set_ylim((-0.1, np.amax(self.y[::100, :self.nosc])+2))
         ax4.set_xlim((-30, 30))
         ax4.set_xticks([-30, -15, 0, 15, 30])
         # ax4.set_yticks([0, 2e-15, 4e-15, 6e-15, 8e-15, 10e-15])
@@ -300,7 +303,7 @@ class MechSystemSolver(MechSystem):
         else:
             string = self.reduced_model
                 
-        fig.savefig('app5_' +self.system_type + '_' + string +'_.pdf', bbox_inches='tight')
+        fig.savefig('app5_' +self.system_type + '_' +str(self.constraint_type) + '_' + string +'_.pdf', bbox_inches='tight')
         
         for ax in [ax0, ax1]:
             ax.label_outer()
@@ -426,7 +429,7 @@ dt_space_dim = 1
 i_range = np.random.randint(0, nosc-3, 1)
 
 kwds = {'system_type': 'sine-Gordon',\
-        'symplectic_mor': True}
+        'symplectic_mor': False}
 
 if kwds['system_type'] == 'oscillator':
         
@@ -532,12 +535,6 @@ for nosc_r_ in [10, 15, 20, 25, 30]:
                 RBu, s = POD(c_[y_list[:nosc,:], F2[:nosc,:]], np.eye(nosc))
                 RBv, s2 = POD(c_[y_list[nosc:,:], F2[nosc:,:]], np.eye(nosc))
             
-                ax.semilogy(s)
-                ax.semilogy(s2)
-                ax.set_xlabel('r')
-                ax.set_ylim((min(s,s2)*1e-1, max(s,s2)))
-                ax.set_xlim((0, max(len(s), len(s2))))
-            
                 nosc_r = argmin(abs(np.asarray([norm(s[:i])/norm(s) for i in range(len(s))]) -0.99))
                 if nosc_r <  20:
                     nosc_r = nosc_r_  # ensure nosc_r is even
@@ -565,12 +562,6 @@ for nosc_r_ in [10, 15, 20, 25, 30]:
             
             RB = RB[:, :2*nosc_r]
             W_r = RB
-    
-            
-    logplot(ax, s)
-    ax.set_xlabel('index')
-    ax.set_ylim((1e-15, max(s)*1e2))
-    ax.set_xlim((0, len(s)+10))
     # ax.set_xticks(np.linspace(0, len(s)))
     
     # assert that W_r and RB are orthogonal
@@ -589,11 +580,18 @@ for nosc_r_ in [10, 15, 20, 25, 30]:
     
     time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
                                time_lapsed[0].shape)/time_lapsed[0]*100) 
-   
+
+logplot(ax, s)
+if kwds['system_type'] == 'sine-Gordon' and kwds['symplectic_mor'] == False:
+    logplot(ax, s2)
+ax.set_xlabel('index')
+ax.set_ylim((1e-15, max(s)*1e2))
+ax.set_xlim((0, len(s)+50))
+
 print(time_lapsed)
 print(solution_error)
     
-fig.savefig('app5_' +MSsolvers_r[-1].system_type + '_' + MSsolvers_r[-1].reduced_model +'_' + 'singular_values' +'_.pdf', bbox_inches='tight')
+fig.savefig('app5_' +MSsolvers_r[-1].system_type + '_' +str(MSsolvers_r[-1].constraint_type) + '_' + MSsolvers_r[-1].reduced_model +'_' + 'singular_values' +'_.pdf', bbox_inches='tight')
         
 
 #%% Hyper-reduced model

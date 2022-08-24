@@ -637,7 +637,7 @@ def sineGordon(obj, kwds):
     
     "Initial conditions"
     
-    obj.constraint_type = None
+    obj.constraint_type = 'momentum'
     CD1 = sp.linalg.toeplitz([0]+[-1]+[0]*(nosc-3)+[1], [0]+[1]+[0]*(nosc-3)+[-1])/(2*dx)
     obj._g_ = lambda z, z0=obj.y_init: np.sum(z[nosc:] * (CD1 @z[:nosc]), axis=0)*dx -np.dot(z0[nosc:], CD1 @z0[:nosc])*dx
     obj._g_prime_ = lambda z: r_[(z[:, nosc:] @CD1).T, (z[:, :nosc] @CD1.T).T]*dx

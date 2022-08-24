@@ -34,6 +34,14 @@ def rb_svd(y):
 
     return u, s, vh
 
+def cSVD(S, JJ):
+    S1, S2 = np.split(S, 2, axis=0)
+    S = S1 +1j*S2
+    Chi, Sigma, _ = rb_svd(S)
+    reChi, imChi = pl.real(Chi), pl.imag(Chi)
+    Chi = pl.c_[pl.r_[reChi, imChi], JJ.T @pl.r_[reChi, imChi]]
+    return Chi, Sigma
+
 def POD(S, Xh, eps=None):
     
     if np.allclose(Xh, np.eye(Xh.shape[0])):

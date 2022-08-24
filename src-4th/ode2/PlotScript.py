@@ -27,7 +27,8 @@ params = {
     'text.usetex': True,
     # 'text.latex.preamble': r'\boldmath',
     'figure.figsize': [14, 6],
-    'figure.autolayout': True
+    'figure.autolayout': True,
+    'axes.autolimit_mode': 'data'
 }
 rcParams.update(params)
 
@@ -56,14 +57,55 @@ def plot_data(ax, x_data, y_data, use_y_labels=True, use_legend=False):
 #    ax.plot(x, med_high_mut, linewidth=2, linestyle='--', color=colors[1])
 
     # change xlim to set_xlim
-#    ax.set_xlim(np.amin(x_data), np.amax(x_data))
-#    ax.set_ylim(np.amin(y_data), np.amax(y_data))
+    # ax.set_xlim(np.amin(x_data), np.amax(x_data))
+    # ax.set_ylim(np.amin(y_data), np.amax(y_data))
 
     #change xticks to set_xticks
-    #ax.set_xticks(np.arange(np.amin(x_data), np.amax(x_data), 100))
+    # ax.set_xticks(np.arange(np.amin(x_data), np.amax(x_data), 5))
 
     if not use_y_labels:
-        ax.set_yticklabels([])
+        ax.set_ylim((0, 3e-15))
+        ax.set_yticks([0, 1e-15, 2e-15, 3e-15])
+
+    if use_legend:
+        frame = ax.legend().get_frame()
+        frame.set_facecolor('1.0')
+        frame.set_edgecolor('1.0')
+        
+def logplot(ax, y_data, use_y_labels=True, use_legend=False):
+    # now all plot function should be applied to ax
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_visible(False)
+    ax.get_xaxis().tick_bottom()
+    ax.get_yaxis().tick_left()
+    ax.tick_params(axis='x', direction='out')
+    ax.tick_params(axis='y', length=0)
+
+    # offset the spines
+    for spine in ax.spines.values():
+            spine.set_position(('outward', 5))
+    ax.grid(axis='y', color="0.9", linestyle='-', linewidth=1)
+    # put the grid behind
+    ax.set_axisbelow(True)
+
+#    ax.fill_between(x, perc_25_low_mut, perc_75_low_mut, alpha=0.25, linewidth=0, color=colors[0])
+#    ax.fill_between(x, perc_25_high_mut, perc_75_high_mut, alpha=0.25, linewidth=0, color=colors[1])
+
+
+    ax.semilogy(y_data, linewidth=2)
+#    ax.plot(x, med_high_mut, linewidth=2, linestyle='--', color=colors[1])
+
+    # change xlim to set_xlim
+    # ax.set_xlim(np.amin(x_data), np.amax(x_data))
+    # ax.set_ylim(np.amin(y_data), np.amax(y_data))
+
+    #change xticks to set_xticks
+    # ax.set_xticks(np.arange(np.amin(x_data), np.amax(x_data), 5))
+
+    if not use_y_labels:
+        ax.set_ylim((0, 3e-15))
+        ax.set_yticks([0, 1e-15, 2e-15, 3e-15])
 
     if use_legend:
         frame = ax.legend().get_frame()

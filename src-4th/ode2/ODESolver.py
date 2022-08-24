@@ -48,7 +48,7 @@ class ODESolver(object):
         try:
             f0 = self.f(self.U0, 0)
         except IndexError:
-            raise IndexError('Index of u out of bounds in f(u,t) func. Legal indices are %s' % (str(list(range(self.neq)))))
+            raise IndexError('Index of u out of bounds in f(u,t) func. Legal indices are %s' % self.neq)
         if f0.size != self.neq:
             raise ValueError('f(u,t) returns %d components, while u has %d components' % (f0.size, self.neq))
 
@@ -148,7 +148,7 @@ class ODESolver(object):
 
         for k in range(n-1):
             dt = t[k+1] -t[k]
-            symp_error[k+1] = LA.norm((du[k+1].T).dot(LA.solve(J_mat, du[k+1])) -Ecoeff(-dt)**4*LA.solve(J_mat, eye(J_mat.shape[0])))
+            symp_error[k+1] = np.log(LA.norm((du[k+1].T).dot(LA.solve(J_mat, du[k+1])))/LA.norm(Ecoeff(-dt)**4*LA.solve(J_mat, eye(J_mat.shape[0]))))
             
         return symp_error
 

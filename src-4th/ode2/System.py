@@ -11,6 +11,7 @@ from numpy import linalg as LA
 from pylab import *
 import ODESolver
 import scipy as sp
+from scipy.linalg import block_diag
 
 class System(object):
     
@@ -102,7 +103,7 @@ class System(object):
                 raise NotImplementedError
                 
             return dfdy
-        else:
+        elif obj.system_type == 'KdV':
         
             if RB is None:
                 if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
@@ -129,6 +130,42 @@ class System(object):
                 if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
                     dfdy = obj.JJ_r @ (np.eye(obj.JJ_r.shape[0]) + obj.hhat(obj.non_quad_zz(obj.PxIPxRB(y))))\
                         - obj.W_r.T @obj.drag_z(RB @y)@ RB
+                elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
+                    dfdy = obj.JJ_r @ (np.eye(obj.JJ_r.shape[0]) + obj.hhat(obj.non_quad_zz(obj.PxIPxRB(y))))
+            else:
+                raise ValueError
+                
+            return dfdy
+        elif obj.system_type == 'sine-Gordon':
+        
+            if RB is None:
+                if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
+                    dfdy = obj.JJ() @ obj.ham_zz(*np.split(y, 2))
+                elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
+                    dfdy = obj.JJ() @ obj.ham_zz(*np.split(y, 2))
+                    
+            elif W_r is not None and P is None:
+                if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
+                    dfdy = obj.JJ_r @ RB.T @ obj.ham_zz(*np.split(y, 2)) @ RB
+                elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
+                    dfdy = obj.JJ_r @ RB.T @ obj.ham_zz(*np.split(y, 2)) @ RB
+            else:
+                raise NotImplementedError
+                    
+            return dfdy
+                    
+            if P is not None and obj.non_quad is None:
+                
+                if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
+                    dfdy = obj.JJ_r @ obj.hhat(obj.ham_zz(obj.PxIPxRB(y)))
+                elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
+                    dfdy = obj.JJ_r @ obj.hhat(obj.ham_zz(obj.PxIPxRB(y)))
+                    
+                    
+            elif P is not None and obj.non_quad is not None:
+                
+                if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
+                    dfdy = obj.JJ_r @ (np.eye(obj.JJ_r.shape[0]) + obj.hhat(obj.non_quad_zz(obj.PxIPxRB(y))))
                 elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
                     dfdy = obj.JJ_r @ (np.eye(obj.JJ_r.shape[0]) + obj.hhat(obj.non_quad_zz(obj.PxIPxRB(y))))
             else:
@@ -196,7 +233,7 @@ class System(object):
                 
             return f
         
-        else:
+        elif obj.system_type == 'KdV':
         
             if RB is None:
                 if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
@@ -228,6 +265,43 @@ class System(object):
                 raise ValueError
                 
             return f
+        
+        elif obj.system_type == 'sine-Gordon':
+        
+            if RB is None:
+                if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
+                    f = obj.JJ() @ obj.ham_z(*np.split(y, 2))
+                elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
+                    f = obj.JJ() @ obj.ham_z(*np.split(y, 2))
+                    
+            elif W_r is not None and P is None:
+                if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
+                    f = obj.JJ_r @ RB.T @ obj.ham_z(*np.split(y, 2))
+                elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
+                    f = obj.JJ_r @ RB.T @ obj.ham_z(*np.split(y, 2))
+                    
+            else:
+                raise NotImplementedError
+                    
+            return f
+                    
+            if P is not None and obj.non_quad is None:
+                
+                if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
+                    f = obj.JJ_r @ obj.hat(obj.ham_z(obj.PxIPxRB(y)))
+                elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
+                    f = obj.JJ_r @ obj.hat(obj.ham_z(obj.PxIPxRB(y)))
+                    
+            elif P is not None and obj.non_quad is not None:
+                
+                if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
+                    f = obj.JJ_r @ (y + obj.hat(obj.non_quad_z(obj.PxIPxRB(y))))
+                elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
+                    f = obj.JJ_r @ (y + obj.hat(obj.non_quad_z(obj.PxIPxRB(y))))
+            else:
+                raise ValueError
+                
+            return f
     
     @staticmethod 
     def set_constraints(obj, kwds):
@@ -242,9 +316,18 @@ class System(object):
                 obj._g = lambda y, alpha=[A_mat_, B_mat_]: obj._g_(y, alpha)
                 
                 obj._g_prime = lambda y, alpha=[A_mat_, B_mat_]: obj._g_prime_(y, alpha)
+                
+            elif kwds['system_type'] == 'sine-Gordon':
+                # CD1xRBu = obj.CD1 @obj.RB[:obj.nosc, :obj.nosc_r]
+                
+                obj._g = lambda y, z0=obj.y_init: obj._g_(obj.RB @y, z0)
+                obj._g_prime = lambda y: obj._g_prime_((y @obj.RB.T))
         
         else:
             if obj.constraint_type and kwds['system_type'] == 'oscillator':
+                obj._g = obj._g_
+                obj._g_prime = obj._g_prime_
+            elif kwds['system_type'] == 'sine-Gordon':
                 obj._g = obj._g_
                 obj._g_prime = obj._g_prime_
 
@@ -359,7 +442,7 @@ class System(object):
             "Fixed-point nonliner equations solver properties"
             obj.tol, obj.M, obj.var, obj.store = 1.0E-15, 100, True, True
                 
-        else:
+        elif kwds['system_type'] == 'KdV':
     
             "MechSystem constituents"
             nu, alpha, rho, obj.beta = -1e-5, -3/8, -1e-1, 0
@@ -420,6 +503,7 @@ class System(object):
             "Initial conditions"
             
             obj.constraint_type = 'spherical'
+            #FIXME: lift-up the constraints.
         
             "Constraints"
             # if obj.constraint_type == 'spherical':                    
@@ -431,6 +515,143 @@ class System(object):
             "Fixed-point nonliner equations solver properties"
             obj.tol, obj.M, obj.var, obj.store = 1.0E-10, 100, False, True
             
+        elif kwds['system_type'] == 'sine-Gordon':
+            sineGordon(obj, kwds)
+            
+def sineGordon(obj, kwds):
+    
+    "MechSystem constituents"
+    c, obj.beta = 0.5, 0
+    L, dx = 60, 0.187
+    nosc = obj.nosc = int((L/dx+1))
+    obj.x_points = np.array([-L/2 +i*dx for i in range(nosc)])
+    
+    c_sq = np.sqrt(1 -c**2)
+    obj.y_init = r_[4 *np.arctan(np.exp((obj.x_points -L/4)/c_sq)) \
+                    +4 *np.arctan(np.exp((-obj.x_points -L/4)/c_sq)), \
+                    4*c/c_sq *(np.exp((obj.x_points -L/4)/c_sq)/(1 +np.exp(2*(obj.x_points -L/4)/c_sq)) \
+                                +np.exp((-obj.x_points -L/4)/c_sq)/(1 +np.exp(2*(-obj.x_points -L/4)/c_sq)))]
+    
+    FD = sp.linalg.toeplitz([-1]+[0]*(nosc-2)+[1], [-1, 1]+[0]*(nosc-2))/dx # Forward difference
+    BD = sp.linalg.toeplitz([1, -1]+[0]*(nosc-2), [1]+[0]*(nosc-2)+[-1])/dx # Backward difference
+    
+    
+    if 'P' in kwds:
+        nosc = kwds['P'].shape[1]/2
+        
+    CD2 = sp.linalg.toeplitz([-2, 1]+[0]*(int(nosc)-3)+[1])/dx**2 # Second order central-difference
+    
+
+    sigma = lambda u: u**2/2
+    sigma_u = lambda u: u
+    eye_nosc = np.eye(nosc)
+    sigma_uu = lambda u: eye_nosc
+    non_f = lambda u: 1 -np.cos(u)
+    non_f_u = lambda u: np.sin(u)
+    non_f_uu = lambda u: np.diag(np.cos(u))
+    
+    obj.ham = lambda u: sum(1/2*u[:,nosc:]**2 +sigma(u[:,:nosc] @BD.T) +non_f(u[:,:nosc]), axis=1)*dx
+        
+    if 'RB' in kwds and 'P' not in kwds:
+        
+        if kwds['symplectic_mor']:
+            RB = kwds['RB']
+            RBu = lambda z: np.split(RB @z, 2, axis=0)[0]
+            RBv = lambda z: np.split(RB @z, 2, axis=0)[1]
+        
+            obj.ham_u = lambda u: -(sigma_u(FD @u) -sigma_u(BD @u))/dx +non_f_u(u)
+            obj.ham_v = lambda v: v
+            
+            obj.ham_z = lambda u, v: r_[obj.ham_u(RBu(r_[u, v])), \
+                                        obj.ham_v(RBv(r_[u, v]))]
+            
+            obj.JJ = lambda d=nosc: r_[c_[np.zeros((d,d)), np.eye(d)],\
+                                       c_[-np.eye(d), np.zeros((d,d))]]
+            
+            # non_f_uu_ = lambda u, RB: np.diag(np.cos(u) @RB)
+            obj.ham_uu = lambda u: (-CD2 +non_f_uu(u))
+            obj.ham_vv = lambda v: eye_nosc
+            
+            obj.ham_zz = lambda u, v: block_diag(obj.ham_uu(RBu(r_[u, v])), obj.ham_vv(RBv(r_[u, v])))
+            
+            obj.non_quad = None
+            obj.Q_spd = None
+            
+        else:
+            RBu = kwds['RBu']
+            RBv = kwds['RBv']
+            
+            FDxRB = FD @RBu
+            BDxRB = BD @RBu
+        
+            obj.ham_u = lambda u: -(sigma_u(FDxRB @u) -sigma_u(BDxRB @u))/dx +non_f_u(RBu @u)
+            obj.ham_v = lambda v: RBv @v
+            
+            obj.ham_z = lambda u, v: r_[obj.ham_u(u), obj.ham_v(v)]
+            
+            obj.JJ = lambda d=nosc: r_[c_[np.zeros((d,d)), np.eye(d)],\
+                                       c_[-np.eye(d), np.zeros((d,d))]]
+            
+            # non_f_uu_ = lambda u, RB: np.diag(np.cos(u) @RB)
+            obj.ham_uu = lambda u: (-CD2 +non_f_uu(RBu @u))
+            obj.ham_vv = lambda v: eye_nosc
+            
+            obj.ham_zz = lambda u, v: block_diag(obj.ham_uu(u), obj.ham_vv(v))
+            
+            obj.non_quad = None
+            obj.Q_spd = None
+
+    else:
+        # obj.ham_u = lambda u: -(sigma_u(FD @u) -sigma_u(BD @u))/dx +non_f_u(u)
+        obj.ham_u = lambda u: -CD2@u +non_f_u(u)
+        obj.ham_v = lambda v: v
+        
+        # def ham_z(u, v):
+        #     result = np.zeros(2*nosc)
+        #     result[::2] = obj.ham_u(u)
+        #     result[1::2] = obj.ham_v(v)
+        #     return result
+        
+        obj.ham_z = lambda u, v: r_[obj.ham_u(u), obj.ham_v(v)]
+        
+        # J2 = [[0, 1],[-1, 0]]
+        # rep_J2 = (J2,)*nosc
+        # JJ = block_diag(*rep_J2)
+        # obj.JJ = lambda d=nosc: JJ
+        
+        obj.JJ = lambda d=nosc: r_[c_[np.zeros((d,d)), np.eye(d)],\
+                                   c_[-np.eye(d), np.zeros((d,d))]]
+        
+        obj.ham_uu = lambda u: -CD2 +non_f_uu(u)
+        obj.ham_vv = lambda v: eye_nosc
+        
+        # def ham_zz(u, v):
+        #     result = np.zeros_like(JJ)
+        #     result[::2, ::2] = obj.ham_uu(u)
+        #     result[1::2, 1::2] = obj.ham_vv(v)
+        #     return result
+        
+        obj.ham_zz = lambda u, v: block_diag(obj.ham_uu(u), obj.ham_vv(v))
+        
+        obj.non_quad = None
+    
+    "Initial conditions"
+    
+    obj.constraint_type = None
+    CD1 = sp.linalg.toeplitz([0]+[-1]+[0]*(nosc-3)+[1], [0]+[1]+[0]*(nosc-3)+[-1])/(2*dx)
+    obj._g_ = lambda z, z0=obj.y_init: np.sum(z[nosc:] * (CD1 @z[:nosc]), axis=0)*dx -np.dot(z0[nosc:], CD1 @z0[:nosc])*dx
+    obj._g_prime_ = lambda z: r_[(z[:, nosc:] @CD1).T, (z[:, :nosc] @CD1.T).T]*dx
+    
+    "Constraints"
+    # if obj.constraint_type == 'spherical':                    
+    #     obj._g_ = lambda u: (u[1]**2 -np.exp(-2*obj.beta*dt)*u[0]**2)*dx
+    #     obj._g_prime_ = lambda u: 2*u[1]
+    # else:
+    #     raise NameError
+    
+    "Fixed-point nonliner equations solver properties"
+    obj.tol, obj.M, obj.var, obj.store = 1.0E-10, 100, True, True
+    
 
 if __name__ == '__main__':
     pass

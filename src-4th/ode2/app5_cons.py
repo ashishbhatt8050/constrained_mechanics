@@ -16,11 +16,12 @@ from numpy import linalg as LA
 from pylab import *
 import ODESolver
 from System import System
-from podDEIM import DEIM, orthogonalize, POD
-from PlotScript import plot_data, tex_table
+from podDEIM import DEIM, orthogonalize, POD, cSVD
+from PlotScript import plot_data, tex_table, logplot
 from time import process_time
 import scipy as sp
 import gc
+from scipy.linalg import block_diag
 
 from Newton import fixed_point
 
@@ -81,7 +82,14 @@ class Params(object):
             
         "Reduced MechSystem constituents"
         if self.W_r is not None:
-            self.JJ_r = self.W_r.T @ self.JJ() @ self.W_r
+            if kwds['symplectic_mor']:
+                self.JJ_r = self.JJ(self.nosc_r)
+                self.reduced_model = 'model_2'
+            else:
+                self.JJ_r = self.W_r.T @ self.JJ() @ self.W_r
+                self.reduced_model = 'model_1'
+        else:
+            self.reduced_model = 'full'
 
         
         "Numerical solver and its properties"
@@ -91,7 +99,7 @@ class Params(object):
         
         self.dt = kwds['dt']
          
-        self.T_final = 2
+        self.T_final = 50
         
         w_values = [0.28, 0.62546642846767004501]
         w_values.append(1.0 -2.0*(sum(w_values)))
@@ -159,13 +167,13 @@ class MechSystemSolver(MechSystem):
         else:
             self.y = np.zeros((self.n+1, 2*self.nosc_r))
             
-            if self.constraint_type and self.system_type == 'system':
+            if self.constraint_type and self.system_type == 'oscillator':
                 X_U = np.array([self.y_init, self.y_init])
                 X_U, _, _ = fixed_point(self._g, X_U, self._g_prime, self.tol, self.M, False)
                 self.y_init = X_U[1]
             
         self.y[0] = self.y_init
-        if self.store: self.info = []
+        self.info = []
 
         for k in range(self.n):
             self.info.append(self.y[k])
@@ -180,8 +188,10 @@ class MechSystemSolver(MechSystem):
                 if self.constraint_type and self.system_type == 'oscillator':
                     
                     y_, _, _ = fixed_point(self._g, y_, self._g_prime, self.tol, self.M, False)
-                elif self.constraint_type:
+                elif self.constraint_type and self.system_type == 'KdV':
                     y_[1] = np.exp(-2*self.beta*self.dt) *LA.norm(self.y[k])/LA.norm(y_[1]) *y_[1]
+                elif self.constraint_type and self.system_type == 'sine-Gordon':
+                    y_, _, _ = fixed_point(self._g, y_, self._g_prime, self.tol, self.M, False)
                     
 
             self.y[k+1] = y_[1]
@@ -217,45 +227,83 @@ class MechSystemSolver(MechSystem):
     def plot(self, fig):
         "plot the results"
         
-        gs = fig.add_gridspec(4, 2, hspace=1)
-        ax = gs.subplots()
+        # fig = plt.figure(figsize=(5.5, 3.5), constrained_layout=True)
+        gs = fig.add_gridspec(2, 2, hspace=1)
+        # ax = gs.subplots()
+        
+        ax0 = fig.add_subplot(gs[0,0])
+        ax1 = fig.add_subplot(gs[1,0])
+        
         if hasattr(self, 'sym_error'):
-            plot_data(ax[0,0], self.t_points, self.sym_error)
+            plot_data(ax0, self.t_points, self.sym_error)
+            ax0.set_ylim((-1e-14, max(10*max(abs(self.sym_error)), 1e-14)))
+            # ax0.set_yticks([])
+            # ax0.set_yticks([0, 2e-15, 4e-15, 6e-15, 8e-15, 10e-15])
         if hasattr(self, 'eng_error'):
-            plot_data(ax[1,0], self.t_points, self.eng_error)
+            plot_data(ax1, self.t_points, self.eng_error)
         elif hasattr(self, 'norm_error'):
-            plot_data(ax[1,0], self.t_points, self.norm_error)
+            plot_data(ax1, self.t_points, self.norm_error)
+        elif hasattr(self, 'mom_error'):
+            plot_data(ax1, self.t_points, self.mom_error)
             
         if hasattr(self, '_g'):
-            if hasattr(self, 'y_red'):
-                temp = np.hstack([self._g(self.y_red[[i],:]) for i in range(self.n+1)])
+            if self.system_type == 'sine-Gordon':
+                if hasattr(self, 'y_red'):
+                    mom = np.hstack([self._g(self.y_red[i,:], np.zeros_like(self.y[0,:])) for i in range(self.n+1)])
+                    temp = abs(mom)
+                    # temp = r_[0, mom_error[1:]]
+                else:
+                    mom = np.hstack([self._g(self.y[i,:], np.zeros_like(self.y_init)) for i in range(self.n+1)])
+                    temp = abs(mom)
+                    
             else:
-                temp = np.hstack([self._g(self.y[[i],:]) for i in range(self.n+1)])
+                if hasattr(self, 'y_red'):
+                    temp = np.hstack([self._g(self.y_red[i,:]) for i in range(self.n+1)])
+                else:
+                    temp = np.hstack([self._g(self.y[i,:]) for i in range(self.n+1)])
                 
-            plot_data(ax[2,0], self.t_points, temp[0])
-            plot_data(ax[3,0], self.t_points, temp[1])
-        ax[3,0].set_xlabel('time')
+            plot_data(ax1, self.t_points, temp)
+            ax1.set_ylim((-1e-14, 10*max(temp)))
+            # ax1.set_yticks([0, 2e-15, 4e-15, 6e-15, 8e-15, 10e-15])
+            # plot_data(ax[3,0], self.t_points, temp[1])
+        ax1.set_xlabel('time')
             
+        
         # plot_data(ax[0,1], self.t_points, )
-        ax3 = fig.add_subplot(gs[0:2, -1])
-        ax4 = fig.add_subplot(gs[2:4, -1])
+        # ax3 = fig.add_subplot(gs[0:2, -1])
+        ax4 = fig.add_subplot(gs[:, -1])
             
         if self.system_type == 'oscillator':
             # if self.RB is not None:
             #     plot_data(ax3, self.y_red[:,self.i_range_r], self.y_red[:,self.nosc_r+self.i_range_r])
                 
             plot_data(ax4, self.y[:,self.i_range], self.y[:,self.nosc+self.i_range])
-                
-            # ax[3,1].set_xlabel('time')
-            # fig.savefig('app5_err_inv.pdf', bbox_inches='tight')
-            
-            # for ax in fig.get_axes():
-            #     ax.label_outer()
-        else:
+        elif self.system_type == 'KdV':
             # plot_data(ax[0,1], self.t_points, )
-            ax4 = fig.add_subplot(gs[2:4, -1])
                 
             plot_data(ax4, self.x_points, self.y[[0,-1]].T)
+            
+        elif self.system_type == 'sine-Gordon':
+            # plot_data(ax[0,1], self.t_points, )
+                
+            plot_data(ax4, self.x_points, self.y[::100, :self.nosc].T)
+                
+        ax4.set_xlabel('x')
+        ax4.set_ylim((-0.1, np.amax(self.y[::100, :self.nosc])+1))
+        ax4.set_xlim((-30, 30))
+        ax4.set_xticks([-30, -15, 0, 15, 30])
+        # ax4.set_yticks([0, 2e-15, 4e-15, 6e-15, 8e-15, 10e-15])
+        
+        
+        if self.RB is None:
+            string = 'full'    
+        else:
+            string = self.reduced_model
+                
+        fig.savefig('app5_' +self.system_type + '_' + string +'_.pdf', bbox_inches='tight')
+        
+        for ax in [ax0, ax1]:
+            ax.label_outer()
         
 
     def measures(self, errors, dt_space):
@@ -288,188 +336,36 @@ class MechSystemSolver(MechSystem):
         # Plot the measures
         fig = figure()
         self.plot(fig)
-  
-#%% Main driver function
-def mor_demo():
-    "Model order reduction of the MechSystem using MechSystemSolver"
-    
-    registered_solver_classes, nosc = [ODESolver.ConformalImplicitMidpoint], 200
-    num_solver_classes = len(registered_solver_classes)
-        
-    dt_space_dim = 3
-    
-    kwds = {'system_type': 'oscillator'}
-    
-    if kwds['system_type'] == 'oscillator':
-            
-        Omega2_space_dim = 3
-        Omega2_space = 1 +np.random.rand(Omega2_space_dim, nosc)/1000
-        Omega2_space.sort()
-        
-        i_range = np.random.randint(0, nosc-3, 1)
-        
-        kwds.update({'nosc': nosc, \
-                    'dt_space': linspace(0.05, 0.1, num=dt_space_dim), \
-                    'Omega2_space': Omega2_space, \
-                    'registered_solver_classes': registered_solver_classes, \
-                    'i_range': np.append(i_range, [i_range+1, i_range+2])})
-    else:
-        Omega2_space_dim = 1
-        kwds.update({'dt_space': linspace(0.001, 0.009, num=dt_space_dim), \
-                    'Omega2_space': np.ones((Omega2_space_dim,nosc)), \
-                    'registered_solver_classes': registered_solver_classes, \
-                    'i_range': np.append(i_range, [i_range+1, i_range+2])})
-        
-    MSsolvers = solver(kwds)
-    
-    if MSsolvers[-1].non_quad: # is not None
-        assert Omega2_space_dim == 1
-    
-    time_lapsed = [reshape([x.time_lapsed for x in MSsolvers],\
-                           (num_solver_classes, dt_space_dim, Omega2_space_dim))]
-        
-    y_list = np.hstack([MSsolver.info.T for MSsolver in MSsolvers])
-    F2 = np.hstack([MSsolver.F2 for MSsolver in MSsolvers])
-    
-    X = {'Q': MSsolvers[-1].Q_spd(), \
-         'sqrt': sp.linalg.sqrtm(MSsolvers[-1].Q_spd()), \
-         'eye': np.eye(2*nosc)}
-    
-    fig = figure()
-    ax = fig.add_subplot(111)
-    
-    if MSsolvers[-1].non_quad:
-        np.linalg.cholesky(X['Q'])
-        RB, s = POD(X['sqrt'] @ y_list, X['eye'])
-        RB = LA.solve(X['sqrt'], RB)
-    
-        nosc_r = argmin(abs(np.asarray([norm(s[:i])/norm(s) for i in range(len(s))]) -0.99))
-        if nosc_r <  20:
-            nosc_r = 20  # ensure nosc_r is even
-            
-        X.update({'eye_r': np.eye(2*nosc_r)})
-            
-        print('nosc_r = %s' %nosc_r)
-        
-        RB = RB[:, :2*nosc_r]
-        ax.semilogy(s)
-    
-        # Orthogonalize RB wrt Q_spd
-        # U = sp.linalg.cholesky(RB.T @ X['Q'] @ RB) # upper triangular Cholesky factor
-        # RB = RB @ sp.linalg.solve(U, X['eye_r'])
-        assert np.allclose(RB.T @ X['Q'] @ RB, X['eye_r'])
-        
-        W_r_, s = POD(F2, X['eye'])
-        # W_r_ = LA.solve(X['sqrt'], W_r_)
-        W_r_ = W_r_[:, :2*nosc_r]
-        ax.semilogy(s)
-        # W_r = RB
-        
-        # Orthognalize W_r_ wrt RB
-        W_r = orthogonalize(W_r_, RB, X['eye'])
-        assert (W_r.shape == RB.shape)
-    
-    else:
-        RB, s = POD(c_[y_list, F2], X['eye'])
-    
-        ax.semilogy(s)
-    
-        nosc_r = argmin(abs(np.asarray([norm(s[:i])/norm(s) for i in range(len(s))]) -0.99))
-        if nosc_r <  20:
-            nosc_r = 20  # ensure nosc_r is even
-    
-        X.update({'eye_r': np.eye(2*nosc_r)})
-            
-        print('nosc_r = %s' %nosc_r)
-        
-        RB = RB[:, :2*nosc_r]
-        W_r = RB
-            
-    
-    # assert that W_r and RB are orthogonal
-    M = W_r.T @ RB
-    assert np.allclose(M, X['eye_r'])
-            
-    del y_list
-    gc.collect()
-    
-    kwds.update({'RB': RB,\
-                'W_r': W_r,\
-                'nosc_r': nosc_r,\
-                # 'i_range_r': np.random.randint(0, nosc_r, 3),\
-                    })
-        
-    MSsolvers_r = solver(kwds)
-        
-    print(np.amax(abs(MSsolvers[-1].y -MSsolvers_r[-1].y)))
-    
-    time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
-                               time_lapsed[0].shape)/time_lapsed[0]*100)    
 
-    # Hyper-reduced model
-    '''
-    if MSsolvers[-1].non_quad:
-        F3 = np.hstack([MSsolver.F3 for MSsolver in MSsolvers])
-        noise = np.random.normal(0, 0, F3.shape)
-        U, s = POD(X['sqrt'] @(F3+noise), X['eye'])
-        U_ = LA.solve(X['sqrt'], U)
-        U = U_[:, :2*nosc_r]
-        assert np.allclose(U.T @ X['Q'] @ U, X['eye_r'])
-    else:
-        noise = np.random.normal(0, 0, F2.shape)
-        U_, s = POD(F2+noise, X['eye'])
-        U = U_[:, :2*nosc_r]
-        
-    ax.semilogy(s)
-        
-    P, _ = DEIM(U, plot_deim=False)
-    
-    # P = P[:, :2*nosc_r]
-    
-    kwds.update({'U': U,\
-                'P': P})
-    
-    # POD-DEIM reduced model
-    MSsolvers_dr = solver(kwds)
-        
-    print(np.amax(abs(MSsolvers[-1].y -MSsolvers_dr[-1].y)))
-    
-    time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_dr],\
-                               time_lapsed[0].shape)/time_lapsed[0]*100)
-    
-    # tex_table('', time_lapsed)
-    '''
-    print(time_lapsed)
 
-    # What works:
-        # Results are sensitive to parameters
-        # Reduced model works perfectly: efficient and accurate
-        # Hyper-reduced model is efficient and accurate only for the non-conservative case.
-        # Structure-preserving hyper-reduced model: the solution either doesn't converge or is highly inaccurate
-        # and inefficient when it converges but the symplectic error is zero.
-        # The inaccuracy in the solution of the hyper-reduced model might have to
-        # do with the DEIM Hamiltonian not being close to the original Hamiltonian
-        # Symplectic error is the same for methods of different orders.
-        
-    # Next steps:
-        # Implement structure-preserving hyper-reduction
-        
-    # TODOs:
-        # Pass Omega as a parameter
-        # find derivatives symbolically 
-        # Simulate with a simpler Hamiltonian
-    
-    
 def solver(kwds):
 
     MSsolvers = []
     errors = {'energy': [], 'spl': []}
+    
+    # if kwds['nosc_r_'] != [nan]:
+    #     w_list = list(np.linspace(10, kwds['nosc_r_'], 5, dtype=int))
+    # else:
+    #     w_list = [nan]
 
-    for solver_class, dt, Omega2 in [(x,y,z) for x in kwds['registered_solver_classes'] for y in kwds['dt_space'] for z in kwds['Omega2_space']]:
+    for solver_class, dt, Omega2 in \
+        [(x,y,z) for x in kwds['registered_solver_classes'] \
+         for y in kwds['dt_space'] for z in kwds['Omega2_space'] \
+             ]:
         
         kwds.update({'solver_class': solver_class, \
                     'dt': dt, \
                     'Omega2': Omega2})
+            
+        # if kwds['nosc_r_'] != [nan]:
+        #     kwds.update({'RB': kwds['RB_'][:, :2*nosc_r], \
+        #               'W_r': kwds['W_r_'][:, :2*nosc_r], \
+        #             'nosc_r': nosc_r,\
+        #             })
+                
+        #     if kwds['symplectic_mor'] == False:
+        #         kwds.update({'RBu': kwds['RBu'][:, :nosc_r], \
+        #                     'RBv': kwds['RBv'][:, :nosc_r]})
         
         MSsolver = MechSystemSolver(**kwds)
         nosc = MSsolver.nosc
@@ -493,14 +389,20 @@ def solver(kwds):
                 norm_y = LA.norm(MSsolver.y, axis=1)
                 norm_error = log(norm_y/(np.exp(-2*MSsolver.beta*MSsolver.dt)*np.roll(norm_y, 1)))
                 MSsolver.norm_error = r_[0, norm_error[1:]]
+                
+            if kwds['system_type'] == 'sine-Gordon' and hasattr(MSsolver, '_g') and False:
+                mom = LA.norm(MSsolver._g(MSsolver.y.T, np.zeros_like(MSsolver.y[0])), axis=0)
+                mom_error = log(mom/(np.roll(mom, 1)))
+                MSsolver.mom_error = r_[0, mom_error[1:]]
             
-        if 'RB' not in kwds and MSsolver.system_type == 'oscillator':
+            
+        if 'RB' not in kwds and MSsolver.system_type in ['oscillator', 'sine-Gordon']:
             MSsolver.F2 = np.array([MSsolver.ham_z(*np.split(y,2)) for y in MSsolver.info]).T
                 
             if MSsolver.non_quad:
                 MSsolver.F3 = np.array([MSsolver.non_quad_z(*np.split(y,2)) for y in MSsolver.info]).T
             
-        elif 'RB' not in kwds and MSsolver.system_type == 'KdV':
+        elif 'RB' not in kwds:
             MSsolver.F2 = np.array([MSsolver.ham_z(y) for y in MSsolver.info]).T
                 
             if MSsolver.non_quad:
@@ -511,7 +413,241 @@ def solver(kwds):
     MSsolver.measures(errors, kwds['dt_space'])
         
     return MSsolvers
+
+#%% Main driver function
+# def mor_demo():
+"Model order reduction of the MechSystem using MechSystemSolver"
+
+registered_solver_classes, nosc = [ODESolver.ConformalImplicitMidpoint], 200
+num_solver_classes = len(registered_solver_classes)
+    
+dt_space_dim = 1
+    
+i_range = np.random.randint(0, nosc-3, 1)
+
+kwds = {'system_type': 'sine-Gordon',\
+        'symplectic_mor': True}
+
+if kwds['system_type'] == 'oscillator':
         
-if __name__ == '__main__':
-    mor_demo()
+    Omega2_space_dim = 3
+    Omega2_space = 1 +np.random.rand(Omega2_space_dim, nosc)/1000
+    Omega2_space.sort()
+    
+    kwds.update({'nosc': nosc, \
+                'dt_space': linspace(0.05, 0.1, num=dt_space_dim), \
+                'Omega2_space': Omega2_space, \
+                'registered_solver_classes': registered_solver_classes, \
+                'i_range': np.append(i_range, [i_range+1, i_range+2])})
+
+elif kwds['system_type'] == 'KdV':
+    Omega2_space_dim = 1
+    kwds.update({'dt_space': linspace(0.001, 0.009, num=dt_space_dim), \
+                'Omega2_space': np.ones((Omega2_space_dim,nosc)), \
+                'registered_solver_classes': registered_solver_classes, \
+                'i_range': np.append(i_range, [i_range+1, i_range+2])})
+
+elif kwds['system_type'] == 'sine-Gordon':
+    Omega2_space_dim = 1
+    kwds.update({'dt_space': linspace(0.05, 0.05, num=dt_space_dim), \
+                'Omega2_space': np.ones((Omega2_space_dim,nosc)), \
+                'registered_solver_classes': registered_solver_classes, \
+                'i_range': np.append(i_range, [i_range+1, i_range+2]), \
+                })
+    
+MSsolvers = solver(kwds)
+
+if MSsolvers[-1].non_quad: # is not None
+    assert Omega2_space_dim == 1
+
+time_lapsed = [reshape([x.time_lapsed for x in MSsolvers],\
+                       (num_solver_classes, dt_space_dim, Omega2_space_dim))]
+    
+
+#%%
+y_list = np.hstack([MSsolver.info.T for MSsolver in MSsolvers])
+F2 = np.hstack([MSsolver.F2 for MSsolver in MSsolvers])
+
+nosc = MSsolvers[-1].nosc
+X = {'eye': np.eye(2*nosc)}
+
+fig = figure()
+ax = fig.add_subplot(111)
+solution_error = []
+
+for nosc_r_ in [10, 15, 20, 25, 30]:
+
+    if MSsolvers[-1].non_quad:
+        X.update({'Q': MSsolvers[-1].Q_spd(), \
+         'sqrt': sp.linalg.sqrtm(MSsolvers[-1].Q_spd())})
+        
+        np.linalg.cholesky(X['Q'])
+        RB, s = POD(X['sqrt'] @ y_list, X['eye'])
+        RB = LA.solve(X['sqrt'], RB)
+    
+        nosc_r = argmin(abs(np.asarray([norm(s[:i])/norm(s) for i in range(len(s))]) -0.99))
+        if nosc_r <  20:
+            nosc_r = nosc_r_  # ensure nosc_r is even
+            
+        X.update({'eye_r': np.eye(2*nosc_r)})
+            
+        print('nosc_r = %s' %nosc_r)
+        
+        RB = RB[:, :2*nosc_r]
+    
+        # Orthogonalize RB wrt Q_spd
+        # U = sp.linalg.cholesky(RB.T @ X['Q'] @ RB) # upper triangular Cholesky factor
+        # RB = RB @ sp.linalg.solve(U, X['eye_r'])
+        assert np.allclose(RB.T @ X['Q'] @ RB, X['eye_r'])
+        
+        W_r_, s = POD(F2, X['eye'])
+        # W_r_ = LA.solve(X['sqrt'], W_r_)
+        W_r_ = W_r_[:, :2*nosc_r]
+        ax.semilogy(s)
+        ax.set_xlabel('r')
+        # W_r = RB
+        
+        # Orthognalize W_r_ wrt RB
+        W_r = orthogonalize(W_r_, RB, X['eye'])
+        assert (W_r.shape == RB.shape)
+    
+    else:
+        if kwds['system_type'] == 'sine-Gordon':
+            
+            if kwds['symplectic_mor']:
+                RB, s = cSVD(c_[y_list, F2], MSsolvers[-1].JJ())
+            
+                nosc_r = argmin(abs(np.asarray([norm(s[:i])/norm(s) for i in range(len(s))]) -0.99))
+                if nosc_r <  20:
+                    nosc_r = nosc_r_  # ensure nosc_r is even
+            
+                X.update({'eye_r': np.eye(2*nosc_r)})
+                    
+                print('nosc_r = %s' %nosc_r)
+                nCol = RB.shape[1]
+                RB = RB[:, r_[range(nosc_r), range(nCol//2,nCol//2+nosc_r)]]
+                W_r = (MSsolvers[-1].JJ(nosc_r).T @RB.T @MSsolvers[-1].JJ()).T
+            
+            else:
+                RBu, s = POD(c_[y_list[:nosc,:], F2[:nosc,:]], np.eye(nosc))
+                RBv, s2 = POD(c_[y_list[nosc:,:], F2[nosc:,:]], np.eye(nosc))
+            
+                ax.semilogy(s)
+                ax.semilogy(s2)
+                ax.set_xlabel('r')
+                ax.set_ylim((min(s,s2)*1e-1, max(s,s2)))
+                ax.set_xlim((0, max(len(s), len(s2))))
+            
+                nosc_r = argmin(abs(np.asarray([norm(s[:i])/norm(s) for i in range(len(s))]) -0.99))
+                if nosc_r <  20:
+                    nosc_r = nosc_r_  # ensure nosc_r is even
+            
+                X.update({'eye_r': np.eye(2*nosc_r)})
+                    
+                print('nosc_r = %s' %nosc_r)
+                
+                RBu, RBv = RBu[:, :nosc_r], RBv[:, :nosc_r]
+                RB = block_diag(RBu, RBv)
+                W_r = RB
+            
+                kwds.update({'RBu': RBu, 'RBv': RBv})
+            
+        else:
+            RB, s = POD(c_[y_list, F2], X['eye'])
+        
+            nosc_r = argmin(abs(np.asarray([norm(s[:i])/norm(s) for i in range(len(s))]) -0.99))
+            if nosc_r <  20:
+                nosc_r = nosc_r_  # ensure nosc_r is even
+        
+            X.update({'eye_r': np.eye(2*nosc_r)})
+                
+            print('nosc_r = %s' %nosc_r)
+            
+            RB = RB[:, :2*nosc_r]
+            W_r = RB
+    
+            
+    logplot(ax, s)
+    ax.set_xlabel('index')
+    ax.set_ylim((1e-15, max(s)*1e2))
+    ax.set_xlim((0, len(s)+10))
+    # ax.set_xticks(np.linspace(0, len(s)))
+    
+    # assert that W_r and RB are orthogonal
+    M = W_r.T @ RB
+    assert np.allclose(M, X['eye_r'])
+    
+    kwds.update({'RB': RB,\
+                'W_r': W_r,\
+                'nosc_r': nosc_r,\
+                # 'i_range_r': np.random.randint(0, nosc_r, 3),\
+                    })
+    
+    MSsolvers_r = solver(kwds)
+        
+    solution_error.append([np.amax(abs(MSsolvers[-1].y -x.y)) for x in MSsolvers_r])
+    
+    time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
+                               time_lapsed[0].shape)/time_lapsed[0]*100) 
+   
+print(time_lapsed)
+print(solution_error)
+    
+fig.savefig('app5_' +MSsolvers_r[-1].system_type + '_' + MSsolvers_r[-1].reduced_model +'_' + 'singular_values' +'_.pdf', bbox_inches='tight')
+        
+
+#%% Hyper-reduced model
+'''
+if MSsolvers[-1].non_quad:
+    F3 = np.hstack([MSsolver.F3 for MSsolver in MSsolvers])
+    noise = np.random.normal(0, 0, F3.shape)
+    U, s = POD(X['sqrt'] @(F3+noise), X['eye'])
+    U_ = LA.solve(X['sqrt'], U)
+    U = U_[:, :2*nosc_r]
+    assert np.allclose(U.T @ X['Q'] @ U, X['eye_r'])
+else:
+    noise = np.random.normal(0, 0, F2.shape)
+    U_, s = POD(F2+noise, X['eye'])
+    U = U_[:, :2*nosc_r]
+    
+ax.semilogy(s)
+    
+P, _ = DEIM(U, plot_deim=False)
+
+# P = P[:, :2*nosc_r]
+
+kwds.update({'U': U,\
+            'P': P})
+
+# POD-DEIM reduced model
+MSsolvers_dr = solver(kwds)
+    
+print(np.amax(abs(MSsolvers[-1].y -MSsolvers_dr[-1].y)))
+
+time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_dr],\
+                           time_lapsed[0].shape)/time_lapsed[0]*100)
+
+# tex_table('', time_lapsed)
+'''
+
+# What works:
+    # Results are sensitive to parameters
+    # Reduced model works perfectly: efficient and accurate
+    # Hyper-reduced model is efficient and accurate only for the non-conservative case.
+    # Structure-preserving hyper-reduced model: the solution either doesn't converge or is highly inaccurate
+    # and inefficient when it converges but the symplectic error is zero.
+    # The inaccuracy in the solution of the hyper-reduced model might have to
+    # do with the DEIM Hamiltonian not being close to the original Hamiltonian
+    # Symplectic error is the same for methods of different orders.
+    
+# Next steps:
+    # Implement structure-preserving hyper-reduction
+    
+# TODOs:
+    # Pass Omega as a parameter
+    # find derivatives symbolically 
+    # Simulate with a simpler Hamiltonian
+        
+# if __name__ == '__main__':
+#     mor_demo()
     

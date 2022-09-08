@@ -1,4 +1,5 @@
 import numpy as np
+from numpy import linalg as LA
 import scipy as sp
 from pylab import sum
 from scipy.sparse import issparse
@@ -42,15 +43,32 @@ def fixed_point(g, x, dgdx, tol, M, store):
     # TODO: convert * to matrix multiplication
     
     # m, Delta_Lambda = 0, g(x[1:2])/sum(dgdx(x[1:2])*dgdx(x[0:1]), axis=1)
-    m, Delta_Lambda = 0, g(x[1])/((dgdx(x[1:2]).dot(dgdx(x[0:1]).T)).diagonal())
+    R = dgdx(x[1]) @ dgdx(x[0]).T
+    
+    if R.shape == (1,0) or R.shape == (1,1) or R.shape == ():
+        m, Delta_Lambda = 0, g(x[1])/R
+    else:
+        m, Delta_Lambda = 0, LA.solve(R, g(x[1]))
     
     if store: info = [(m, Delta_Lambda, x[1])]
 
     while ((np.amax(abs(g(x[1]))) > tol) and (m < M)):
-        x[1] = x[1] -dgdx(x[0:1]).T.dot(Delta_Lambda)
-
-        # m, Delta_Lambda = m+1, g(x[1:2])/sum(dgdx(x[1:2])*dgdx(x[0:1]), axis=1)
-        m, Delta_Lambda = m+1, g(x[1])/((dgdx(x[1:2]).dot(dgdx(x[0:1]).T)).diagonal())
+    
+        if R.shape == (1,0) or R.shape == (1,1) or R.shape == ():
+            x[1] = x[1] -dgdx(x[0]) * Delta_Lambda
+    
+            # m, Delta_Lambda = m+1, g(x[1:2])/sum(dgdx(x[1:2])*dgdx(x[0:1]), axis=1)
+            R = dgdx(x[1]) @ dgdx(x[0]).T
+            m, Delta_Lambda = m+1, g(x[1])/R
+        else:
+            x[1] = x[1] -dgdx(x[0]).T @ Delta_Lambda
+    
+            # m, Delta_Lambda = m+1, g(x[1:2])/sum(dgdx(x[1:2])*dgdx(x[0:1]), axis=1)
+            R = dgdx(x[1]) @ dgdx(x[0]).T
+            m, Delta_Lambda = m+1, LA.solve(R, g(x[1]))
+        
+        # m, Delta_Lambda = m+1, LA.solve(R, g(x[1]))
+        
         x[0] = x[1] # TODO: needs further justification
         if store: info.append((m, Delta_Lambda, x[1]))
         

@@ -321,7 +321,7 @@ class System(object):
                 # CD1xRBu = obj.CD1 @obj.RB[:obj.nosc, :obj.nosc_r]
                 
                 obj._g = lambda y, z0=obj.y_init: obj._g_(obj.RB @y, z0)
-                obj._g_prime = lambda y: obj._g_prime_((y @obj.RB.T))
+                obj._g_prime = lambda y: obj.RB.T @obj._g_prime_((y @obj.RB.T))
         
         else:
             if obj.constraint_type and kwds['system_type'] == 'oscillator':
@@ -552,6 +552,11 @@ def sineGordon(obj, kwds):
     
     obj.ham = lambda u: sum(1/2*u[:,nosc:]**2 +sigma(u[:,:nosc] @BD.T) +non_f(u[:,:nosc]), axis=1)*dx
         
+    obj.ham_u_ = lambda u: -CD2@u +non_f_u(u)
+    obj.ham_v_ = lambda v: v
+        
+    obj.ham_z_ = lambda u, v: r_[obj.ham_u_(u), obj.ham_v_(v)].T
+    
     if 'RB' in kwds and 'P' not in kwds:
         
         if kwds['symplectic_mor']:
@@ -637,10 +642,13 @@ def sineGordon(obj, kwds):
     
     "Initial conditions"
     
-    obj.constraint_type = 'momentum'
-    CD1 = sp.linalg.toeplitz([0]+[-1]+[0]*(nosc-3)+[1], [0]+[1]+[0]*(nosc-3)+[-1])/(2*dx)
-    obj._g_ = lambda z, z0=obj.y_init: np.sum(z[nosc:] * (CD1 @z[:nosc]), axis=0)*dx -np.dot(z0[nosc:], CD1 @z0[:nosc])*dx
-    obj._g_prime_ = lambda z: r_[(z[:, nosc:] @CD1).T, (z[:, :nosc] @CD1.T).T]*dx
+    obj.constraint_type = None
+    # CD1 = sp.linalg.toeplitz([0]+[-1]+[0]*(nosc-3)+[1], [0]+[1]+[0]*(nosc-3)+[-1])/(2*dx)
+    # obj._g_ = lambda z, z0=obj.y_init: np.sum(z[nosc:] * (CD1 @z[:nosc]), axis=0)*dx -np.dot(z0[nosc:], CD1 @z0[:nosc])*dx
+    # obj._g_prime_ = lambda z: r_[z[nosc:] @CD1.T, CD1 @ z[:nosc]].T*dx
+    
+    obj._g_ = lambda z, z0=obj.y_init: obj.ham(z[None, :]) -obj.ham(z0[None, :])
+    obj._g_prime_ = lambda z: obj.ham_z_(z[:nosc], z[nosc:])
     
     "Constraints"
     # if obj.constraint_type == 'spherical':                    

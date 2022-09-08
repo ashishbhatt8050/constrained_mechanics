@@ -22,6 +22,7 @@ from time import process_time
 import scipy as sp
 import gc
 from scipy.linalg import block_diag
+from datetime import datetime
 
 from Newton import fixed_point
 
@@ -99,7 +100,7 @@ class Params(object):
         
         self.dt = kwds['dt']
          
-        self.T_final = 50
+        self.T_final = 1
         
         w_values = [0.28, 0.62546642846767004501]
         w_values.append(1.0 -2.0*(sum(w_values)))
@@ -167,7 +168,7 @@ class MechSystemSolver(MechSystem):
         else:
             self.y = np.zeros((self.n+1, 2*self.nosc_r))
             
-            if self.constraint_type and self.system_type == 'oscillator':
+            if self.constraint_type and self.system_type != 'KdV':
                 X_U = np.array([self.y_init, self.y_init])
                 X_U, _, _ = fixed_point(self._g, X_U, self._g_prime, self.tol, self.M, False)
                 self.y_init = X_U[1]
@@ -254,9 +255,10 @@ class MechSystemSolver(MechSystem):
                     temp = abs(mom)
                     # temp = r_[0, mom_error[1:]]
                 else:
-                    mom = np.hstack([self._g(self.y[i,:], np.zeros_like(self.y_init)) for i in range(self.n+1)])
+                    mom = np.hstack([self._g(self.y[i,:], np.zeros_like(self.y[0,:])) for i in range(self.n+1)])
                     temp = abs(mom)
-                # temp = log(temp/np.roll(temp, 1))
+                temp = log(temp/np.roll(temp, 1))
+                temp = r_[0, temp[1:]]
                     
             else:
                 if hasattr(self, 'y_red'):
@@ -266,7 +268,7 @@ class MechSystemSolver(MechSystem):
                 
             plot_data(ax1, self.t_points, temp)
             ax1.set_xlim((0, self.T_final))
-            ax1.set_ylim((-1e-14, max(abs(temp))*1e1))
+            ax1.set_ylim((-max((temp))*1e1, max((temp))*1e1))
             # ax1.set_yticks([0, 2e-15, 4e-15, 6e-15, 8e-15, 10e-15])
             # plot_data(ax[3,0], self.t_points, temp[1])
         ax1.set_xlabel('time')
@@ -303,7 +305,7 @@ class MechSystemSolver(MechSystem):
         else:
             string = self.reduced_model
                 
-        fig.savefig('app5_' +self.system_type + '_' +str(self.constraint_type) + '_' + string +'_.pdf', bbox_inches='tight')
+        # fig.savefig(datetime.now().strftime('%Y-%m-%d_%H-%M_')+'app5_' +self.system_type + '_' +str(self.constraint_type) + '_' + string +'_.pdf')
         
         for ax in [ax0, ax1]:
             ax.label_outer()
@@ -424,7 +426,7 @@ def solver(kwds):
 registered_solver_classes, nosc = [ODESolver.ConformalImplicitMidpoint], 200
 num_solver_classes = len(registered_solver_classes)
     
-dt_space_dim = 1
+dt_space_dim = 5
     
 i_range = np.random.randint(0, nosc-3, 1)
 
@@ -452,7 +454,7 @@ elif kwds['system_type'] == 'KdV':
 
 elif kwds['system_type'] == 'sine-Gordon':
     Omega2_space_dim = 1
-    kwds.update({'dt_space': linspace(0.05, 0.05, num=dt_space_dim), \
+    kwds.update({'dt_space': linspace(0.01, 0.05, num=dt_space_dim), \
                 'Omega2_space': np.ones((Omega2_space_dim,nosc)), \
                 'registered_solver_classes': registered_solver_classes, \
                 'i_range': np.append(i_range, [i_range+1, i_range+2]), \
@@ -478,7 +480,7 @@ fig = figure()
 ax = fig.add_subplot(111)
 solution_error = []
 
-for nosc_r_ in [10, 15, 20, 25, 30]:
+for nosc_r_ in [20]: #[10, 15, 20, 25, 30]:
 
     if MSsolvers[-1].non_quad:
         X.update({'Q': MSsolvers[-1].Q_spd(), \
@@ -581,17 +583,20 @@ for nosc_r_ in [10, 15, 20, 25, 30]:
     time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
                                time_lapsed[0].shape)/time_lapsed[0]*100) 
 
-logplot(ax, s)
+
 if kwds['system_type'] == 'sine-Gordon' and kwds['symplectic_mor'] == False:
-    logplot(ax, s2)
-ax.set_xlabel('index')
-ax.set_ylim((1e-15, max(s)*1e2))
+    logplot(ax, c_[s,s2])
+    ax.set_ylim((1e-15, np.amax(c_[s,s2])*1e3))
+else:
+    logplot(ax, s)
+    ax.set_ylim((1e-15, max(s)*1e3))
+ax.set_xlabel('index of the singular value')
 ax.set_xlim((0, len(s)+50))
 
 print(time_lapsed)
 print(solution_error)
     
-fig.savefig('app5_' +MSsolvers_r[-1].system_type + '_' +str(MSsolvers_r[-1].constraint_type) + '_' + MSsolvers_r[-1].reduced_model +'_' + 'singular_values' +'_.pdf', bbox_inches='tight')
+# fig.savefig(datetime.now().strftime('%Y-%m-%d_%H-%M_')+'app5_' +MSsolvers_r[-1].system_type + '_' +str(MSsolvers_r[-1].constraint_type) + '_' + MSsolvers_r[-1].reduced_model +'_' + 'singular_values' +'_.pdf')
         
 
 #%% Hyper-reduced model

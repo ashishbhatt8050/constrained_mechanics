@@ -19,7 +19,7 @@ colors = bmap.mpl_colors
 
 params = {
     'axes.labelsize': 20,
-    'axes.prop_cycle': (cycler(color=colors[:3]) +cycler(linestyle=['-','--','-.'])),
+    'axes.prop_cycle': (cycler(color=colors[:1]) *cycler(linestyle=['-', '--', ':', '-.', '-', '--'])),
     'font.size': 20,
     'legend.fontsize': 20,
     'xtick.labelsize': 20,

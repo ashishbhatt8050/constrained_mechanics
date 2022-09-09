@@ -17,10 +17,11 @@ from pylab import *
 import ODESolver
 from System import System
 from podDEIM import DEIM, orthogonalize, POD
-from PlotScript import plot_data, tex_table
+from PlotScript import plot_data, tex_table, logplot
 from time import process_time
 import scipy as sp
 import gc
+from datetime import datetime
 
 from Newton import fixed_point
 
@@ -91,7 +92,7 @@ class Params(object):
         
         self.dt = kwds['dt']
          
-        self.T_final = 2
+        self.T_final = 50
         
         w_values = [0.28, 0.62546642846767004501]
         w_values.append(1.0 -2.0*(sum(w_values)))
@@ -159,10 +160,10 @@ class MechSystemSolver(MechSystem):
         else:
             self.y = np.zeros((self.n+1, 2*self.nosc_r))
             
-            if self.constraint_type and self.system_type == 'system':
+            if self.constraint_type and self.system_type == 'oscillator':
                 X_U = np.array([self.y_init, self.y_init])
-                X_U, _, _ = fixed_point(self._g, X_U, self._g_prime, self.tol, self.M, False)
-                self.y_init = X_U[1]
+                X_U, _, _ = fixed_point(self._g, (self.RB @X_U.T).T, self._g_prime, self.tol, self.M, False)
+                self.y_init = self.RB.T @X_U[1]
             
         self.y[0] = self.y_init
         if self.store: self.info = []
@@ -179,12 +180,20 @@ class MechSystemSolver(MechSystem):
                 # enforce constraints
                 if self.constraint_type and self.system_type == 'oscillator':
                     
+                    if self.RB is None:
+                        pass
+                    else:
+                        y_ = (self.RB @y_.T).T
+                    
                     y_, _, _ = fixed_point(self._g, y_, self._g_prime, self.tol, self.M, False)
                 elif self.constraint_type:
                     y_[1] = np.exp(-2*self.beta*self.dt) *LA.norm(self.y[k])/LA.norm(y_[1]) *y_[1]
                     
 
-            self.y[k+1] = y_[1]
+            if self.RB is None:
+                self.y[k+1] = y_[1]
+            else:
+                self.y[k+1] = self.RB.T @y_[1]
             
         self.info.append(self.y[k+1])
         self.info = np.vstack(self.info)
@@ -217,45 +226,74 @@ class MechSystemSolver(MechSystem):
     def plot(self, fig):
         "plot the results"
         
-        gs = fig.add_gridspec(4, 2, hspace=1)
-        ax = gs.subplots()
+        gs = fig.add_gridspec(2, 2, hspace=1)
+        # ax = gs.subplots()
+        
+        ax0 = fig.add_subplot(gs[0,0])
+        ax1 = fig.add_subplot(gs[1,0])
+        # ax2 = fig.add_subplot(gs[2,0])
+        ax4 = fig.add_subplot(gs[:,-1])
+        
         if hasattr(self, 'sym_error'):
-            plot_data(ax[0,0], self.t_points, self.sym_error)
+            plot_data(ax0, self.t_points, self.sym_error)
+            ax0.set_ylim((-max(self.sym_error)*1e1, max(self.sym_error)*1e1))
+            ax0.set_xlim((0, self.T_final))
         if hasattr(self, 'eng_error'):
-            plot_data(ax[1,0], self.t_points, self.eng_error)
+            plot_data(ax1, self.t_points, self.eng_error)
+            ax1.set_ylim((-max(self.eng_error)*1e1, max(self.eng_error)*1e1))
+            ax1.set_xlim((0, self.T_final))
         elif hasattr(self, 'norm_error'):
-            plot_data(ax[1,0], self.t_points, self.norm_error)
+            plot_data(ax1, self.t_points, self.norm_error)
             
-        if hasattr(self, '_g'):
-            if hasattr(self, 'y_red'):
+        elif hasattr(self, '_g'):
+            if hasattr(self, 'y_red') and False:
                 temp = np.hstack([self._g(self.y_red[[i],:]) for i in range(self.n+1)])
             else:
                 temp = np.hstack([self._g(self.y[[i],:]) for i in range(self.n+1)])
                 
-            plot_data(ax[2,0], self.t_points, temp[0])
-            plot_data(ax[3,0], self.t_points, temp[1])
-        ax[3,0].set_xlabel('time')
+            temp = LA.norm(temp, axis=0)
+            # temp = log(temp/np.roll(temp, 1))
+            # temp = r_[0, temp[1:]]
+            plot_data(ax1, self.t_points, temp)
+            ax1.set_ylim((-max(temp)*1e1, max(temp)*1e1))
+            ax1.set_xlim((0, self.T_final))
+            # plot_data(ax2, self.t_points, temp[1])
+            # ax2.set_ylim((min(temp[1])*1e-1, max(temp[1])*1e1))
+        ax1.set_xlabel('time')
             
         # plot_data(ax[0,1], self.t_points, )
-        ax3 = fig.add_subplot(gs[0:2, -1])
-        ax4 = fig.add_subplot(gs[2:4, -1])
+        # ax3 = fig.add_subplot(gs[0:2, -1])
+        # ax4 = fig.add_subplot(gs[2:4, -1])
             
         if self.system_type == 'oscillator':
             # if self.RB is not None:
             #     plot_data(ax3, self.y_red[:,self.i_range_r], self.y_red[:,self.nosc_r+self.i_range_r])
                 
             plot_data(ax4, self.y[:,self.i_range], self.y[:,self.nosc+self.i_range])
-                
+            ax4.set_xlim((np.amin(self.y[:,self.i_range])-0.2, np.amax(self.y[:,self.i_range])+0.2))
+            ax4.set_ylim((np.amin(self.y[:,self.nosc+self.i_range])-0.1, np.amax(self.y[:,self.nosc+self.i_range])+0.1))
+            ax4.set_aspect(1.0/ax4.get_data_ratio(), adjustable='box')
+            ax4.set_xlabel('q')
+            ax4.set_ylabel('p')
+            ax4.grid(axis='x', color="0.9", linestyle='-', linewidth=1)
+            # ax4.set_ylim((min(temp[0])*1e-1, max(temp[0])*1e1))
             # ax[3,1].set_xlabel('time')
-            # fig.savefig('app5_err_inv.pdf', bbox_inches='tight')
-            
-            # for ax in fig.get_axes():
-            #     ax.label_outer()
         else:
             # plot_data(ax[0,1], self.t_points, )
             ax4 = fig.add_subplot(gs[2:4, -1])
                 
             plot_data(ax4, self.x_points, self.y[[0,-1]].T)
+            
+        if self.RB is not None:
+            string = 'reduced'
+        else:
+            string = 'full'
+            
+        curr_datetime = datetime.now().strftime('%Y-%m-%d_%H-%M_')
+        fig.savefig(curr_datetime +'app5_oscillator_' +string +'_.pdf', bbox_inches='tight')
+        
+        # for ax in [ax0, ax1]:
+        #     ax.label_outer()
         
 
     def measures(self, errors, dt_space):
@@ -293,32 +331,33 @@ class MechSystemSolver(MechSystem):
 def mor_demo():
     "Model order reduction of the MechSystem using MechSystemSolver"
     
-    registered_solver_classes, nosc = [ODESolver.ConformalImplicitMidpoint], 200
+    registered_solver_classes, nosc = [ODESolver.ImplicitMidpoint], 200
     num_solver_classes = len(registered_solver_classes)
         
-    dt_space_dim = 3
+    dt_space_dim = 1
     
     kwds = {'system_type': 'oscillator'}
     
     if kwds['system_type'] == 'oscillator':
             
-        Omega2_space_dim = 3
+        Omega2_space_dim = 1
         Omega2_space = 1 +np.random.rand(Omega2_space_dim, nosc)/1000
         Omega2_space.sort()
         
-        i_range = np.random.randint(0, nosc-3, 1)
+        i_range = np.random.randint(0, nosc-30, 1)
+        i_range = np.append(i_range, [i_range+10, i_range+20])
         
         kwds.update({'nosc': nosc, \
                     'dt_space': linspace(0.05, 0.1, num=dt_space_dim), \
                     'Omega2_space': Omega2_space, \
                     'registered_solver_classes': registered_solver_classes, \
-                    'i_range': np.append(i_range, [i_range+1, i_range+2])})
+                    'i_range': i_range})
     else:
         Omega2_space_dim = 1
         kwds.update({'dt_space': linspace(0.001, 0.009, num=dt_space_dim), \
                     'Omega2_space': np.ones((Omega2_space_dim,nosc)), \
                     'registered_solver_classes': registered_solver_classes, \
-                    'i_range': np.append(i_range, [i_range+1, i_range+2])})
+                    'i_range': i_range})
         
     MSsolvers = solver(kwds)
     
@@ -352,7 +391,6 @@ def mor_demo():
         print('nosc_r = %s' %nosc_r)
         
         RB = RB[:, :2*nosc_r]
-        ax.semilogy(s)
     
         # Orthogonalize RB wrt Q_spd
         # U = sp.linalg.cholesky(RB.T @ X['Q'] @ RB) # upper triangular Cholesky factor
@@ -362,7 +400,6 @@ def mor_demo():
         W_r_, s = POD(F2, X['eye'])
         # W_r_ = LA.solve(X['sqrt'], W_r_)
         W_r_ = W_r_[:, :2*nosc_r]
-        ax.semilogy(s)
         # W_r = RB
         
         # Orthognalize W_r_ wrt RB
@@ -372,11 +409,9 @@ def mor_demo():
     else:
         RB, s = POD(c_[y_list, F2], X['eye'])
     
-        ax.semilogy(s)
-    
         nosc_r = argmin(abs(np.asarray([norm(s[:i])/norm(s) for i in range(len(s))]) -0.99))
         if nosc_r <  20:
-            nosc_r = 20  # ensure nosc_r is even
+            nosc_r = 40  # ensure nosc_r is even
     
         X.update({'eye_r': np.eye(2*nosc_r)})
             
@@ -384,7 +419,14 @@ def mor_demo():
         
         RB = RB[:, :2*nosc_r]
         W_r = RB
-            
+        
+    logplot(ax, s)
+    ax.set_xlabel('index of singular values')
+    ax.set_ylim((min(s)*1e-3, max(s)*1e3))
+    ax.set_xlim((0, len(s)+50))
+        
+    curr_datetime = datetime.now().strftime('%Y-%m-%d_%H-%M_')
+    fig.savefig(curr_datetime + 'app5_oscillator_' + 'singular' +'_.pdf', bbox_inches='tight')
     
     # assert that W_r and RB are orthogonal
     M = W_r.T @ RB
@@ -401,7 +443,7 @@ def mor_demo():
         
     MSsolvers_r = solver(kwds)
         
-    print(np.amax(abs(MSsolvers[-1].y -MSsolvers_r[-1].y)))
+    print(reshape([np.amax(abs(MSsolvers[i].y -MSsolvers_r[i].y)) for i in range(len(MSsolvers))], (dt_space_dim, Omega2_space_dim)))
     
     time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
                                time_lapsed[0].shape)/time_lapsed[0]*100)    

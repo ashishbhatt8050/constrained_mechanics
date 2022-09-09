@@ -232,21 +232,21 @@ class System(object):
     @staticmethod 
     def set_constraints(obj, kwds):
         
-        if 'RB' in kwds:
+        # if 'RB' in kwds:
             
-            if obj.constraint_type and kwds['system_type'] == 'oscillator':
+        #     if obj.constraint_type and kwds['system_type'] == 'oscillator':
     
-                A_mat_ = obj.RB.T @obj.A_mat @obj.RB
-                B_mat_ = obj.RB.T @obj.B_mat @obj.RB
+        #         A_mat_ = obj.RB.T @obj.A_mat @obj.RB
+        #         B_mat_ = obj.RB.T @obj.B_mat @obj.RB
                 
-                obj._g = lambda y, alpha=[A_mat_, B_mat_]: obj._g_(y, alpha)
+        #         obj._g = lambda y, alpha=[A_mat_, B_mat_]: obj._g_(y, alpha)
                 
-                obj._g_prime = lambda y, alpha=[A_mat_, B_mat_]: obj._g_prime_(y, alpha)
+        #         obj._g_prime = lambda y, alpha=[A_mat_, B_mat_]: obj._g_prime_(y, alpha)
         
-        else:
-            if obj.constraint_type and kwds['system_type'] == 'oscillator':
-                obj._g = obj._g_
-                obj._g_prime = obj._g_prime_
+        # else:
+        if obj.constraint_type and kwds['system_type'] == 'oscillator':
+            obj._g = obj._g_
+            obj._g_prime = obj._g_prime_
 
     @staticmethod
     def set_system(obj, kwds):
@@ -353,11 +353,11 @@ class System(object):
                     
                 obj._g_ = lambda y, alpha=[obj.A_mat, obj.B_mat]: r_[y @ alpha[0] @ y.T -1.0,\
                                                     y @ alpha[1] @ y.T]
-                obj._g_prime_ = lambda y, alpha=[obj.A_mat, obj.B_mat]: r_[2*y @alpha[0],\
-                                                          2*y @alpha[1]]
+                obj._g_prime_ = lambda y, alpha=[obj.A_mat, obj.B_mat]: c_[2*y @alpha[0],\
+                                                          2*y @alpha[1]].T
 
             "Fixed-point nonliner equations solver properties"
-            obj.tol, obj.M, obj.var, obj.store = 1.0E-15, 100, True, True
+            obj.tol, obj.M, obj.var, obj.store = 1.0E-12, 100, True, True
                 
         else:
     

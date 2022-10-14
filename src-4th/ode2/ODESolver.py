@@ -2,7 +2,7 @@ import numpy as np
 import scipy as sp
 from pylab import *
 from numpy import linalg as LA
-from scipy.sparse import identity, issparse
+
 
 class ODESolver(object):
     """
@@ -142,9 +142,6 @@ class ODESolver(object):
         #     J_mat_inv = LA.inv(self.JJ_r)
             
         symp_error = np.zeros(n)
-        
-        if issparse(J_mat) and not issparse(du[-1]):
-            J_mat = J_mat.toarray()
 
         for k in range(n-1):
             dt = t[k+1] -t[k]
@@ -329,33 +326,7 @@ class ConformalImplicitMidpoint(ImplicitMidpoint):
         ImplicitMidpoint.__init__(self, f, dfdu)
 
         self.beta = f.beta
-        # self.Ecoeff = Ecoeff = lambda dt: np.exp(f.beta*dt/4)
-        # self.dfdu = lambda u, t: np.asarray(dfdu(u, t), float)
-
-        # BackwardEuler needs to import function Newton from Newton.py:
-        # try:
-        #     from Newton import Newton
-        #     self.Newton = Newton
-        # except ImportError:
-        #     raise ImportError('''
-        #         Could not import module "Newton". Place Newton.py in this directory
-        #         (%s)
-        #         ''' % (os.path.dirname(os.path.abspath(__file__))))
-
-        # Select correct derivative
-        # if not callable(dfdu):
-        #     try:
-        #         value =f(np.array([1]), 1)
-        #     except IndexError: # must be scalar ODE
-        #         raise ValueError('f(u,t) must return float/int')
-
-        #     self.discrete_derivative =True
-        # else:
-        #     self.discrete_derivative = False
-        #     neq = np.size(f.u_init)
-        #     self.dfdw = lambda u, t, dt: \
-        #                     Ecoeff(dt)*(np.eye(neq)-dt/2*np.asarray(dfdu((Ecoeff(dt)*u[1] +Ecoeff(-dt)*u[0])/2, (Ecoeff(dt)*t[1] +Ecoeff(-dt)*t[0])/2, dt), float))
-
+        
     def advance(self):
         
         k = self.k
@@ -369,31 +340,6 @@ class ConformalImplicitMidpoint(ImplicitMidpoint):
         info = self.Ecoeff(-dt)*np.array(info)
         
         self.u[k] = self.Ecoeff(dt)*self.u[k]
-        
-        # u, f, k, t, beta, Ecoeff = self.u, self.f, self.k, self.t, self.beta, self.Ecoeff
-        # dt = t[k+1] - t[k]
-
-        # def F(w):
-        #     return Ecoeff(dt)*w - dt*f((Ecoeff(dt)*w +Ecoeff(-dt)*u[k])/2, (Ecoeff(dt)*t[k+1] +Ecoeff(-dt)*t[k])/2) \
-        #             - Ecoeff(-dt)*u[k]
-
-        # if self.discrete_derivative:
-        #     dFdw = Derivative(F)
-        # else:
-        #     def dFdw(w):
-        #         dfdw = self.dfdw
-        #         return Ecoeff(dt)*dfdw([Ecoeff(dt)*w, Ecoeff(-dt)*u[k]], [Ecoeff(dt)*t[k+1], Ecoeff(-dt)*t[k]], dt)
-
-        # w_start = self.u[k] + dt*(f(self.u[k], t[k]) -beta/2*self.u[k])  # Forward Euler step
-        
-        
-        # u_new, n, F_value = self.Newton(self.F, w_start, self.dFdw, N=30)
-        # if k == 0:
-        #     self.Newton_iter = []
-        # self.Newton_iter.append(n)
-        # if n >= 100:
-        #     print("Newton's failed to converge at t=%g "\
-        #           "(%d iterations)" % (t[k+1], n))
                 
         return u_new, info
 

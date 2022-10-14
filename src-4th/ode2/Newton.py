@@ -2,8 +2,7 @@ import numpy as np
 from numpy import linalg as LA
 import scipy as sp
 from pylab import sum
-from scipy.sparse import issparse
-from scipy.sparse.linalg import spsolve, ArpackNoConvergence, ArpackError
+
 
 def Newton(f, x, dfdx, epsilon=1.0E-7, N=100, store=False):
     f_value = f(x)
@@ -14,21 +13,13 @@ def Newton(f, x, dfdx, epsilon=1.0E-7, N=100, store=False):
         if np.linalg.norm(dfdx_value) < 1E-14:
             raise ValueError("Newton: f'(%g)=%g" % (x, np.linalg.norm(dfdx_value)))
 
-        if not issparse(dfdx_value):
-            try:
-                x = x - np.linalg.solve(dfdx_value, f_value)
-            except np.linalg.LinAlgError:
-                x = x - f_value/dfdx_value
-            except:
-                raise np.linalg.LinAlgError("Unable to solve the system")
-        else:
-            try:
-                x = x - sp.sparse.linalg.spsolve(dfdx_value, f_value)
-            except sp.linalg.LinAlgError:
-                x = x - f_value/dfdx_value
-            except:
-                raise ArpackError("Unable to solve the sparse system")
-            
+        try:
+            x = x - np.linalg.solve(dfdx_value, f_value)
+        except np.linalg.LinAlgError:
+            x = x - f_value/dfdx_value
+        except:
+            raise np.linalg.LinAlgError("Unable to solve the system")
+        
         n += 1
         f_value = f(x)
         if store:

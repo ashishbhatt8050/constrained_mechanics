@@ -21,18 +21,18 @@ from time import process_time
 import scipy as sp
 from scipy.linalg import block_diag
 from datetime import datetime
-from models import sineGordon as model
+from models import Oscillators as model
 
 from Newton import fixed_point
-
-#%% Parameters class
-class Params(object):
-    """ Class of parameters """
+ 
+#%% Define the system
+class MechSystem(model):
+    "Define the Mechanical system with parameters from the model class"
+    #TODO: have the __call__ return jacobian as well.
+    
     def __init__(self, **kwds):
         "Model properties"
         self.system_type = kwds['system_type']
-        
-        model.set_system(self, kwds)
         
         "Projection matrices"
         if 'RB' in kwds:
@@ -40,8 +40,10 @@ class Params(object):
             self.nosc_r = kwds['nosc_r']
         else:
             self.RB = None
+        
+        model.__init__(self, kwds)
 
-        model.set_constraints(self, kwds)
+        self.set_constraints()
             
         self.i_range = kwds['i_range']
             
@@ -126,27 +128,6 @@ class Params(object):
     @u_init.setter
     def u_init(self, value):
         self.y_init = value
- 
-#%% Define the system
-class MechSystem(Params):
-    "Define the Mechanical system with parameters from the Params class"
-    #TODO: have the __call__ return jacobian as well.
-        
-    def __call__(self, y, t):
-        
-        return model.get_func(self, y, t)
-            
-
-    def jacobian(self, y, t, *arg):
-        "Jacobian of the function f"
-        
-        return model.get_jacobian(self, y, t)
-
-    def en_err(self):
-        "Energy error"
-        assert self.beta == 0, 'Energy is only defined for beta = 0'
-        
-        return model.get_en_err(self)
                 
 
 #%% Solve the system and find convergence rates
@@ -189,7 +170,7 @@ class MechSystemSolver(MechSystem):
                     y_, _, _ = fixed_point(self._g, y_, self._g_prime, self.tol, self.M, False)
                 elif self.constraint_type and self.system_type == 'KdV':
                     y_[1] = np.exp(-2*self.beta*self.dt) *LA.norm(self.y[k])/LA.norm(y_[1]) *y_[1]
-                elif self.constraint_type and self.system_type == 'sine-Gordon':
+                elif self.constraint_type and self.system_type == 'sineGordon':
                     y_, _, _ = fixed_point(self._g, y_, self._g_prime, self.tol, self.M, False)
                     
 
@@ -216,6 +197,7 @@ class MechSystemSolver(MechSystem):
                 dpsi_, _ = self.solver.var_solve(self.y_red[k:k+2], self.t_points[k:k+2])
             else:
                 dpsi_, _ = self.solver.var_solve(self.y[k:k+2], self.t_points[k:k+2])
+            
             self.dpsi[1] = dpsi_[1]
             sym_error_ =self.solver.symplectic_error(self.dpsi, self.t_points[k:k+2])
             self.sym_error[k+1] = sym_error_[1]
@@ -247,140 +229,140 @@ class MechSystemSolver(MechSystem):
                       c_[np.reshape([float('nan')]*len(r_values), (len(r_values),1)), r_values]].T
                 
             tex_table(self.solver_class.__name__, temp)
+
+    @staticmethod
+    def solver(kwds):
     
+        MSsolvers = []
+        errors = {'energy': [], 'spl': []}
+    
+        for solver_class, dt, Omega2 in \
+            [(x,y,z) for x in kwds['registered_solver_classes'] \
+             for y in kwds['dt_space'] for z in kwds['Omega2_space'] \
+                 ]:
+            
+            kwds.update({'solver_class': solver_class, \
+                        'dt': dt, \
+                        'Omega2': Omega2})
+            
+            MSsolver = MechSystemSolver(**kwds)
+            nosc = MSsolver.nosc
+                    
+            start = process_time()
+            MSsolver.solve()
+            end = process_time()
+            MSsolver.time_lapsed.append(end-start)
+            
+            if MSsolver.var == True:
+                MSsolver.var_solve()
+            
+            if kwds['dt_space'].size > 1 and np.allclose(MSsolver.Omega2, kwds['Omega2_space'][-1]):
+                 # compute errors only for fixed Omega2
+                 
+                MSsolver.get_errors(errors, dt)
+                
+                
+            if 'RB' not in kwds and MSsolver.system_type in ['Oscillators', 'sineGordon']:
+                MSsolver.F2 = np.array([MSsolver.ham_z(*np.split(y,2)) for y in MSsolver.info]).T
+                    
+                if MSsolver.non_quad:
+                    MSsolver.F3 = np.array([MSsolver.non_quad_z(*np.split(y,2)) for y in MSsolver.info]).T
+                
+            elif 'RB' not in kwds:
+                MSsolver.F2 = np.array([MSsolver.ham_z(y) for y in MSsolver.info]).T
+                    
+                if MSsolver.non_quad:
+                    MSsolver.F3 = np.array([MSsolver.non_quad_z(y) for y in MSsolver.info]).T
+                
+            MSsolvers.append(MSsolver)
+            
+        MSsolver.measures(errors, kwds['dt_space'])
+        
         # Plot the measures
         fig = figure()
-        model.plot(self, fig)
-
-
-def solver(kwds):
-
-    MSsolvers = []
-    errors = {'energy': [], 'spl': []}
-
-    for solver_class, dt, Omega2 in \
-        [(x,y,z) for x in kwds['registered_solver_classes'] \
-         for y in kwds['dt_space'] for z in kwds['Omega2_space'] \
-             ]:
-        
-        kwds.update({'solver_class': solver_class, \
-                    'dt': dt, \
-                    'Omega2': Omega2})
-        
-        MSsolver = MechSystemSolver(**kwds)
-        nosc = MSsolver.nosc
-                
-        start = process_time()
-        MSsolver.solve()
-        end = process_time()
-        MSsolver.time_lapsed.append(end-start)
-        
-        if MSsolver.var == True:
-            MSsolver.var_solve()
-        
-        if kwds['dt_space'].size > 1 and np.allclose(MSsolver.Omega2, kwds['Omega2_space'][-1]):
-             # compute errors only for fixed Omega2
-             
-            model.get_errors(MSsolver, errors, dt, kwds)
+        MSsolver.plot(fig)
             
-            
-        if 'RB' not in kwds and MSsolver.system_type in ['Oscillators', 'sine-Gordon']:
-            MSsolver.F2 = np.array([MSsolver.ham_z(*np.split(y,2)) for y in MSsolver.info]).T
-                
-            if MSsolver.non_quad:
-                MSsolver.F3 = np.array([MSsolver.non_quad_z(*np.split(y,2)) for y in MSsolver.info]).T
-            
-        elif 'RB' not in kwds:
-            MSsolver.F2 = np.array([MSsolver.ham_z(y) for y in MSsolver.info]).T
-                
-            if MSsolver.non_quad:
-                MSsolver.F3 = np.array([MSsolver.non_quad_z(y) for y in MSsolver.info]).T
-            
-        MSsolvers.append(MSsolver)
-        
-    MSsolver.measures(errors, kwds['dt_space'])
-        
-    return MSsolvers
+        return MSsolvers
 
 #%% Main driver function
-# def mor_demo():
-"Model order reduction of the MechSystem using MechSystemSolver"
+def mor_demo():
+    "Model order reduction of the MechSystem using MechSystemSolver"
 
-registered_solver_classes, nosc = [ODESolver.ConformalImplicitMidpoint], 200
-num_solver_classes = len(registered_solver_classes)
-    
-dt_space_dim = 5
-    
-i_range = np.random.randint(0, nosc-3, 1)
-
-kwds = {'model': model,\
-        'system_type': 'sine-Gordon',\
-        'symplectic_mor': False}
-
-if kwds['system_type'] == 'Oscillators':
+    registered_solver_classes, nosc = [ODESolver.ConformalImplicitMidpoint], 200
+    num_solver_classes = len(registered_solver_classes)
         
-    Omega2_space_dim = 3
-    Omega2_space = 1 +np.random.rand(Omega2_space_dim, nosc)/1000
-    Omega2_space.sort()
-    
-    kwds.update({'nosc': nosc, \
-                'dt_space': linspace(0.05, 0.1, num=dt_space_dim), \
-                'Omega2_space': Omega2_space, \
-                'registered_solver_classes': registered_solver_classes, \
-                'i_range': np.append(i_range, [i_range+1, i_range+2])})
-
-elif kwds['system_type'] == 'KdV':
-    Omega2_space_dim = 1
-    kwds.update({'dt_space': linspace(0.001, 0.009, num=dt_space_dim), \
-                'Omega2_space': np.ones((Omega2_space_dim,nosc)), \
-                'registered_solver_classes': registered_solver_classes, \
-                'i_range': np.append(i_range, [i_range+1, i_range+2])})
-
-elif kwds['system_type'] == 'sine-Gordon':
-    Omega2_space_dim = 1
-    kwds.update({'dt_space': linspace(0.01, 0.05, num=dt_space_dim), \
-                'Omega2_space': np.ones((Omega2_space_dim,nosc)), \
-                'registered_solver_classes': registered_solver_classes, \
-                'i_range': np.append(i_range, [i_range+1, i_range+2]), \
-                })
-    
-MSsolvers = solver(kwds)
-
-if MSsolvers[-1].non_quad: # is not None
-    assert Omega2_space_dim == 1
-
-time_lapsed = [reshape([x.time_lapsed for x in MSsolvers],\
-                       (num_solver_classes, dt_space_dim, Omega2_space_dim))]
-    
-
-#%%
-y_list = np.hstack([MSsolver.info.T for MSsolver in MSsolvers])
-F2 = np.hstack([MSsolver.F2 for MSsolver in MSsolvers])
-
-nosc = MSsolvers[-1].nosc
-X = {'eye': np.eye(2*nosc)}
-
-fig = figure()
-ax = fig.add_subplot(111)
-solution_error = []
-
-for nosc_r_ in [20]: #[10, 15, 20, 25, 30]:
+    dt_space_dim = 5
         
-    model.get_rb(y_list, F2, MSsolvers, X, kwds, nosc_r_, ax)
+    i_range = np.random.randint(0, nosc-3, 1)
     
-    # assert that W_r and RB are orthogonal
-    M = kwds['W_r'].T @ kwds['RB']
-    assert np.allclose(M, X['eye_r'])
+    kwds = {'model': model,\
+            'system_type': model.__name__,\
+            'symplectic_mor': False}
     
-    MSsolvers_r = solver(kwds)
+    if kwds['system_type'] == 'Oscillators':
+            
+        Omega2_space_dim = 3
+        Omega2_space = 1 +np.random.rand(Omega2_space_dim, nosc)/1000
+        Omega2_space.sort()
         
-    solution_error.append([np.amax(abs(MSsolvers[i].y -MSsolvers_r[i].y)) for i in range(len(MSsolvers_r))])
+        kwds.update({'nosc': nosc, \
+                    'dt_space': linspace(0.05, 0.1, num=dt_space_dim), \
+                    'Omega2_space': Omega2_space, \
+                    'registered_solver_classes': registered_solver_classes, \
+                    'i_range': np.append(i_range, [i_range+1, i_range+2])})
     
-    time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
-                               time_lapsed[0].shape)/time_lapsed[0]*100) 
-
-print(time_lapsed)
-print(solution_error)
+    elif kwds['system_type'] == 'KdV':
+        Omega2_space_dim = 1
+        kwds.update({'dt_space': linspace(0.001, 0.009, num=dt_space_dim), \
+                    'Omega2_space': np.ones((Omega2_space_dim,nosc)), \
+                    'registered_solver_classes': registered_solver_classes, \
+                    'i_range': np.append(i_range, [i_range+1, i_range+2])})
+    
+    elif kwds['system_type'] == 'sineGordon':
+        Omega2_space_dim = 1
+        kwds.update({'dt_space': linspace(0.01, 0.05, num=dt_space_dim), \
+                    'Omega2_space': np.ones((Omega2_space_dim,nosc)), \
+                    'registered_solver_classes': registered_solver_classes, \
+                    'i_range': np.append(i_range, [i_range+1, i_range+2]), \
+                    })
+        
+    MSsolvers = MechSystemSolver.solver(kwds)
+    
+    if MSsolvers[-1].non_quad: # is not None
+        assert Omega2_space_dim == 1
+    
+    time_lapsed = [reshape([x.time_lapsed for x in MSsolvers],\
+                           (num_solver_classes, dt_space_dim, Omega2_space_dim))]
+        
+    
+    #%%
+    y_list = np.hstack([MSsolver.info.T for MSsolver in MSsolvers])
+    F2 = np.hstack([MSsolver.F2 for MSsolver in MSsolvers])
+    
+    nosc = MSsolvers[-1].nosc
+    X = {'eye': np.eye(2*nosc)}
+    
+    fig = figure()
+    ax = fig.add_subplot(111)
+    solution_error = []
+    
+    for nosc_r_ in [20]: #[10, 15, 20, 25, 30]:
+            
+        model.get_rb(y_list, F2, MSsolvers, X, kwds, nosc_r_, ax)
+        
+        # assert that W_r and RB are orthogonal
+        M = kwds['W_r'].T @ kwds['RB']
+        assert np.allclose(M, X['eye_r'])
+        
+        MSsolvers_r = MechSystemSolver.solver(kwds)
+            
+        solution_error.append([np.amax(abs(MSsolvers[i].y -MSsolvers_r[i].y)) for i in range(len(MSsolvers_r))])
+        
+        time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
+                                   time_lapsed[0].shape)/time_lapsed[0]*100) 
+    
+    print(time_lapsed)
+    print(solution_error)
 
 #%% Hyper-reduced model
 '''
@@ -434,6 +416,6 @@ time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_dr],\
     # find derivatives symbolically 
     # Simulate with a simpler Hamiltonian
         
-# if __name__ == '__main__':
-#     mor_demo()
+if __name__ == '__main__':
+    mor_demo()
     

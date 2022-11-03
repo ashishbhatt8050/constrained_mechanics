@@ -21,7 +21,7 @@ from time import process_time
 import scipy as sp
 from scipy.linalg import block_diag
 from datetime import datetime
-from models import Oscillators as model
+from oscillators import Oscillators as model
 
 from Newton import fixed_point
  
@@ -65,14 +65,21 @@ class MechSystem(model):
             self.PxU = self.P.T @ self.U
             self.UxP = self.PxU.T
             self.PxP = self.P.T @ self.P
+            self.PxRB = self.P.T @ self.RB
             
             if self.P.shape == self.U.shape: #POD-DEIM
                 sys_solve = LA.solve
             else: #Gappy-POD
                 sys_solve = lambda A, b: LA.lstsq(A, b, rcond=None)[0]
                 
-            self.PxIPxRB = lambda y: self.PxP @ sys_solve(self.UxP, self.UxRB @ y)
-            self.PxIPxRBxI = self.PxP @ sys_solve(self.UxP, self.UxRB)
+            # Hyper-reduced model as in Peng-Mohseni paper
+            # self.PxIPxRB = lambda y: self.PxP @ sys_solve(self.UxP, self.UxRB @ y)
+            # self.PxIPxRBxI = self.PxP @ sys_solve(self.UxP, self.UxRB)
+                
+            # Usual hyper-reduced model
+            self.PxIPxRB = lambda y: self.PxRB @ y
+            self.PxIPxRBxI = self.PxRB
+            
             # self.PxIPxRBxP = lambda y: self.PxP @ sys_solve(self.UxP, self.UxRB @ y) @self.P.T
             self.hat = lambda foPxIPxRBxy: self.RBxU @ sys_solve(self.PxU, foPxIPxRBxy)
             self.hhat = lambda ffoPxIPxRBxy: self.hat(ffoPxIPxRBxy) @ self.PxIPxRBxI
@@ -100,7 +107,7 @@ class MechSystem(model):
         
         self.dt = kwds['dt']
          
-        self.T_final = 1
+        self.T_final = 5
         
         w_values = [0.28, 0.62546642846767004501]
         w_values.append(1.0 -2.0*(sum(w_values)))
@@ -291,18 +298,17 @@ def mor_demo():
     registered_solver_classes, nosc = [ODESolver.ConformalImplicitMidpoint], 200
     num_solver_classes = len(registered_solver_classes)
         
-    dt_space_dim = 5
+    dt_space_dim = 3
         
     i_range = np.random.randint(0, nosc-3, 1)
     
-    kwds = {'model': model,\
-            'system_type': model.__name__,\
+    kwds = {'system_type': model.__name__,\
             'symplectic_mor': False}
     
     if kwds['system_type'] == 'Oscillators':
             
-        Omega2_space_dim = 3
-        Omega2_space = 1 +np.random.rand(Omega2_space_dim, nosc)/1000
+        Omega2_space_dim = 1
+        Omega2_space = 1 +np.random.rand(Omega2_space_dim, nosc)/10
         Omega2_space.sort()
         
         kwds.update({'nosc': nosc, \
@@ -336,23 +342,25 @@ def mor_demo():
         
     
     #%%
-    y_list = np.hstack([MSsolver.info.T for MSsolver in MSsolvers])
-    F2 = np.hstack([MSsolver.F2 for MSsolver in MSsolvers])
+    if not MSsolvers[-1].non_quad:
+        y_list = np.hstack([MSsolvers[i].info.T for i in [0,1]])#,3,4,6,7]])
+        F2 = np.hstack([MSsolvers[i].F2 for i in [0,1]])#,3,4,6,7]])
+    else:
+        y_list = np.hstack([MSsolvers[i].info.T for i in range(len(MSsolvers))])
+        F2 = np.hstack([MSsolvers[i].F2 for i in range(len(MSsolvers))])
+        F3 = np.hstack([MSsolver.F3 for MSsolver in MSsolvers])
     
-    nosc = MSsolvers[-1].nosc
-    X = {'eye': np.eye(2*nosc)}
+    kwds.update({'eye': np.eye(2*nosc),\
+         'non_quad': None})
     
     fig = figure()
     ax = fig.add_subplot(111)
     solution_error = []
     
     for nosc_r_ in [20]: #[10, 15, 20, 25, 30]:
+        kwds.update({'nosc_r_': nosc_r_})
             
-        model.get_rb(y_list, F2, MSsolvers, X, kwds, nosc_r_, ax)
-        
-        # assert that W_r and RB are orthogonal
-        M = kwds['W_r'].T @ kwds['RB']
-        assert np.allclose(M, X['eye_r'])
+        model.get_rb(y_list, F2, F3, MSsolvers, kwds, ax)
         
         MSsolvers_r = MechSystemSolver.solver(kwds)
             
@@ -361,42 +369,49 @@ def mor_demo():
         time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
                                    time_lapsed[0].shape)/time_lapsed[0]*100) 
     
+    # print(time_lapsed)
+    # print(solution_error)
+
+    #%% Hyper-reduced model
+    kwds.update({'non_quad': True})
+    
+    for nosc_r_ in [20]: #[10, 15, 20, 25, 30]:
+        kwds.update({'nosc_r_': nosc_r_})
+            
+        model.get_rb(y_list, F2, F3, MSsolvers, kwds, ax)
+    
+    if kwds['non_quad']:
+        F3 = np.hstack([MSsolver.F3 for MSsolver in MSsolvers])
+        noise = np.random.normal(0, 0, F3.shape)
+        U, s = POD(kwds['sqrt'] @(F3+noise), kwds['eye'])
+        U_ = LA.solve(kwds['sqrt'], U)
+        U = U_[:, :2*nosc_r_]
+        assert np.allclose(U.T @ kwds['Q'] @ U, kwds['eye_r'])
+    else:
+        noise = np.random.normal(0, 0, F2.shape)
+        U_, s = POD(F2+noise, kwds['eye'])
+        U = U_[:, :2*nosc_r_]
+        
+    ax.semilogy(s)
+        
+    P, _ = DEIM(U, plot_deim=False)
+    
+    # P = P[:, :2*nosc_r_]
+    
+    kwds.update({'U': U,\
+                'P': P})
+    
+    # POD-DEIM reduced model
+    MSsolvers_dr = MechSystemSolver.solver(kwds)
+    
+    time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_dr],\
+                               time_lapsed[0].shape)/time_lapsed[0]*100)
+    
     print(time_lapsed)
+            
+    solution_error.append([np.amax(abs(MSsolvers[i].y -MSsolvers_dr[i].y)) for i in range(len(MSsolvers_dr))])
     print(solution_error)
 
-#%% Hyper-reduced model
-'''
-if MSsolvers[-1].non_quad:
-    F3 = np.hstack([MSsolver.F3 for MSsolver in MSsolvers])
-    noise = np.random.normal(0, 0, F3.shape)
-    U, s = POD(X['sqrt'] @(F3+noise), X['eye'])
-    U_ = LA.solve(X['sqrt'], U)
-    U = U_[:, :2*nosc_r]
-    assert np.allclose(U.T @ X['Q'] @ U, X['eye_r'])
-else:
-    noise = np.random.normal(0, 0, F2.shape)
-    U_, s = POD(F2+noise, X['eye'])
-    U = U_[:, :2*nosc_r]
-    
-ax.semilogy(s)
-    
-P, _ = DEIM(U, plot_deim=False)
-
-# P = P[:, :2*nosc_r]
-
-kwds.update({'U': U,\
-            'P': P})
-
-# POD-DEIM reduced model
-MSsolvers_dr = solver(kwds)
-    
-print(np.amax(abs(MSsolvers[-1].y -MSsolvers_dr[-1].y)))
-
-time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_dr],\
-                           time_lapsed[0].shape)/time_lapsed[0]*100)
-
-# tex_table('', time_lapsed)
-'''
 
 # What works:
     # Results are sensitive to parameters

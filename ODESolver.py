@@ -2,6 +2,7 @@ import numpy as np
 import scipy as sp
 from pylab import *
 from numpy import linalg as LA
+from scipy.linalg import block_diag
 
 
 class ODESolver(object):
@@ -314,6 +315,56 @@ Could not import module "Newton". Place Newton.py in this directory
         return u_new, info
 
     def var_advance(self):
+        u, dfdu, k, t, I_mat = self.u, self.dfdu, self.k, self.t, self.I_mat
+        dt = t[k+1] - t[k]
+
+        temp = dt/2.0*dfdu((u[k+1] +u[k])/2.0, (t[k+1] +t[k])/2.0)
+        du_new = LA.solve((I_mat -temp), (I_mat +temp))
+        return du_new
+
+class PreissmanBox(ImplicitMidpoint):
+    def __init__(self, f, dfdu=None):
+        super().__init__(f, dfdu)
+        # self.Ax = block_diag(f.Ax, f.Ax)
+        
+    def advance(self, w_start=None):
+        u_new, info = super().advance()
+        # return LA.solve(self.Ax, u_new), info
+        return u_new, info
+
+    def var_advance(self):
+        raise NotImplementedError
+        u, dfdu, k, t, I_mat = self.u, self.dfdu, self.k, self.t, self.I_mat
+        dt = t[k+1] - t[k]
+
+        temp = dt/2.0*dfdu((u[k+1] +u[k])/2.0, (t[k+1] +t[k])/2.0)
+        du_new = LA.solve((I_mat -temp), (I_mat +temp))
+        return du_new
+
+class EulerBox(ODESolver):
+    def __init__(self, f, dfdu=None):
+        ODESolver.__init__(self, f)
+        
+        self.dfdu = lambda u, t: dfdu(u,t)
+
+        # Define Ecoeff for computing symplectic error
+        self.Ecoeff = lambda dt: np.exp(0.25*f.beta*dt)
+        self.beta = f.beta
+        
+    def advance(self):
+        dt = self.t[self.k+1] - self.t[self.k]
+        
+        u0, v0 = np.hsplit(self.Ecoeff(-dt)*self.u[self.k], 2)
+        ff = self.f(self.Ecoeff(-dt)*self.u[self.k], self.t[self.k])
+        v1 = v0 +dt *np.split(ff, 2)[1]
+        v1 = self.Ecoeff(-dt)*v1
+        u1 = (u0 +dt *v1)/(1 -0.5*self.beta*dt)
+        u1 = self.Ecoeff(-dt)*u1
+        
+        return np.hstack((u1, v1)), None
+
+    def var_advance(self):
+        raise NotImplementedError
         u, dfdu, k, t, I_mat = self.u, self.dfdu, self.k, self.t, self.I_mat
         dt = t[k+1] - t[k]
 

@@ -21,7 +21,7 @@ from time import process_time
 import scipy as sp
 from scipy.linalg import block_diag
 from datetime import datetime
-from oscillators import Oscillators as model
+from sineGordon import sineGordon as model
 
 from Newton import fixed_point
  
@@ -107,7 +107,7 @@ class MechSystem(model):
         
         self.dt = kwds['dt']
          
-        self.T_final = 5
+        self.T_final = 30
         
         w_values = [0.28, 0.62546642846767004501]
         w_values.append(1.0 -2.0*(sum(w_values)))
@@ -117,9 +117,9 @@ class MechSystem(model):
         assert np.isclose(sum(w_values), 1), 'sum_i w_i must be 1'
         self.w_values = w_values
         
-        if self.solver_class in [ODESolver.ConformalStormerVerlet, ODESolver.ForwardEuler]:
+        if self.solver_class in [ODESolver.ConformalStormerVerlet, ODESolver.EulerBox]:
             self.solver = self.solver_class(self)
-        elif self.solver_class in [ODESolver.ConformalImplicitMidpoint, ODESolver.ImplicitMidpoint]:
+        elif self.solver_class in [ODESolver.ConformalImplicitMidpoint, ODESolver.ImplicitMidpoint, ODESolver.PreissmanBox]:
             self.solver = self.solver_class(self, self.jacobian)
         else:
             NameError('Unknown solver class - %s' % self.solver_class.__name__)
@@ -224,7 +224,7 @@ class MechSystemSolver(MechSystem):
             r_values.append(r_form(errors['energy'],dt_space))
             C_values.append(C_form(errors['energy'],dt_space,r_values[-1]))
             
-        if self.solver_class == ODESolver.ImplicitMidpoint and self.beta != 0 and errors['spl']:
+        if self.solver_class in [ODESolver.ImplicitMidpoint, ODESolver.PreissmanBox] and self.beta != 0 and errors['spl']:
             '''Compute convergence rate from the error in symplecticness
             Only applicable if the error is non-zero'''
             r_values.append(r_form(errors['spl'],dt_space))
@@ -256,7 +256,11 @@ class MechSystemSolver(MechSystem):
             nosc = MSsolver.nosc
                     
             start = process_time()
+            if solver_class in [ODESolver.PreissmanBox]:
+                MSsolver.y_init = MSsolver.Ax @ MSsolver.y_init
             MSsolver.solve()
+            if solver_class in [ODESolver.PreissmanBox]:
+                MSsolver.y = LA.solve(MSsolver.Ax, MSsolver.y.T).T
             end = process_time()
             MSsolver.time_lapsed.append(end-start)
             
@@ -295,10 +299,10 @@ class MechSystemSolver(MechSystem):
 def mor_demo():
     "Model order reduction of the MechSystem using MechSystemSolver"
 
-    registered_solver_classes, nosc = [ODESolver.ConformalImplicitMidpoint], 200
+    registered_solver_classes, nosc = [ODESolver.EulerBox], 200
     num_solver_classes = len(registered_solver_classes)
         
-    dt_space_dim = 3
+    dt_space_dim = 1
         
     i_range = np.random.randint(0, nosc-3, 1)
     
@@ -339,12 +343,16 @@ def mor_demo():
     
     time_lapsed = [reshape([x.time_lapsed for x in MSsolvers],\
                            (num_solver_classes, dt_space_dim, Omega2_space_dim))]
-        
+    
+    print(time_lapsed)
+    # print(solution_error)
+    return        
     
     #%%
     if not MSsolvers[-1].non_quad:
         y_list = np.hstack([MSsolvers[i].info.T for i in [0,1]])#,3,4,6,7]])
         F2 = np.hstack([MSsolvers[i].F2 for i in [0,1]])#,3,4,6,7]])
+        F3 = None
     else:
         y_list = np.hstack([MSsolvers[i].info.T for i in range(len(MSsolvers))])
         F2 = np.hstack([MSsolvers[i].F2 for i in range(len(MSsolvers))])
@@ -369,10 +377,11 @@ def mor_demo():
         time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
                                    time_lapsed[0].shape)/time_lapsed[0]*100) 
     
-    # print(time_lapsed)
-    # print(solution_error)
+    print(time_lapsed)
+    print(solution_error)
 
     #%% Hyper-reduced model
+    return
     kwds.update({'non_quad': True})
     
     for nosc_r_ in [20]: #[10, 15, 20, 25, 30]:

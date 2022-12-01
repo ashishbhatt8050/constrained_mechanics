@@ -24,8 +24,9 @@ class sineGordon(object):
         
         self.Omega2 = self.kwds['Omega2']
         "MechSystem constituents"
-        c, self.beta = 0.5, 0
-        L, dx = 60, 0.187
+        c, self.beta = 0.5, 0.01
+        L, dx = 40, 0.187
+        dt = kwds['dt']
         nosc = self.nosc = int((L/dx+1))
         self.x_points = np.array([-L/2 +i*dx for i in range(nosc)])
         
@@ -37,7 +38,8 @@ class sineGordon(object):
         
         FD = sp.linalg.toeplitz([-1]+[0]*(nosc-2)+[1], [-1, 1]+[0]*(nosc-2))/dx # Forward difference
         BD = sp.linalg.toeplitz([1, -1]+[0]*(nosc-2), [1]+[0]*(nosc-2)+[-1])/dx # Backward difference
-        
+        Ax = sp.linalg.toeplitz([1]+[0]*(nosc-2)+[1], [1, 1]+[0]*(nosc-2))/2 # Forward average
+        self.Ax = block_diag(Ax, Ax)
         
         if 'P' in self.kwds:
             nosc = self.kwds['P'].shape[1]/2
@@ -48,17 +50,47 @@ class sineGordon(object):
         sigma = lambda u: u**2/2
         sigma_u = lambda u: u
         eye_nosc = np.eye(nosc)
+        u_one = np.ones(nosc)
         sigma_uu = lambda u: eye_nosc
-        non_f = lambda u: 1 -np.cos(u)
-        non_f_u = lambda u: np.sin(u)
-        non_f_uu = lambda u: np.diag(np.cos(u))
+        non_f = lambda u, v=0: 1 -np.cos(u) +0*0.2*(1 -np.cos(2*u)) -0.01*u*np.cos(self.t_points)[:,None] +0.5*self.beta*u*v
+        non_f_u = lambda u, v=0, t=0: np.sin(u) +0*0.2*(2*np.sin(2*u)) -0.01*np.cos(t)*u_one +0.5*self.beta*v
+        non_f_uu = lambda u: np.diag(np.cos(u) +0*0.2*2**2*np.cos(2*u))
         
-        self.ham = lambda u: sum(1/2*u[:,nosc:]**2 +sigma(u[:,:nosc] @BD.T) +non_f(u[:,:nosc]), axis=1)*dx
+        ham_ = lambda u: 1/2*u[:,nosc:]**2 +sigma(u[:,:nosc] @BD.T) +non_f(*np.split(u,2,axis=1))
+        # self.energy_residual = lambda u: np.diff(ham_(u), axis=0)/kwds['dt']
+        
+        
+        if ODESolver.EulerBox in kwds['registered_solver_classes']:
+            mom_ = lambda u: u[:,nosc:]*sigma_u(u[:,:nosc] @FD.T)
+            mom_residual = lambda u: -np.vstack([np.mean(mom_(u[i:i+2]), axis=0) for i in range(self.n)])
+            dudt = lambda u: ((np.roll(np.exp(0.25*self.beta*dt)*u, -1, axis=0) -np.exp(-0.25*self.beta*dt)*u)/dt)[:-1]
+            energy_cons_res = lambda u: dudt(ham_(u)) +mom_residual(u) @BD.T
+            self.energy_cons_res = lambda u: np.vstack((np.zeros((1,nosc)), energy_cons_res(u)))
             
-        self.ham_u_ = lambda u: -CD2@u +non_f_u(u)
-        self.ham_v_ = lambda v: v
+            # assuming sigma = lambda u: u**2/2
+            self.mom_cons_res = lambda u: np.vstack((np.zeros((1,nosc)), dudt(-(u[:,:nosc] @BD.T)*u[:,nosc:]) \
+                                -(non_f(u[:,:nosc]) -0.5*self.beta*np.roll(u[:,:nosc]*u[:,nosc:], -1, axis=0) -0.5*(np.roll(u[:,nosc:], -1, axis=0))**2 - 0.5*(u[:,:nosc] @BD.T)**2)[:-1] @FD.T))
+                
+        elif ODESolver.PreissmanBox in kwds['registered_solver_classes']:
+            S = lambda u: 1/2*u[:,nosc:]**2 -(u[:,:nosc] @FD.T)**2 +sigma(u[:,:nosc] @FD.T) +non_f(u[:,:nosc])
+            IE = lambda u: S((u @self.Ax.T)) -((u[:,:nosc] @Ax.T @CD2)) *((u[:,:nosc] @FD.T))
+            IF = lambda u: np.diff((u[:,:nosc] @Ax @FD.T), axis=0)/kwds['dt'] *(u[0:-1,:nosc] @Ax @FD.T)
+            self.energy_cons_res = lambda u: np.vstack((np.zeros((1,nosc)), np.diff(IE(u), axis=0)/kwds['dt'])) \
+                                +np.vstack((np.zeros((1,nosc)), [np.mean(IF(u)[i:i+2], axis=0) for i in range(self.n)])) @FD.T
+            # self.energy_cons_res = lambda u: np.vstack((np.zeros((1,nosc)), energy_cons_res(u)))
             
-        self.ham_z_ = lambda u, v: r_[self.ham_u_(u), self.ham_v_(v)].T
+            # assuming sigma = lambda u: u**2/2
+            IM = lambda u: ((u[:, nosc:] @FD.T) * u[:, nosc:]) @Ax.T
+            II = lambda u: S(np.vstack([np.mean(u[i:i+2], axis=0) for i in range(self.n)])) \
+                            -np.diff(u[:, nosc:], axis=0)/kwds['dt'] * np.vstack([np.mean(u[i:i+2, nosc:], axis=0) for i in range(self.n)])
+            self.mom_cons_res = lambda u: np.vstack((np.zeros((1,nosc)), np.diff(IM(u), axis=0)/kwds['dt'] +II(u) @Ax.T))
+        
+        self.ham = lambda u: sum(ham_(u), axis=1)*dx
+            
+        self.ham_u_ = lambda u, v=0, t=0: -CD2@u +non_f_u(u, v, t)
+        self.ham_v_ = lambda u=0, v=0: v +0.5*self.beta*u
+            
+        self.ham_z_ = lambda u, v, t=0: r_[self.ham_u_(u, v, t), self.ham_v_(u, v)].T
         
         if 'RB' in self.kwds and 'P' not in self.kwds:
             
@@ -111,8 +143,8 @@ class sineGordon(object):
     
         else:
             # self.ham_u = lambda u: -(sigma_u(FD @u) -sigma_u(BD @u))/dx +non_f_u(u)
-            self.ham_u = lambda u: -CD2@u +non_f_u(u)
-            self.ham_v = lambda v: v
+            self.ham_u = lambda u, v, t=0: -CD2@u +non_f_u(u, v, t)
+            self.ham_v = lambda u, v: v +0.5*self.beta*u
             
             # def ham_z(u, v):
             #     result = np.zeros(2*nosc)
@@ -120,7 +152,7 @@ class sineGordon(object):
             #     result[1::2] = self.ham_v(v)
             #     return result
             
-            self.ham_z = lambda u, v: r_[self.ham_u(u), self.ham_v(v)]
+            self.ham_z = lambda u, v, t=0: r_[self.ham_u(u, v, t), self.ham_v(u, v)]
             
             # J2 = [[0, 1],[-1, 0]]
             # rep_J2 = (J2,)*nosc
@@ -143,25 +175,17 @@ class sineGordon(object):
             
             self.non_quad = None
         
-        "Initial conditions"
-        
+        "Constraints"
         self.constraint_type = None
         # CD1 = sp.linalg.toeplitz([0]+[-1]+[0]*(nosc-3)+[1], [0]+[1]+[0]*(nosc-3)+[-1])/(2*dx)
         # self._g_ = lambda z, z0=self.y_init: np.sum(z[nosc:] * (CD1 @z[:nosc]), axis=0)*dx -np.dot(z0[nosc:], CD1 @z0[:nosc])*dx
         # self._g_prime_ = lambda z: r_[z[nosc:] @CD1.T, CD1 @ z[:nosc]].T*dx
         
-        self._g_ = lambda z, z0=self.y_init: self.ham(z[None, :]) -self.ham(z0[None, :])
-        self._g_prime_ = lambda z: self.ham_z_(z[:nosc], z[nosc:])
-        
-        "Constraints"
-        # if self.constraint_type == 'spherical':                    
-        #     self._g_ = lambda u: (u[1]**2 -np.exp(-2*self.beta*dt)*u[0]**2)*dx
-        #     self._g_prime_ = lambda u: 2*u[1]
-        # else:
-        #     raise NameError
+        self._g_ = lambda z, z0=self.y_init: self.ham(z) -self.ham(z0)
+        self._g_prime_ = lambda z, t=0: self.ham_z_(z[:nosc], z[nosc:], t)
         
         "Fixed-point nonliner equations solver properties"
-        self.tol, self.M, self.var, self.store = 1.0E-10, 100, True, True
+        self.tol, self.M, self.var, self.store = 1.0E-10, 100, False, False
     
 
     def set_constraints(self):
@@ -181,8 +205,8 @@ class sineGordon(object):
         P, U, RB, W_r = self.P, self.U, self.RB, self.W_r
         
         if RB is None:
-            if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
-                f = self.JJ() @ self.ham_z(*np.split(y, 2))
+            if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.EulerBox, ODESolver.PreissmanBox]:
+                f = self.JJ() @ self.ham_z(*np.split(y, 2), t)
             elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
                 f = self.JJ() @ self.ham_z(*np.split(y, 2))
                 
@@ -222,7 +246,7 @@ class sineGordon(object):
         P, U, RB, W_r = self.P, self.U, self.RB, self.W_r
         
         if RB is None:
-            if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
+            if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.PreissmanBox]:
                 dfdy = self.JJ() @ self.ham_zz(*np.split(y, 2))
             elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
                 dfdy = self.JJ() @ self.ham_zz(*np.split(y, 2))
@@ -283,12 +307,10 @@ class sineGordon(object):
             ax0.set_xlim((0, self.T_final))
             # ax0.set_yticks([])
             # ax0.set_yticks([0, 2e-15, 4e-15, 6e-15, 8e-15, 10e-15])
-        if hasattr(self, 'eng_error'):
-            plot_data(ax1, self.t_points, self.eng_error)
-        elif hasattr(self, 'norm_error'):
-            plot_data(ax1, self.t_points, self.norm_error)
-        elif hasattr(self, 'mom_error'):
-            plot_data(ax1, self.t_points, self.mom_error)
+        # if hasattr(self, 'eng_error'):
+        #     plot_data(ax1, self.t_points, self.eng_error)
+        # elif hasattr(self, 'mom_error'):
+        #     plot_data(ax1, self.t_points, self.mom_error)
             
         if hasattr(self, '_g'):
             if hasattr(self, 'y_red'):
@@ -296,14 +318,15 @@ class sineGordon(object):
                 temp = abs(mom)
                 # temp = r_[0, mom_error[1:]]
             else:
-                mom = np.hstack([self._g(self.y[i,:], np.zeros_like(self.y[0,:])) for i in range(self.n+1)])
+                # mom = np.hstack([self._g(self.y[i,:], np.zeros_like(self.y[0,:])) for i in range(self.n+1)])
+                mom = self._g(self.y, np.zeros_like(self.y))
                 temp = abs(mom)
             temp = log(temp/np.roll(temp, 1))
             temp = r_[0, temp[1:]]
                 
             plot_data(ax1, self.t_points, temp)
-            ax1.set_xlim((0, self.T_final))
-            ax1.set_ylim((-max((temp))*1e1, max((temp))*1e1))
+            # ax1.set_xlim((0, self.T_final))
+            # ax1.set_ylim((-max((temp))*1e1, max((temp))*1e1))
             # ax1.set_yticks([0, 2e-15, 4e-15, 6e-15, 8e-15, 10e-15])
             # plot_data(ax[3,0], self.t_points, temp[1])
         ax1.set_xlabel('time')
@@ -329,6 +352,42 @@ class sineGordon(object):
         
         for ax in [ax0, ax1]:
             ax.label_outer()
+            
+        from mpl_toolkits.mplot3d import axes3d
+        import matplotlib.pyplot as plt
+        
+        # Set up a figure twice as tall as it is wide
+        fig3d = plt.figure(figsize=(27,9)) #plt.figaspect(0.5))
+        # fig3d.tight_layout(rect=[0,0,.8,.8])
+        
+        ax3d = fig3d.add_subplot(131, projection="3d")
+        # fig3d, ax3d = plt.subplots(1,2,figsize=plt.figaspect(0.5), gridspec_kw={'width_ratios': [1, 1.5]}, projection="3d")
+        X, Y = np.meshgrid(self.x_points, self.t_points)
+        # Z = np.sin(np.pi*X)*np.sin(np.pi*Y)
+        Z = self.energy_cons_res(self.y)
+        ax3d.plot_wireframe(X, Y, Z)
+        
+        ax3d = fig3d.add_subplot(132, projection="3d")
+        # top_offset = .07
+        # left_offset = .15
+        # right_offset = .2
+        # bottom_offset = .13
+        # hgap = .1
+        # ax_width = 1-left_offset - right_offset
+        # ax_height = (1-top_offset - bottom_offset - hgap)/2
+        # ax3d.set_axes([left_offset, bottom_offset, ax_width, ax_height])
+        # Z = np.sin(np.pi*X)*np.sin(np.pi*Y)
+        Z = self.mom_cons_res(self.y)
+        ax3d.plot_wireframe(X, Y, Z)
+        # ax3d.legend(['plot'],loc=5)
+        # ax1.contour(X, Y, Z, 10, lw=3, cmap="autumn_r", linestyles="solid", offset=-1)
+        # ax1.contour(X, Y, Z, 10, lw=3, colors="k", linestyles="solid")
+        # fig3d.tight_layout(pad=2)
+        
+        ax3d = fig3d.add_subplot(133, projection="3d")
+        
+        plt.show()
+        
             
     @staticmethod
     def get_rb(y_list, F2, F3, MSsolvers, kwds, ax):

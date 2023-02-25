@@ -344,7 +344,7 @@ class System(object):
             alpha /= sqrt(sum(np.array(alpha)**2))
             assert np.isclose(np.array(alpha).dot(alpha), 1), "alpha**2 must be equal to 1"
             obj.alpha = alpha
-            obj.beta = (max(1e-2, 0*np.random.rand()/10))
+            obj.beta = (max(1e-2, 0*np.random.rand()/10))*0
     
             "MechSystem constituents"
             kin = lambda u: sum((u**2), axis=1)/2.0
@@ -407,7 +407,7 @@ class System(object):
             "Initial conditions"
             y_init = r_[np.linspace(1,5,nosc), np.zeros(nosc)]
             
-            obj.constraint_type = 'spherical'
+            obj.constraint_type = None
             if obj.constraint_type == 'linear':
                 y_init[nosc-1] = -(y_init[:nosc-1].dot(alpha[:nosc-1]))/alpha[nosc-1] # project on the manifold
                 assert np.isclose(y_init[:nosc].dot(alpha[:nosc]), 0), "alpha:y should be 0" 
@@ -436,8 +436,8 @@ class System(object):
                     
                 obj._g_ = lambda y, alpha=[obj.A_mat, obj.B_mat]: r_[y @ alpha[0] @ y.T -1.0,\
                                                     y @ alpha[1] @ y.T]
-                obj._g_prime_ = lambda y, alpha=[obj.A_mat, obj.B_mat]: r_[2*y @alpha[0],\
-                                                          2*y @alpha[1]]
+                obj._g_prime_ = lambda y, alpha=[obj.A_mat, obj.B_mat]: c_[2*y @alpha[0],\
+                                                          2*y @alpha[1]].T
 
             "Fixed-point nonliner equations solver properties"
             obj.tol, obj.M, obj.var, obj.store = 1.0E-15, 100, True, True

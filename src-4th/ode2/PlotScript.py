@@ -113,7 +113,7 @@ def logplot(ax, y_data, use_y_labels=True, use_legend=False):
         frame.set_edgecolor('1.0')
 
 def tex_table(solver_name, array2print):
-    print(solver_name, "\n", " \\\\\n".join([" & ".join(map('{0:.3f}'.format, line)) for line in array2print]))
+    print(solver_name, "\n", " \\\\\n".join([" & ".join(map('{0:.5f}'.format, line)) for line in array2print]))
     
 
     

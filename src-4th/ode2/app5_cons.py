@@ -100,7 +100,7 @@ class Params(object):
         
         self.dt = kwds['dt']
          
-        self.T_final = 1
+        self.T_final = 2
         
         w_values = [0.28, 0.62546642846767004501]
         w_values.append(1.0 -2.0*(sum(w_values)))
@@ -265,10 +265,12 @@ class MechSystemSolver(MechSystem):
                     temp = np.hstack([self._g(self.y_red[i,:]) for i in range(self.n+1)])
                 else:
                     temp = np.hstack([self._g(self.y[i,:]) for i in range(self.n+1)])
+                    
+                temp = temp.reshape((-1, 2))
                 
             plot_data(ax1, self.t_points, temp)
             ax1.set_xlim((0, self.T_final))
-            ax1.set_ylim((-max((temp))*1e1, max((temp))*1e1))
+            # ax1.set_ylim((-max((temp))*1e1, max((temp))*1e1))
             # ax1.set_yticks([0, 2e-15, 4e-15, 6e-15, 8e-15, 10e-15])
             # plot_data(ax[3,0], self.t_points, temp[1])
         ax1.set_xlabel('time')
@@ -430,17 +432,17 @@ dt_space_dim = 5
     
 i_range = np.random.randint(0, nosc-3, 1)
 
-kwds = {'system_type': 'sine-Gordon',\
+kwds = {'system_type': 'oscillator',\
         'symplectic_mor': False}
 
 if kwds['system_type'] == 'oscillator':
         
-    Omega2_space_dim = 3
+    Omega2_space_dim = 1
     Omega2_space = 1 +np.random.rand(Omega2_space_dim, nosc)/1000
     Omega2_space.sort()
     
     kwds.update({'nosc': nosc, \
-                'dt_space': linspace(0.05, 0.1, num=dt_space_dim), \
+                'dt_space': linspace(0.01, 0.05, num=dt_space_dim), \
                 'Omega2_space': Omega2_space, \
                 'registered_solver_classes': registered_solver_classes, \
                 'i_range': np.append(i_range, [i_range+1, i_range+2])})
@@ -470,6 +472,7 @@ time_lapsed = [reshape([x.time_lapsed for x in MSsolvers],\
     
 
 #%%
+
 y_list = np.hstack([MSsolver.info.T for MSsolver in MSsolvers])
 F2 = np.hstack([MSsolver.F2 for MSsolver in MSsolvers])
 
@@ -578,7 +581,7 @@ for nosc_r_ in [20]: #[10, 15, 20, 25, 30]:
     
     MSsolvers_r = solver(kwds)
         
-    solution_error.append([np.amax(abs(MSsolvers[-1].y -x.y)) for x in MSsolvers_r])
+    solution_error.append([np.amax(abs(MSsolvers[i].y -MSsolvers_r[i].y)) for i in range(len(MSsolvers))])
     
     time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
                                time_lapsed[0].shape)/time_lapsed[0]*100) 
@@ -597,7 +600,7 @@ print(time_lapsed)
 print(solution_error)
     
 # fig.savefig(datetime.now().strftime('%Y-%m-%d_%H-%M_')+'app5_' +MSsolvers_r[-1].system_type + '_' +str(MSsolvers_r[-1].constraint_type) + '_' + MSsolvers_r[-1].reduced_model +'_' + 'singular_values' +'_.pdf')
-        
+
 
 #%% Hyper-reduced model
 '''

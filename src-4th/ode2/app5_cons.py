@@ -100,7 +100,7 @@ class Params(object):
         
         self.dt = kwds['dt']
          
-        self.T_final = 1
+        self.T_final = 50
         
         w_values = [0.28, 0.62546642846767004501]
         w_values.append(1.0 -2.0*(sum(w_values)))
@@ -192,6 +192,7 @@ class MechSystemSolver(MechSystem):
                 elif self.constraint_type and self.system_type == 'KdV':
                     y_[1] = np.exp(-2*self.beta*self.dt) *LA.norm(self.y[k])/LA.norm(y_[1]) *y_[1]
                 elif self.constraint_type and self.system_type == 'sine-Gordon':
+                    _g = lambda y, y0: self._g(y, y0, self.t_points[k+1])
                     y_, _, _ = fixed_point(self._g, y_, self._g_prime, self.tol, self.M, False)
                     
 
@@ -251,14 +252,14 @@ class MechSystemSolver(MechSystem):
         if hasattr(self, '_g'):
             if self.system_type == 'sine-Gordon':
                 if hasattr(self, 'y_red'):
-                    mom = np.hstack([self._g(self.y_red[i,:], np.zeros_like(self.y[0,:])) for i in range(self.n+1)])
+                    mom = np.hstack([self._g(self.y_red[i,:], np.zeros_like(self.y[0,:]), self.t_points[i]) for i in range(self.n+1)])
                     temp = abs(mom)
                     # temp = r_[0, mom_error[1:]]
                 else:
-                    mom = np.hstack([self._g(self.y[i,:], np.zeros_like(self.y[0,:])) for i in range(self.n+1)])
+                    mom = np.hstack([self._g(self.y[i,:], np.zeros_like(self.y[0,:]), self.t_points[i]) for i in range(self.n+1)])
                     temp = abs(mom)
-                temp = log(temp/np.roll(temp, 1))
-                temp = r_[0, temp[1:]]
+                # temp = log(temp/np.roll(temp, 1))
+                # temp = r_[0, temp[1:]]
                     
             else:
                 if hasattr(self, 'y_red'):
@@ -268,7 +269,7 @@ class MechSystemSolver(MechSystem):
                 
             plot_data(ax1, self.t_points, temp)
             ax1.set_xlim((0, self.T_final))
-            ax1.set_ylim((-max((temp))*1e1, max((temp))*1e1))
+            # ax1.set_ylim((-max((temp))*1e1, max((temp))*1e1))
             # ax1.set_yticks([0, 2e-15, 4e-15, 6e-15, 8e-15, 10e-15])
             # plot_data(ax[3,0], self.t_points, temp[1])
         ax1.set_xlabel('time')
@@ -305,7 +306,7 @@ class MechSystemSolver(MechSystem):
         else:
             string = self.reduced_model
                 
-        # fig.savefig(datetime.now().strftime('%Y-%m-%d_%H-%M_')+'app5_' +self.system_type + '_' +str(self.constraint_type) + '_' + string +'_.pdf')
+        fig.savefig(datetime.now().strftime('%Y-%m-%d_%H-%M_')+'app5_' +self.system_type + '_' +str(self.constraint_type) + '_' + string +'_.pdf')
         
         for ax in [ax0, ax1]:
             ax.label_outer()
@@ -426,12 +427,12 @@ def solver(kwds):
 registered_solver_classes, nosc = [ODESolver.ConformalImplicitMidpoint], 200
 num_solver_classes = len(registered_solver_classes)
     
-dt_space_dim = 5
+dt_space_dim = 1
     
 i_range = np.random.randint(0, nosc-3, 1)
 
 kwds = {'system_type': 'sine-Gordon',\
-        'symplectic_mor': False}
+        'symplectic_mor': True}
 
 if kwds['system_type'] == 'oscillator':
         
@@ -480,7 +481,7 @@ fig = figure()
 ax = fig.add_subplot(111)
 solution_error = []
 
-for nosc_r_ in [20]: #[10, 15, 20, 25, 30]:
+for nosc_r_ in [40]: #[10, 15, 20, 25, 30]:
 
     if MSsolvers[-1].non_quad:
         X.update({'Q': MSsolvers[-1].Q_spd(), \
@@ -578,7 +579,7 @@ for nosc_r_ in [20]: #[10, 15, 20, 25, 30]:
     
     MSsolvers_r = solver(kwds)
         
-    solution_error.append([np.amax(abs(MSsolvers[-1].y -x.y)) for x in MSsolvers_r])
+    solution_error.append([np.amax(abs(MSsolvers[i].y -MSsolvers_r[i].y)) for i in range(len(MSsolvers_r))])
     
     time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
                                time_lapsed[0].shape)/time_lapsed[0]*100) 
@@ -596,7 +597,7 @@ ax.set_xlim((0, len(s)+50))
 print(time_lapsed)
 print(solution_error)
     
-# fig.savefig(datetime.now().strftime('%Y-%m-%d_%H-%M_')+'app5_' +MSsolvers_r[-1].system_type + '_' +str(MSsolvers_r[-1].constraint_type) + '_' + MSsolvers_r[-1].reduced_model +'_' + 'singular_values' +'_.pdf')
+fig.savefig(datetime.now().strftime('%Y-%m-%d_%H-%M_')+'app5_' +MSsolvers_r[-1].system_type + '_' +str(MSsolvers_r[-1].constraint_type) + '_' + MSsolvers_r[-1].reduced_model +'_' + 'singular_values' +'_.pdf')
         
 
 #%% Hyper-reduced model

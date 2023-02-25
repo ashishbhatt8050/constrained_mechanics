@@ -320,7 +320,7 @@ class System(object):
             elif kwds['system_type'] == 'sine-Gordon':
                 # CD1xRBu = obj.CD1 @obj.RB[:obj.nosc, :obj.nosc_r]
                 
-                obj._g = lambda y, z0=obj.y_init: obj._g_(obj.RB @y, z0)
+                obj._g = lambda y, z0=obj.y_init, t=0: obj._g_(obj.RB @y, z0, t)
                 obj._g_prime = lambda y: obj.RB.T @obj._g_prime_((y @obj.RB.T))
         
         else:
@@ -521,7 +521,7 @@ class System(object):
 def sineGordon(obj, kwds):
     
     "MechSystem constituents"
-    c, obj.beta = 0.5, 0
+    c, obj.beta = 0.5, 0.001
     L, dx = 60, 0.187
     nosc = obj.nosc = int((L/dx+1))
     obj.x_points = np.array([-L/2 +i*dx for i in range(nosc)])
@@ -550,34 +550,39 @@ def sineGordon(obj, kwds):
     non_f_u = lambda u: np.sin(u)
     non_f_uu = lambda u: np.diag(np.cos(u))
     
-    obj.ham = lambda u: sum(1/2*u[:,nosc:]**2 +sigma(u[:,:nosc] @BD.T) +non_f(u[:,:nosc]), axis=1)*dx
+    obj.ham = lambda u: sum(1/2*u[:,nosc:]**2 +sigma(u[:,:nosc] @BD.T) +non_f(u[:,:nosc]), axis=1)*dx +obj.beta/2 * sum(u[:,:nosc]*u[:,nosc:], axis=1)
+    obj.mom = lambda u: sum(u[:,nosc:]*(u[:,:nosc] @BD.T))*dx    
+    
+    obj.ham_u_ = lambda u, v: -CD2@u +non_f_u(u) +obj.beta/2 *v
+    obj.ham_v_ = lambda u, v: v +obj.beta/2 *u
         
-    obj.ham_u_ = lambda u: -CD2@u +non_f_u(u)
-    obj.ham_v_ = lambda v: v
-        
-    obj.ham_z_ = lambda u, v: r_[obj.ham_u_(u), obj.ham_v_(v)].T
+    obj.ham_z_ = lambda u, v: r_[obj.ham_u_(u, v), obj.ham_v_(u, v)].T
+    obj.mom_z = lambda u, v: r_[v @BD, u @BD.T].T
     
     if 'RB' in kwds and 'P' not in kwds:
         
         if kwds['symplectic_mor']:
             RB = kwds['RB']
-            RBu = lambda z: np.split(RB @z, 2, axis=0)[0]
-            RBv = lambda z: np.split(RB @z, 2, axis=0)[1]
+            RBu = lambda z: np.split(RB @z, 2, axis=0)
+            RBv = lambda z: np.split(RB @z, 2, axis=0)
         
-            obj.ham_u = lambda u: -(sigma_u(FD @u) -sigma_u(BD @u))/dx +non_f_u(u)
-            obj.ham_v = lambda v: v
+            obj.ham_u = lambda u, v: -(sigma_u(FD @u) -sigma_u(BD @u))/dx +non_f_u(u) +obj.beta/2*v
+            obj.ham_v = lambda u, v: v +obj.beta/2*u
             
-            obj.ham_z = lambda u, v: r_[obj.ham_u(RBu(r_[u, v])), \
-                                        obj.ham_v(RBv(r_[u, v]))]
+            obj.ham_z = lambda u, v: r_[obj.ham_u(*RBu(r_[u, v])), \
+                                        obj.ham_v(*RBv(r_[u, v]))]
             
             obj.JJ = lambda d=nosc: r_[c_[np.zeros((d,d)), np.eye(d)],\
                                        c_[-np.eye(d), np.zeros((d,d))]]
             
             # non_f_uu_ = lambda u, RB: np.diag(np.cos(u) @RB)
             obj.ham_uu = lambda u: (-CD2 +non_f_uu(u))
+            obj.ham_uv = lambda v: obj.beta/2*eye_nosc
             obj.ham_vv = lambda v: eye_nosc
+            obj.ham_vu = lambda u: obj.beta/2*eye_nosc
             
-            obj.ham_zz = lambda u, v: block_diag(obj.ham_uu(RBu(r_[u, v])), obj.ham_vv(RBv(r_[u, v])))
+            obj.ham_zz = lambda u, v: r_[c_[obj.ham_uu(RBu(r_[u, v])[0]), obj.ham_uv(v)],\
+                                         c_[obj.ham_vu(u), obj.ham_vv(v)]]
             
             obj.non_quad = None
             obj.Q_spd = None
@@ -589,27 +594,30 @@ def sineGordon(obj, kwds):
             FDxRB = FD @RBu
             BDxRB = BD @RBu
         
-            obj.ham_u = lambda u: -(sigma_u(FDxRB @u) -sigma_u(BDxRB @u))/dx +non_f_u(RBu @u)
-            obj.ham_v = lambda v: RBv @v
+            obj.ham_u = lambda u, v: -(sigma_u(FDxRB @u) -sigma_u(BDxRB @u))/dx +non_f_u(RBu @u) +obj.beta/2 *RBv @v
+            obj.ham_v = lambda u, v: RBv @v +obj.beta/2*RBu @u
             
-            obj.ham_z = lambda u, v: r_[obj.ham_u(u), obj.ham_v(v)]
+            obj.ham_z = lambda u, v: r_[obj.ham_u(u, v), obj.ham_v(u, v)]
             
             obj.JJ = lambda d=nosc: r_[c_[np.zeros((d,d)), np.eye(d)],\
                                        c_[-np.eye(d), np.zeros((d,d))]]
             
             # non_f_uu_ = lambda u, RB: np.diag(np.cos(u) @RB)
             obj.ham_uu = lambda u: (-CD2 +non_f_uu(RBu @u))
+            obj.ham_uv = lambda v: obj.beta/2*eye_nosc
             obj.ham_vv = lambda v: eye_nosc
+            obj.ham_vu = lambda u: obj.beta/2*eye_nosc
             
-            obj.ham_zz = lambda u, v: block_diag(obj.ham_uu(u), obj.ham_vv(v))
+            obj.ham_zz = lambda u, v: r_[c_[obj.ham_uu(u), obj.ham_uv(v)],\
+                                         c_[obj.ham_vu(u), obj.ham_vv(v)]]
             
             obj.non_quad = None
             obj.Q_spd = None
 
     else:
         # obj.ham_u = lambda u: -(sigma_u(FD @u) -sigma_u(BD @u))/dx +non_f_u(u)
-        obj.ham_u = lambda u: -CD2@u +non_f_u(u)
-        obj.ham_v = lambda v: v
+        obj.ham_u = lambda u, v: -CD2@u +non_f_u(u) +obj.beta/2* v
+        obj.ham_v = lambda u, v: v +obj.beta/2*u
         
         # def ham_z(u, v):
         #     result = np.zeros(2*nosc)
@@ -617,7 +625,7 @@ def sineGordon(obj, kwds):
         #     result[1::2] = obj.ham_v(v)
         #     return result
         
-        obj.ham_z = lambda u, v: r_[obj.ham_u(u), obj.ham_v(v)]
+        obj.ham_z = lambda u, v: r_[obj.ham_u(u, v), obj.ham_v(u, v)]
         
         # J2 = [[0, 1],[-1, 0]]
         # rep_J2 = (J2,)*nosc
@@ -627,8 +635,10 @@ def sineGordon(obj, kwds):
         obj.JJ = lambda d=nosc: r_[c_[np.zeros((d,d)), np.eye(d)],\
                                    c_[-np.eye(d), np.zeros((d,d))]]
         
-        obj.ham_uu = lambda u: -CD2 +non_f_uu(u)
+        obj.ham_uu = lambda u: -CD2 +non_f_uu(u) +obj.beta/2*eye_nosc
+        obj.ham_uv = lambda v: obj.beta/2*eye_nosc
         obj.ham_vv = lambda v: eye_nosc
+        obj.ham_vu = lambda u: obj.beta/2*eye_nosc
         
         # def ham_zz(u, v):
         #     result = np.zeros_like(JJ)
@@ -636,19 +646,24 @@ def sineGordon(obj, kwds):
         #     result[1::2, 1::2] = obj.ham_vv(v)
         #     return result
         
-        obj.ham_zz = lambda u, v: block_diag(obj.ham_uu(u), obj.ham_vv(v))
+        obj.ham_zz = lambda u, v: r_[c_[obj.ham_uu(u), obj.ham_uv(v)],\
+                                         c_[obj.ham_vu(u), obj.ham_vv(v)]]
         
         obj.non_quad = None
     
     "Initial conditions"
     
-    obj.constraint_type = None
+    obj.constraint_type = 'momentum'
     # CD1 = sp.linalg.toeplitz([0]+[-1]+[0]*(nosc-3)+[1], [0]+[1]+[0]*(nosc-3)+[-1])/(2*dx)
     # obj._g_ = lambda z, z0=obj.y_init: np.sum(z[nosc:] * (CD1 @z[:nosc]), axis=0)*dx -np.dot(z0[nosc:], CD1 @z0[:nosc])*dx
     # obj._g_prime_ = lambda z: r_[z[nosc:] @CD1.T, CD1 @ z[:nosc]].T*dx
     
-    obj._g_ = lambda z, z0=obj.y_init: obj.ham(z[None, :]) -obj.ham(z0[None, :])
-    obj._g_prime_ = lambda z: obj.ham_z_(z[:nosc], z[nosc:])
+    # obj._g_ = lambda z, z0=obj.y_init: obj.ham(z[None, :]) -obj.ham(z0[None, :])
+    # obj._g_prime_ = lambda z: obj.ham_z_(z[:nosc], z[nosc:])
+    
+    obj._g_ = lambda z, z0=obj.y_init, t=0: obj.mom(z[None, :]) -exp(-obj.beta*t)*obj.mom(z0[None, :])
+    obj._g_prime_ = lambda z: obj.mom_z(z[:nosc], z[nosc:])  
+    
     
     "Constraints"
     # if obj.constraint_type == 'spherical':                    

@@ -252,11 +252,11 @@ class MechSystemSolver(MechSystem):
         if hasattr(self, '_g'):
             if self.system_type == 'sine-Gordon':
                 if hasattr(self, 'y_red'):
-                    mom = np.hstack([self._g(self.y_red[i,:], np.zeros_like(self.y[0,:]), self.t_points[i]) for i in range(self.n+1)])
+                    mom = np.hstack([self._g(self.y_red[i,:], self.y[0,:], self.t_points[i]) for i in range(self.n+1)])
                     temp = abs(mom)
                     # temp = r_[0, mom_error[1:]]
                 else:
-                    mom = np.hstack([self._g(self.y[i,:], np.zeros_like(self.y[0,:]), self.t_points[i]) for i in range(self.n+1)])
+                    mom = np.hstack([self._g(self.y[i,:], self.y[0,:], self.t_points[i]) for i in range(self.n+1)])
                     temp = abs(mom)
                 # temp = log(temp/np.roll(temp, 1))
                 # temp = r_[0, temp[1:]]
@@ -267,7 +267,7 @@ class MechSystemSolver(MechSystem):
                 else:
                     temp = np.hstack([self._g(self.y[i,:]) for i in range(self.n+1)])
                 
-            plot_data(ax1, self.t_points, temp)
+            plot_data(ax1, self.t_points, temp.T)
             ax1.set_xlim((0, self.T_final))
             # ax1.set_ylim((-max((temp))*1e1, max((temp))*1e1))
             # ax1.set_yticks([0, 2e-15, 4e-15, 6e-15, 8e-15, 10e-15])
@@ -306,7 +306,7 @@ class MechSystemSolver(MechSystem):
         else:
             string = self.reduced_model
                 
-        fig.savefig(datetime.now().strftime('%Y-%m-%d_%H-%M_')+'app5_' +self.system_type + '_' +str(self.constraint_type) + '_' + string +'_.pdf')
+        # fig.savefig(datetime.now().strftime('%Y-%m-%d_%H-%M_')+'app5_' +self.system_type + '_' +str(self.constraint_type) + '_' + string +'_.pdf')
         
         for ax in [ax0, ax1]:
             ax.label_outer()
@@ -597,7 +597,7 @@ ax.set_xlim((0, len(s)+50))
 print(time_lapsed)
 print(solution_error)
     
-fig.savefig(datetime.now().strftime('%Y-%m-%d_%H-%M_')+'app5_' +MSsolvers_r[-1].system_type + '_' +str(MSsolvers_r[-1].constraint_type) + '_' + MSsolvers_r[-1].reduced_model +'_' + 'singular_values' +'_.pdf')
+# fig.savefig(datetime.now().strftime('%Y-%m-%d_%H-%M_')+'app5_' +MSsolvers_r[-1].system_type + '_' +str(MSsolvers_r[-1].constraint_type) + '_' + MSsolvers_r[-1].reduced_model +'_' + 'singular_values' +'_.pdf')
         
 
 #%% Hyper-reduced model

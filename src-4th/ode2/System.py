@@ -321,7 +321,7 @@ class System(object):
                 # CD1xRBu = obj.CD1 @obj.RB[:obj.nosc, :obj.nosc_r]
                 
                 obj._g = lambda y, z0=obj.y_init, t=0: obj._g_(obj.RB @y, z0, t)
-                obj._g_prime = lambda y: obj.RB.T @obj._g_prime_((y @obj.RB.T))
+                obj._g_prime = lambda y: obj._g_prime_((y @obj.RB.T)) @obj.RB
         
         else:
             if obj.constraint_type and kwds['system_type'] == 'oscillator':
@@ -521,7 +521,7 @@ class System(object):
 def sineGordon(obj, kwds):
     
     "MechSystem constituents"
-    c, obj.beta = 0.5, 0.001
+    c, obj.beta = 0.5, 0.00#1
     L, dx = 60, 0.187
     nosc = obj.nosc = int((L/dx+1))
     obj.x_points = np.array([-L/2 +i*dx for i in range(nosc)])
@@ -661,8 +661,10 @@ def sineGordon(obj, kwds):
     # obj._g_ = lambda z, z0=obj.y_init: obj.ham(z[None, :]) -obj.ham(z0[None, :])
     # obj._g_prime_ = lambda z: obj.ham_z_(z[:nosc], z[nosc:])
     
-    obj._g_ = lambda z, z0=obj.y_init, t=0: obj.mom(z[None, :]) -exp(-obj.beta*t)*obj.mom(z0[None, :])
-    obj._g_prime_ = lambda z: obj.mom_z(z[:nosc], z[nosc:])  
+    obj._g_ = lambda z, z0=obj.y_init, t=0: c_[obj.ham(z[None, :]) -obj.ham(z0[None, :]), \
+                                             obj.mom(z[None, :]) -exp(-obj.beta*t)*obj.mom(z0[None, :])].T
+    obj._g_prime_ = lambda z: c_[obj.ham_z_(z[:nosc], z[nosc:]),\
+                               obj.mom_z(z[:nosc], z[nosc:])].T
     
     
     "Constraints"

@@ -48,7 +48,7 @@ def fixed_point(g, x, dgdx, tol, M, store):
     if R.shape == (1,0) or R.shape == (1,1) or R.shape == ():
         m, Delta_Lambda = 0, g(x[1])/R
     else:
-        m, Delta_Lambda = 0, LA.solve(R, g(x[1]))
+        m, Delta_Lambda = 0, LA.solve(R, g(x[1])).flatten()
     
     if store: info = [(m, Delta_Lambda, x[1])]
 
@@ -65,7 +65,7 @@ def fixed_point(g, x, dgdx, tol, M, store):
     
             # m, Delta_Lambda = m+1, g(x[1:2])/sum(dgdx(x[1:2])*dgdx(x[0:1]), axis=1)
             R = dgdx(x[1]) @ dgdx(x[0]).T
-            m, Delta_Lambda = m+1, LA.solve(R, g(x[1]))
+            m, Delta_Lambda = m+1, LA.solve(R, g(x[1])).flatten()
         
         # m, Delta_Lambda = m+1, LA.solve(R, g(x[1]))
         

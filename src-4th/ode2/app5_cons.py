@@ -22,6 +22,11 @@ from time import process_time
 import scipy as sp
 import gc
 from datetime import datetime
+from matplotlib import rc
+import matplotlib.pyplot as plt
+import os
+plt.rc('text', usetex=True)  # Enable LaTeX rendering
+rc('text.latex', preamble=r'\usepackage{amsfonts}')  # Load AMSFonts for Fraktur
 
 from Newton import fixed_point
 
@@ -81,9 +86,12 @@ class Params(object):
             self.P = None
             
         "Reduced MechSystem constituents"
+        self.reducer = kwds['reducer']
         if self.W_r is not None:
-            self.JJ_r = self.W_r.T @ self.JJ() @ self.W_r
-
+            if self.reducer == 'pod':
+                self.JJ_r = self.W_r.T @ self.JJ() @ self.W_r
+            elif self.reducer == 'psd':
+                self.JJ_r = self.JJ(self.nosc_r)
         
         "Numerical solver and its properties"
         self.registered_solver_classes = kwds['registered_solver_classes']
@@ -190,7 +198,7 @@ class MechSystemSolver(MechSystem):
                     y_[1] = np.exp(-2*self.beta*self.dt) *LA.norm(self.y[k])/LA.norm(y_[1]) *y_[1]
                     
 
-            if self.RB is None:
+            if self.RB is None or self.constraint_type is None:
                 self.y[k+1] = y_[1]
             else:
                 self.y[k+1] = self.RB.T @y_[1]
@@ -236,12 +244,20 @@ class MechSystemSolver(MechSystem):
         
         if hasattr(self, 'sym_error'):
             plot_data(ax0, self.t_points, self.sym_error)
-            ax0.set_ylim((-max(self.sym_error)*1e1, max(self.sym_error)*1e1))
+            if max(abs(self.sym_error)) < 1e-15:
+                factor = 1e-15
+            else:
+                factor = 0
+                
+            ax0.set_ylim((-max(self.sym_error)*1e1 -factor, max(self.sym_error)*1e1 +factor))
             ax0.set_xlim((0, self.T_final))
+            ax0.set_ylabel(r'$\Delta Sp$')
+            
         if hasattr(self, 'eng_error'):
             plot_data(ax1, self.t_points, self.eng_error)
             ax1.set_ylim((-max(self.eng_error)*1e1, max(self.eng_error)*1e1))
             ax1.set_xlim((0, self.T_final))
+            
         elif hasattr(self, 'norm_error'):
             plot_data(ax1, self.t_points, self.norm_error)
             
@@ -259,7 +275,9 @@ class MechSystemSolver(MechSystem):
             ax1.set_xlim((0, self.T_final))
             # plot_data(ax2, self.t_points, temp[1])
             # ax2.set_ylim((min(temp[1])*1e-1, max(temp[1])*1e1))
+            
         ax1.set_xlabel('time')
+        ax1.set_ylabel(r'$\Delta \mathfrak{P}$')
             
         # plot_data(ax[0,1], self.t_points, )
         # ax3 = fig.add_subplot(gs[0:2, -1])
@@ -289,11 +307,23 @@ class MechSystemSolver(MechSystem):
         else:
             string = 'full'
             
-        curr_datetime = datetime.now().strftime('%Y-%m-%d_%H-%M_')
-        fig.savefig(curr_datetime +'app5_oscillator_' +string +'_.pdf', bbox_inches='tight')
+        # Get the current working directory
+        cwd = os.getcwd()
         
-        # for ax in [ax0, ax1]:
-        #     ax.label_outer()
+        # Construct the data folder path (adjust as needed)
+        data_folder = os.path.join(cwd, "data")
+        
+        if not os.path.exists(data_folder):
+            os.makedirs(data_folder)
+
+        filename = datetime.now().strftime('%Y-%m-%d_%H-%M_') +'osc_' +string
+        fig_path = os.path.join(data_folder, filename +'.pdf')
+        data_path = os.path.join(data_folder, filename +'.npy')
+        fig.savefig(fig_path, bbox_inches='tight')
+        np.save(data_path, [self.sym_error, temp, self.t_points])
+        
+        for ax in [ax0, ax1]:
+            ax.label_outer()
         
 
     def measures(self, errors, dt_space):
@@ -331,17 +361,18 @@ class MechSystemSolver(MechSystem):
 def mor_demo():
     "Model order reduction of the MechSystem using MechSystemSolver"
     
-    registered_solver_classes, nosc = [ODESolver.ImplicitMidpoint], 200
+    registered_solver_classes, nosc = [ODESolver.ConformalImplicitMidpoint], 200
+    registered_reducers = ['pod', 'psd']
     num_solver_classes = len(registered_solver_classes)
         
     dt_space_dim = 1
     
-    kwds = {'system_type': 'oscillator'}
+    kwds = {'system_type': 'oscillator', 'reducer': 'psd'}
     
     if kwds['system_type'] == 'oscillator':
             
-        Omega2_space_dim = 1
-        Omega2_space = 1 +np.random.rand(Omega2_space_dim, nosc)/1000
+        Omega2_space_dim = 6
+        Omega2_space = np.append(1 +np.random.rand(Omega2_space_dim, 3)/1000, 1 +np.random.rand(Omega2_space_dim, nosc-3)/1000, 1)
         Omega2_space.sort()
         
         i_range = np.random.randint(0, nosc-30, 1)
@@ -349,7 +380,7 @@ def mor_demo():
         
         kwds.update({'nosc': nosc, \
                     'dt_space': linspace(0.05, 0.1, num=dt_space_dim), \
-                    'Omega2_space': Omega2_space, \
+                    'Omega2_space': Omega2_space[:Omega2_space_dim-1], \
                     'registered_solver_classes': registered_solver_classes, \
                     'i_range': i_range})
     else:
@@ -365,14 +396,15 @@ def mor_demo():
         assert Omega2_space_dim == 1
     
     time_lapsed = [reshape([x.time_lapsed for x in MSsolvers],\
-                           (num_solver_classes, dt_space_dim, Omega2_space_dim))]
+                           (num_solver_classes, dt_space_dim, Omega2_space_dim-1))]
         
     y_list = np.hstack([MSsolver.info.T for MSsolver in MSsolvers])
     F2 = np.hstack([MSsolver.F2 for MSsolver in MSsolvers])
     
     X = {'Q': MSsolvers[-1].Q_spd(), \
          'sqrt': sp.linalg.sqrtm(MSsolvers[-1].Q_spd()), \
-         'eye': np.eye(2*nosc)}
+         'eye': np.eye(2*nosc), \
+         'eye_half': np.eye(nosc)}
     
     fig = figure()
     ax = fig.add_subplot(111)
@@ -406,10 +438,15 @@ def mor_demo():
         W_r = orthogonalize(W_r_, RB, X['eye'])
         assert (W_r.shape == RB.shape)
     
-    else:
-        RB, s = POD(c_[y_list, F2], X['eye'])
+    elif kwds['reducer'] == 'pod':
+        RBq, sv_pod_q = POD(c_[y_list[:nosc,:], F2[:nosc,:]], X['eye_half'])
+        RBp, sv_pod_p = POD(c_[y_list[nosc:,:], F2[nosc:,:]], X['eye_half'])
     
-        nosc_r = argmin(abs(np.asarray([norm(s[:i])/norm(s) for i in range(len(s))]) -0.99))
+        nosc_r = max(\
+                     argmin(abs(np.asarray([norm(sv_pod_q[:i])/norm(sv_pod_q) for i in range(len(sv_pod_q))]) -0.99)),\
+                     argmin(abs(np.asarray([norm(sv_pod_p[:i])/norm(sv_pod_p) for i in range(len(sv_pod_p))]) -0.99)),\
+                    )
+            
         if nosc_r <  20:
             nosc_r = 40  # ensure nosc_r is even
     
@@ -417,16 +454,82 @@ def mor_demo():
             
         print('nosc_r = %s' %nosc_r)
         
-        RB = RB[:, :2*nosc_r]
+        RBq = RBq[:, :nosc_r]
+        RBp = RBp[:, :nosc_r]
+        RB = r_[c_[RBq, zeros_like(RBq)],\
+                c_[zeros_like(RBp), RBp]]
         W_r = RB
         
-    logplot(ax, s)
-    ax.set_xlabel('index of singular values')
-    ax.set_ylim((min(s)*1e-3, max(s)*1e3))
-    ax.set_xlim((0, len(s)+50))
+        s = c_[sv_pod_q, sv_pod_p].T
         
-    curr_datetime = datetime.now().strftime('%Y-%m-%d_%H-%M_')
-    fig.savefig(curr_datetime + 'app5_oscillator_' + 'singular' +'_.pdf', bbox_inches='tight')
+    elif kwds['reducer'] == 'psd':
+        RB, sv_sp = POD(c_[y_list[:nosc,:], y_list[nosc:,:], F2[:nosc,:], F2[nosc:,:]], X['eye_half'])
+    
+        nosc_r = argmin(abs(np.asarray([norm(sv_sp[:i])/norm(sv_sp) for i in range(len(sv_sp))]) -0.99))
+        if nosc_r <  20:
+            nosc_r = 40  # ensure nosc_r is even
+    
+        X.update({'eye_r': np.eye(2*nosc_r)})
+            
+        print('nosc_r = %s' %nosc_r)
+        
+        RB = RB[:, :nosc_r]
+        RB = r_[c_[RB, zeros_like(RB)],\
+                c_[zeros_like(RB), RB]]
+        W_r = RB
+        
+        if MSsolvers[-1].solver_class in [ODESolver.ImplicitMidpoint]:
+            np.save('sv_sp_imp.npy', sv_sp)        
+        
+            try:
+                # Attempt to load the array
+                sv_sp_cimp = np.load('sv_sp_cimp.npy')
+            except FileNotFoundError:
+                # Handle the case where the file doesn't exist
+                print("Error: The file 'sv_sp_cimp.npy' was not found.")
+                sv_sp_cimp = np.zeros_like(sv_sp)
+            except IOError:
+                # Handle other potential I/O errors
+                print("Error: An I/O error occurred while loading the file.")
+        
+            s = c_[sv_sp, sv_sp_cimp].T
+            
+        else:
+            np.save('sv_sp_cimp.npy', sv_sp)        
+        
+            try:
+                # Attempt to load the array
+                sv_sp_imp = np.load('sv_sp_imp.npy')
+            except FileNotFoundError:
+                # Handle the case where the file doesn't exist
+                print("Error: The file 'sv_sp_imp.npy' was not found.")
+                sv_sp_imp = np.zeros_like(sv_sp)
+            except IOError:
+                # Handle other potential I/O errors
+                print("Error: An I/O error occurred while loading the file.")
+        
+            s = c_[sv_sp_imp, sv_sp].T
+                
+    for y in s:
+        logplot(ax, y)
+        
+    ax.legend((r'$\mathbb{S}$ (PIMP)',r'$\mathbb{S}$ (PCIMP)'), loc='upper right')
+    ax.set_xlabel('index of singular values')
+    ax.set_ylim((np.amin(s)*1e-3, np.amax(s)*1e3))
+    ax.set_xlim((0, len(s[0])))
+            
+    # Get the current working directory
+    # cwd = os.getcwd()
+    
+    # # Construct the data folder path (adjust as needed)
+    # data_folder = os.path.join(cwd, "data")
+    
+    # if not os.path.exists(data_folder):
+    #     os.makedirs(data_folder)
+
+    # filename = datetime.now().strftime('%Y-%m-%d_%H-%M_') +'osc_sv' + '.pdf'
+    # fig_path = os.path.join(data_folder, filename)
+    # fig.savefig(fig_path, bbox_inches='tight')
     
     # assert that W_r and RB are orthogonal
     M = W_r.T @ RB
@@ -438,15 +541,16 @@ def mor_demo():
     kwds.update({'RB': RB,\
                 'W_r': W_r,\
                 'nosc_r': nosc_r,\
+                'Omega2_space': Omega2_space[[-1]], \
                 # 'i_range_r': np.random.randint(0, nosc_r, 3),\
                     })
         
     MSsolvers_r = solver(kwds)
         
-    print(reshape([np.amax(abs(MSsolvers[i].y -MSsolvers_r[i].y)) for i in range(len(MSsolvers))], (dt_space_dim, Omega2_space_dim)))
+    # print(reshape([np.amax(abs(MSsolvers[i].y -MSsolvers_r[i].y)) for i in range(len(MSsolvers))], (dt_space_dim, Omega2_space_dim-1)))
     
-    time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
-                               time_lapsed[0].shape)/time_lapsed[0]*100)    
+    # time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
+    #                            time_lapsed[0].shape)/time_lapsed[0]*100)    
 
     # Hyper-reduced model
     '''
@@ -481,7 +585,7 @@ def mor_demo():
     
     # tex_table('', time_lapsed)
     '''
-    print(time_lapsed)
+    # print(time_lapsed)
 
     # What works:
         # Results are sensitive to parameters

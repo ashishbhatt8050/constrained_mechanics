@@ -74,11 +74,11 @@ def logplot(ax, y_data, use_y_labels=True, use_legend=False):
     # now all plot function should be applied to ax
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
-    ax.spines['left'].set_visible(False)
+    ax.spines['left'].set_visible(True)
     ax.get_xaxis().tick_bottom()
     ax.get_yaxis().tick_left()
     ax.tick_params(axis='x', direction='out')
-    ax.tick_params(axis='y', length=0)
+    ax.tick_params(axis='y', direction='out')
 
     # offset the spines
     for spine in ax.spines.values():
@@ -110,7 +110,7 @@ def logplot(ax, y_data, use_y_labels=True, use_legend=False):
         frame.set_edgecolor('1.0')
 
 def tex_table(solver_name, array2print):
-    print(solver_name, "\n", " \\\\\n".join([" & ".join(map('{0:.3f}'.format, line)) for line in array2print]))
+    print(solver_name, "\n \\num{", " \\\\\n \\num{".join(["} & \\num{".join(map('{0:.6f}'.format, line)) for line in array2print]))
     
 
     

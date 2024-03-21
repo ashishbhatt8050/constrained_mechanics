@@ -56,6 +56,8 @@ class System(object):
                     dfdy = obj.JJ() @ obj.ham_zz(x, u) - obj.drag_z(x, u)
                 elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
                     dfdy = obj.JJ() @ obj.ham_zz(x, u)
+                elif solver_class in [ODESolver.ConformalStormerVerlet]:
+                    dfdy = obj.JJ() @ obj.ham_zz(x, u, obj.Omega2, 0)
                     
             elif W_r is not None and P is None:
                 y = RB @ y
@@ -64,6 +66,8 @@ class System(object):
                     dfdy = obj.JJ_r @ RB.T @ obj.ham_zz(x, u) @ RB - obj.W_r.T @ obj.drag_z(x, u) @ RB
                 elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
                     dfdy = obj.JJ_r @ RB.T @ obj.ham_zz(x, u) @ RB
+                elif solver_class in [ODESolver.ConformalStormerVerlet]:
+                    dfdy = obj.JJ_r @ RB.T @ obj.ham_zz(x, u, obj.Omega2, 0) @ RB
                     
             elif P is not None and obj.non_quad is None:
                 x_, u_ = np.split(RB @y, 2)
@@ -150,6 +154,8 @@ class System(object):
                     f = obj.JJ() @ obj.ham_z(x, u) - obj.drag(x, u)
                 elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
                     f = obj.JJ() @ obj.ham_z(x, u)
+                elif solver_class in [ODESolver.ConformalStormerVerlet]:
+                    f = obj.JJ() @ obj.ham_z(x, u, obj.Omega2, 0)
                     
             elif W_r is not None and P is None:
                 y = RB @ y
@@ -158,6 +164,8 @@ class System(object):
                     f = obj.JJ_r @ RB.T @ obj.ham_z(x, u) - obj.W_r.T @obj.drag(x, u)
                 elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
                     f = obj.JJ_r @ RB.T @ obj.ham_z(x, u)
+                elif solver_class in [ODESolver.ConformalStormerVerlet]:
+                    f = obj.JJ_r @ RB.T @ obj.ham_z(x, u, obj.Omega2, 0)
                     
             elif P is not None and obj.non_quad is None:
                 x_, u_ = np.split(RB @y, 2)
@@ -261,7 +269,7 @@ class System(object):
             alpha /= sqrt(sum(np.array(alpha)**2))
             assert np.isclose(np.array(alpha).dot(alpha), 1), "alpha**2 must be equal to 1"
             obj.alpha = alpha
-            obj.beta = (max(1e-2, 0*np.random.rand()/10))
+            obj.beta = (max(1e-2, 0*np.random.rand()/10))*0
     
             "MechSystem constituents"
             kin = lambda u: sum((u**2), axis=1)/2.0
@@ -297,10 +305,10 @@ class System(object):
             
             obj.ham = lambda x, u, Omega2=Omega2: pot(x, Omega2) +kin(u) +obj.beta/2 * sum(x*u, axis=1)
                                                     
-            obj.ham_z = lambda x, u, Omega2=Omega2: obj.Omega2_00(Omega2) * r_[sin(Omega2*x), u] \
-                                                    +obj.beta/2 * r_[u, x]
-            obj.ham_zz = lambda x, u, Omega2=Omega2: diag(obj.Omega2_00(Omega2) * r_[cos(Omega2*x), np.ones_like(x)] *obj.Omega2_00(Omega2)) \
-                                                + obj.beta/2 * r_[c_[zeros(x.shape*2), eye(x.shape[0])],\
+            obj.ham_z = lambda x, u, Omega2=Omega2, beta=obj.beta: obj.Omega2_00(Omega2) * r_[sin(Omega2*x), u] \
+                                                    +beta/2 * r_[u, x]
+            obj.ham_zz = lambda x, u, Omega2=Omega2, beta=obj.beta: diag(obj.Omega2_00(Omega2) * r_[cos(Omega2*x), np.ones_like(x)] *obj.Omega2_00(Omega2)) \
+                                                + beta/2 * r_[c_[zeros(x.shape*2), eye(x.shape[0])],\
                                                                     c_[eye(x.shape[0]), zeros(x.shape*2)]]
                                                     
             # obj.ham_z = lambda x, u, Omega2=Omega2: obj.Omega2_00(Omega2) * r_[(Omega2*x)-(Omega2*x)**3/6, u] \
@@ -324,7 +332,7 @@ class System(object):
             "Initial conditions"
             y_init = r_[np.linspace(1,5,nosc), np.zeros(nosc)]
             
-            obj.constraint_type = 'spherical'
+            obj.constraint_type = None
             if obj.constraint_type == 'linear':
                 y_init[nosc-1] = -(y_init[:nosc-1].dot(alpha[:nosc-1]))/alpha[nosc-1] # project on the manifold
                 assert np.isclose(y_init[:nosc].dot(alpha[:nosc]), 0), "alpha:y should be 0" 
@@ -357,7 +365,7 @@ class System(object):
                                                           2*y @alpha[1]].T
 
             "Fixed-point nonliner equations solver properties"
-            obj.tol, obj.M, obj.var, obj.store = 1.0E-12, 100, True, True
+            obj.tol, obj.M, obj.var, obj.store = 1.0E-12, 100, True, False
                 
         else:
     

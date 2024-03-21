@@ -174,32 +174,58 @@ class RungeKutta4(ODESolver):
         return u_new
 
 class ConformalStormerVerlet(ODESolver):
-    def __init__(self, f):
+    def __init__(self, f, dfdu=None):
         ODESolver.__init__(self, f)
+        
+        self.dfdu = lambda u, t: dfdu(u,t)
 
         self.Ecoeff = lambda dt: np.exp(f.beta*dt/2)
+        self.Gamma_p, self.Gamma_m = lambda dt: 1 + f.beta*dt/2, lambda dt: 1 - f.beta*dt/2
+        
+        self.H_zz = f.ham_zz
+        self.H_z = f.ham_z
 
     def advance(self):
         u, f, k, t, Ecoeff, neq = self.u, self.f, self.k, self.t, self.Ecoeff, \
                                     self.neq
+        
         dt = t[k+1] - t[k]
+        Gamma_p, Gamma_m = self.Gamma_p(dt), self.Gamma_m(dt)
+        
         u_new = np.zeros(neq)
-        u_new[neq/2:] = Ecoeff(-dt)*u[k,neq/2:] +dt/2*f(u[k], t[k])[1]
-        u_new[:neq/2] = u[k,:neq/2] +dt*f(np.reshape([u[k,:neq/2], u_new[neq/2:]],neq), t[k])[0]
-        u_new[neq/2:] = Ecoeff(-dt)*(u_new[neq/2:] +dt/2*f(np.reshape([u_new[:neq/2], u_new[neq/2:]],neq), t[k])[1])
-        return u_new
+        u_new[neq//2:] = (Ecoeff(-dt)*u[k,neq//2:] +dt/2*f(u[k], t[k])[neq//2:])/Gamma_p
+        u_new[:neq//2] = (Gamma_p*Ecoeff(-dt)*u[k,:neq//2] +dt*f(np.reshape([u[k,:neq//2], u_new[neq//2:]],neq), t[k])[:neq//2]) \
+            * Ecoeff(-dt)/Gamma_m
+        u_new[neq//2:] = Ecoeff(-dt)*(Gamma_m*u_new[neq//2:] +dt/2*f(np.reshape([u_new[:neq//2], u_new[neq//2:]],neq), t[k])[neq//2:])
+        
+        return u_new, u_new
 
     def var_advance(self):
-        u, var_u, dfdu, k, t, Ecoeff, neq = self.u, self.var_u, self.dfdu, self.k, \
+        u, f, dfdu, k, t, Ecoeff, neq = self.u, self.f, self.dfdu, self.k, \
                                             self.t, self.Ecoeff, self.neq
         dt = t[k+1] - t[k]
-        var_u_new = np.zeros((neq,neq))
-        u_new[neq/2:] = Ecoeff(-dt)*u[k,neq/2:] +dt/2*f(u[k], t[k])[1]
-
-        var_u_new[neq/2:] = Ecoeff(-dt)*var_u[k][neq/2:] +dt/2*dfdu(u[k], t[k], dt)[neq/2:].dot(var_u[k])
-        var_u_new[:neq/2] = var_u[k][:neq/2] +dt*dfdu(np.reshape([u[k,:neq/2], u_new[neq/2:]],neq), t[k], dt)[:neq/2].dot(np.concatenate((var_u[k][:neq/2], var_u_new[neq/2:]),axis=0))
-        var_u_new[neq/2:] = Ecoeff(-dt)*(var_u_new[neq/2:] +dt/2*dfdu(np.reshape([u[k,:neq/2], u[k+1,neq/2:]],neq), t[k], dt)[neq/2:].dot(np.concatenate))
-        raise NotImplementedError
+        Gamma_p, Gamma_m = self.Gamma_p(dt), self.Gamma_m(dt)
+                
+        # u_new = (Ecoeff(-dt)*u[k,neq//2:] +dt/2*f(Ecoeff(-dt)*u[k], t[k])[neq//2:])/Gamma_p
+        
+        u_new = (Ecoeff(-dt)*u[k,neq//2:] +dt/2*f(u[k], t[k])[neq//2:])/Gamma_p
+        
+        # H_qq_m = self.H_zz(u[k,:neq//2], u_new)[:neq//2, :neq//2]
+        # H_qq_p = self.H_zz(u[k+1,:neq//2], u_new)[:neq//2, :neq//2]
+        # H_pp = self.H_zz(u[k,:neq//2], u_new)[neq//2:, neq//2:]
+        
+        H_qq_m = -dfdu(np.reshape([u[k,:neq//2], u_new],neq), t[k])[neq//2:,:neq//2]
+        H_qq_p = -dfdu(np.reshape([u[k+1,:neq//2], u_new],neq), t[k])[neq//2:,:neq//2]
+        H_pp = dfdu(np.reshape([u[k,:neq//2], u_new],neq), t[k])[:neq//2, neq//2:]
+        
+        du_11 = (Gamma_p*np.eye(neq//2) -dt**2*H_pp @ H_qq_m/2/Gamma_p)/Gamma_m
+        du_12 = dt*H_pp/Gamma_p/Gamma_m
+        du_21 = -Gamma_m/Gamma_p * dt/2 * H_qq_m - dt/2 * H_qq_p @ du_11
+        du_22 = Gamma_m/Gamma_p*np.eye(neq//2) - dt/2 * H_qq_p @ du_12
+        
+        du = r_[c_[du_11, du_12], c_[du_21, du_22]]*Ecoeff(-2*dt)
+        
+        return du
 
 import sys, os
 

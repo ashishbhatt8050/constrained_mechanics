@@ -1,8 +1,7 @@
 import numpy as np
-import scipy as sp
-from pylab import *
+from pylab import r_, c_, eye
 from numpy import linalg as LA
-from scipy.sparse import identity, issparse
+import os
 
 class ODESolver(object):
     """
@@ -16,20 +15,22 @@ class ODESolver(object):
     k: step number of the most recently computed solution
     f: callable object implementing f(u, t)
     """
-    def __init__(self, f):
-        if not callable(f):
-            raise TypeError('f is %s, not a function' % type(f))
-        # For ODE systems, f will often return a list, but
-        # arithmetic operations with f in numerical methods
-        # require that f is an array. Let self.f be a function
-        # that first calls f(u,t) and then ensures that the
+    def __init__(self, MechSys):
+        if not callable(MechSys):
+            raise TypeError('MechSys is %s, not a function' % type(MechSys))
+        # For ODE systems, MechSys will often return a list, but
+        # arithmetic operations with MechSys in numerical methods
+        # require that MechSys is an array. Let self.MechSys be a function
+        # that first calls MechSys(u,t) and then ensures that the
         # result is an array of floats.
-        self.f = lambda u, t: np.asarray(f(u, t), float)
+        self.f = lambda u, t: MechSys(u, t, func=True, jac=False)
         
-        if hasattr(f, 'JJ_r'):
-            self.JJ_r = f.JJ_r
-        if hasattr(f, 'JJ'):
-            self.JJ = f.JJ
+        self.dfdu = lambda u, t, *arg: MechSys(u, t, arg, func=False, jac=True)
+        
+        if hasattr(MechSys, 'JJ_r'):
+            self.JJ_r = MechSys.JJ_r
+        if hasattr(MechSys, 'JJ'):
+            self.JJ = MechSys.JJ
 
     def advance(self):
         """Advance solution one time step."""
@@ -106,7 +107,6 @@ class ODESolver(object):
         if self.neq%2 == 1:  # odd number of equations
             raise ValueError('ODESolver.var_solve requires even number of equations')
         else:              # systems of ODEs
-            # TODO: define sparse arrays
             self.du = np.zeros((n, self.neq, self.neq))
             self.I_mat = np.eye(self.neq)
 
@@ -128,23 +128,15 @@ class ODESolver(object):
         n = t.size
         #du = self.du
         Ecoeff = self.Ecoeff
-        neq = self.neq
 
         if hasattr(self, 'JJ_r'):
             J_mat = self.JJ_r
         elif hasattr(self, 'JJ'):
             J_mat = self.JJ()
         else:
-            J_mat = np.concatenate([np.concatenate([np.zeros((neq//2,neq//2)), np.eye(neq//2)], axis=1)\
-                              ,np.concatenate([-np.eye(neq//2), np.zeros((neq//2,neq//2))], axis=1)])
-            # J_mat_inv = J_mat.T
-        # else:
-        #     J_mat_inv = LA.inv(self.JJ_r)
+            raise ValueError
             
         symp_error = np.zeros(n)
-        
-        if issparse(J_mat) and not issparse(du[-1]):
-            J_mat = J_mat.toarray()
 
         for k in range(n-1):
             dt = t[k+1] -t[k]
@@ -174,16 +166,14 @@ class RungeKutta4(ODESolver):
         return u_new
 
 class ConformalStormerVerlet(ODESolver):
-    def __init__(self, f, dfdu=None):
-        ODESolver.__init__(self, f)
-        
-        self.dfdu = lambda u, t: dfdu(u,t)
+    def __init__(self, MechSys):
+        ODESolver.__init__(self, MechSys)
 
-        self.Ecoeff = lambda dt: np.exp(f.beta*dt/2)
-        self.Gamma_p, self.Gamma_m = lambda dt: 1 + f.beta*dt/2, lambda dt: 1 - f.beta*dt/2
+        self.Ecoeff = lambda dt: np.exp(MechSys.beta*dt/2)
+        self.Gamma_p, self.Gamma_m = lambda dt: 1 + MechSys.beta*dt/2, lambda dt: 1 - MechSys.beta*dt/2
         
-        self.H_zz = f.ham_zz
-        self.H_z = f.ham_z
+        self.H_zz = MechSys.ham_zz
+        self.H_z = MechSys.ham_z
 
     def advance(self):
         u, f, k, t, Ecoeff, neq = self.u, self.f, self.k, self.t, self.Ecoeff, \
@@ -227,12 +217,10 @@ class ConformalStormerVerlet(ODESolver):
         
         return du
 
-import sys, os
-
 class BackwardEuler(ODESolver):
     """Backward Euler solver for scalar or vector ODEs."""
-    def __init__(self, f, dfdu=None):
-        ODESolver.__init__(self, f)
+    def __init__(self, MechSys):
+        ODESolver.__init__(self, MechSys)
 
         # BackwardEuler needs to import function Newton from Newton.py:
         try:
@@ -245,17 +233,17 @@ Could not import module "Newton". Place Newton.py in this directory
 ''' % (os.path.dirname(os.path.abspath(__file__))))
 
         # Select correct derivative
-        if not callable(dfdu):
+        if not callable(MechSys):
             try:
-                value =f(np.array([1]), 1)
+                _ =MechSys(np.array([1]), 1)
             except IndexError:
-                raise ValueError('f(u,t) must return flaot/int')
+                raise ValueError('MechSys(u,t) must return flaot/int')
 
             self.discrete_derivative =True
         else:
-            neq = np.size(f.u_init)
+            neq = np.size(MechSys.u_init)
             self.discrete_derivative = False
-            self.dfdw = lambda u, t, dt: np.eye(neq)-dt*np.asarray(dfdu(u, t, dt), float)
+            self.dfdw = lambda u, t, dt: np.eye(neq)-dt*np.asarray(self.dfdu(u, t, dt), float)
 
     def advance(self):
         u, f, k, t = self.u, self.f, self.k, self.t
@@ -282,15 +270,11 @@ Could not import module "Newton". Place Newton.py in this directory
         return u_new
 
 class ImplicitMidpoint(ODESolver):
-    def __init__(self, f, dfdu=None):
-        ODESolver.__init__(self, f)
-        # try:
-        #     self.dfdu = lambda u, t: np.asarray(dfdu(u,t), float)
-        # except (TypeError, ValueError):
-        self.dfdu = lambda u, t: dfdu(u,t)
+    def __init__(self, MechSys):
+        ODESolver.__init__(self, MechSys)
 
         # Define Ecoeff for computing symplectic error
-        self.Ecoeff = lambda dt: np.exp(f.beta*dt/4)
+        self.Ecoeff = lambda dt: np.exp(MechSys.beta*dt/4)
 
         # BackwardEuler needs to import function Newton from Newton.py:
         try:
@@ -303,22 +287,22 @@ Could not import module "Newton". Place Newton.py in this directory
 ''' % (os.path.dirname(os.path.abspath(__file__))))
 
         # Select correct derivative
-        if not callable(dfdu):
+        if not callable(MechSys):
             try:
-                value =f(np.array([1]), 1)
+                _ =MechSys(np.array([1]), 1)
             except IndexError: # must be scalar ODE
-                raise ValueError('f(u,t) must return float/int')
+                raise ValueError('MechSys(u,t) must return float/int')
 
             self.discrete_derivative =True
         else:
-            neq = np.size(f.u_init)
+            neq = np.size(MechSys.u_init)
             self.discrete_derivative = False
             # try:
             #     self.dfdw = lambda u, t, dt: \
             #                     np.eye(neq)-dt/2*np.asarray(dfdu((u[1]+u[0])/2, (t[1]+t[0])/2, dt), float)
             # except TypeError:
             self.dfdw = lambda u, t, dt: \
-                            np.eye(neq)-dt/2*dfdu((u[1]+u[0])/2, (t[1]+t[0])/2, dt)
+                            np.eye(neq)-dt/2*self.dfdu((u[1]+u[0])/2, (t[1]+t[0])/2, dt)
 
     def advance(self, w_start=None):
         u, f, k, t = self.u, self.f, self.k, self.t
@@ -345,44 +329,18 @@ Could not import module "Newton". Place Newton.py in this directory
         return u_new, info
 
     def var_advance(self):
-        u, dfdu, k, t, I_mat = self.u, self.dfdu, self.k, self.t, self.I_mat
+        u, k, t, I_mat = self.u, self.k, self.t, self.I_mat
         dt = t[k+1] - t[k]
 
-        temp = dt/2.0*dfdu((u[k+1] +u[k])/2.0, (t[k+1] +t[k])/2.0)
+        temp = dt/2.0*self.dfdu((u[k+1] +u[k])/2.0, (t[k+1] +t[k])/2.0)
         du_new = LA.solve((I_mat -temp), (I_mat +temp))
         return du_new
 
 class ConformalImplicitMidpoint(ImplicitMidpoint):
-    def __init__(self, f, dfdu=None):
-        ImplicitMidpoint.__init__(self, f, dfdu)
+    def __init__(self, MechSys):
+        ImplicitMidpoint.__init__(self, MechSys)
 
-        self.beta = f.beta
-        # self.Ecoeff = Ecoeff = lambda dt: np.exp(f.beta*dt/4)
-        # self.dfdu = lambda u, t: np.asarray(dfdu(u, t), float)
-
-        # BackwardEuler needs to import function Newton from Newton.py:
-        # try:
-        #     from Newton import Newton
-        #     self.Newton = Newton
-        # except ImportError:
-        #     raise ImportError('''
-        #         Could not import module "Newton". Place Newton.py in this directory
-        #         (%s)
-        #         ''' % (os.path.dirname(os.path.abspath(__file__))))
-
-        # Select correct derivative
-        # if not callable(dfdu):
-        #     try:
-        #         value =f(np.array([1]), 1)
-        #     except IndexError: # must be scalar ODE
-        #         raise ValueError('f(u,t) must return float/int')
-
-        #     self.discrete_derivative =True
-        # else:
-        #     self.discrete_derivative = False
-        #     neq = np.size(f.u_init)
-        #     self.dfdw = lambda u, t, dt: \
-        #                     Ecoeff(dt)*(np.eye(neq)-dt/2*np.asarray(dfdu((Ecoeff(dt)*u[1] +Ecoeff(-dt)*u[0])/2, (Ecoeff(dt)*t[1] +Ecoeff(-dt)*t[0])/2, dt), float))
+        self.beta = MechSys.beta
 
     def advance(self):
         
@@ -397,40 +355,15 @@ class ConformalImplicitMidpoint(ImplicitMidpoint):
         info = self.Ecoeff(-dt)*np.array(info)
         
         self.u[k] = self.Ecoeff(dt)*self.u[k]
-        
-        # u, f, k, t, beta, Ecoeff = self.u, self.f, self.k, self.t, self.beta, self.Ecoeff
-        # dt = t[k+1] - t[k]
-
-        # def F(w):
-        #     return Ecoeff(dt)*w - dt*f((Ecoeff(dt)*w +Ecoeff(-dt)*u[k])/2, (Ecoeff(dt)*t[k+1] +Ecoeff(-dt)*t[k])/2) \
-        #             - Ecoeff(-dt)*u[k]
-
-        # if self.discrete_derivative:
-        #     dFdw = Derivative(F)
-        # else:
-        #     def dFdw(w):
-        #         dfdw = self.dfdw
-        #         return Ecoeff(dt)*dfdw([Ecoeff(dt)*w, Ecoeff(-dt)*u[k]], [Ecoeff(dt)*t[k+1], Ecoeff(-dt)*t[k]], dt)
-
-        # w_start = self.u[k] + dt*(f(self.u[k], t[k]) -beta/2*self.u[k])  # Forward Euler step
-        
-        
-        # u_new, n, F_value = self.Newton(self.F, w_start, self.dFdw, N=30)
-        # if k == 0:
-        #     self.Newton_iter = []
-        # self.Newton_iter.append(n)
-        # if n >= 100:
-        #     print("Newton's failed to converge at t=%g "\
-        #           "(%d iterations)" % (t[k+1], n))
                 
         return u_new, info
 
     def var_advance(self):
-        u, dfdu, k, t, Ecoeff, I_mat = self.u, self.dfdu, self.k, self.t, \
+        u, k, t, Ecoeff, I_mat = self.u, self.k, self.t, \
                                         self.Ecoeff, self.I_mat
         dt = t[k+1] - t[k]
 
-        temp = dt/2.0*dfdu((Ecoeff(dt)*u[k+1] +Ecoeff(-dt)*u[k])/2.0, (Ecoeff(dt)*t[k+1] +Ecoeff(-dt)*t[k])/2.0)
+        temp = dt/2.0*self.dfdu((Ecoeff(dt)*u[k+1] +Ecoeff(-dt)*u[k])/2.0, (Ecoeff(dt)*t[k+1] +Ecoeff(-dt)*t[k])/2.0)
         du_new = LA.solve(Ecoeff(dt)*(I_mat -temp), Ecoeff(-dt)*(I_mat +temp))
         return du_new
 

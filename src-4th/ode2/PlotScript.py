@@ -8,10 +8,11 @@ Created on Mon May 11 15:30:30 2020
 Copied from https://github.com/jbmouret/matplotlib_for_papers
 """
 
-import glob
-from pylab import *
+from pylab import figure, rcParams, cm
 import brewer2mpl
 from cycler import cycler
+import os
+import pickle
 
  # brewer2mpl.get_map args: set name  set type  number of colors
 bmap = brewer2mpl.get_map('Set2', 'qualitative', 7)
@@ -48,19 +49,8 @@ def plot_data(ax, x_data, y_data, use_y_labels=True, use_legend=False):
     # put the grid behind
     ax.set_axisbelow(True)
 
-#    ax.fill_between(x, perc_25_low_mut, perc_75_low_mut, alpha=0.25, linewidth=0, color=colors[0])
-#    ax.fill_between(x, perc_25_high_mut, perc_75_high_mut, alpha=0.25, linewidth=0, color=colors[1])
-
 
     ax.plot(x_data, y_data, linewidth=2)
-#    ax.plot(x, med_high_mut, linewidth=2, linestyle='--', color=colors[1])
-
-    # change xlim to set_xlim
-#    ax.set_xlim(np.amin(x_data), np.amax(x_data))
-#    ax.set_ylim(np.amin(y_data), np.amax(y_data))
-
-    #change xticks to set_xticks
-    #ax.set_xticks(np.arange(np.amin(x_data), np.amax(x_data), 100))
 
     if not use_y_labels:
         ax.set_yticklabels([])
@@ -70,7 +60,11 @@ def plot_data(ax, x_data, y_data, use_y_labels=True, use_legend=False):
         frame.set_facecolor('1.0')
         frame.set_edgecolor('1.0')
 
-def logplot(ax, y_data, use_y_labels=True, use_legend=False):
+def logplot(y_data, xlabel=None, xlims=None, use_y_labels=True, use_legend=False):
+    
+    fig = figure()
+    ax = fig.add_subplot(111)
+    
     # now all plot function should be applied to ax
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
@@ -86,21 +80,14 @@ def logplot(ax, y_data, use_y_labels=True, use_legend=False):
     ax.grid(axis='y', color="0.9", linestyle='-', linewidth=1)
     # put the grid behind
     ax.set_axisbelow(True)
-
-#    ax.fill_between(x, perc_25_low_mut, perc_75_low_mut, alpha=0.25, linewidth=0, color=colors[0])
-#    ax.fill_between(x, perc_25_high_mut, perc_75_high_mut, alpha=0.25, linewidth=0, color=colors[1])
-
-
+    
     ax.semilogy(y_data, linewidth=2)
-#    ax.plot(x, med_high_mut, linewidth=2, linestyle='--', color=colors[1])
-
-    # change xlim to set_xlim
-#    ax.set_xlim(np.amin(x_data), np.amax(x_data))
-#    ax.set_ylim(np.amin(y_data), np.amax(y_data))
-
-    #change xticks to set_xticks
-    #ax.set_xticks(np.arange(np.amin(x_data), np.amax(x_data), 100))
-
+    
+    # ax.legend((r'$\mathbb{S}$ (PCIMP)',r'$\mathbb{S}$ (PCSV)'), loc='upper right')
+    if xlabel: ax.set_xlabel(xlabel)
+    ax.margins(y=0.5)
+    if xlims: ax.set_xlim(xlims)
+    
     if not use_y_labels:
         ax.set_yticklabels([])
 
@@ -108,9 +95,41 @@ def logplot(ax, y_data, use_y_labels=True, use_legend=False):
         frame = ax.legend().get_frame()
         frame.set_facecolor('1.0')
         frame.set_edgecolor('1.0')
+        
+    return fig, ax
+
+def save_figure(fig, filename):
+    
+    # Get the current working directory
+    cwd = os.getcwd()
+    
+    # # Construct the data folder path (adjust as needed)
+    data_folder = os.path.join(cwd, "data")
+    
+    if not os.path.exists(data_folder):
+        os.makedirs(data_folder)
+        
+    fig_path = os.path.join(data_folder, filename[:-4])
+    fig.savefig(fig_path)
+    
+    pickle.dump(fig, open(fig_path+'.fig.pickle', 'wb'))
+    
+    
+    # edit the figure later
+    # import pickle
+    
+    # with open('data/2024-04-08_10-10_osc_ConformalStormerVerlet_reduced.fig.pickle', 'rb') as file: figx = pickle.load(file)
+    
+    # figx.show() # Show the figure, edit it, etc.!
+    # ax = figx.axes
+    # ax[0].set_xlabel('time')
+    # ax[0].set_ylim([-2e-16, 2e-16])
+    # ax[2].set_xlim([1,6])
+
 
 def tex_table(solver_name, array2print):
-    print(solver_name, "\n \\num{", " \\\\\n \\num{".join(["} & \\num{".join(map('{0:.6f}'.format, line)) for line in array2print]))
+    print(solver_name, "\n", " \\\\\n".join([" & ".join(map('{0:.3f}'.format, line)) for line in array2print]))
+    # print(solver_name, "\n \\num{", " \\\\\n \\num{".join(["} & \\num{".join(map('{0:.6f}'.format, line)) for line in array2print]))
     
 
     
@@ -118,7 +137,7 @@ def plot_3dsurface(fig, ax, xx, yy, zz):
     surf = ax.plot_surface(xx, yy, zz,\
                            cmap = cm.coolwarm, linewidth=0, antialiased=False)
     fig.colorbar(surf, shrink=0.5, aspect=5)
-    cset = ax.contour(xx, yy, zz, zdir='z', offset=-1, cmap=cm.coolwarm)
+    _ = ax.contour(xx, yy, zz, zdir='z', offset=-1, cmap=cm.coolwarm)
     ax.view_init(30, -135)
     ax.set_xticks([0,1])
     ax.set_yticks([0,1])
@@ -126,45 +145,7 @@ def plot_3dsurface(fig, ax, xx, yy, zz):
 
 #%% Testing
 def test_PlotScript():
-    data_low_mut = _load('/home/ashish/Documents/scipro-primer/src-4th/ode2/data/low_mut')
-    data_high_mut = _load('/home/ashish/Documents/scipro-primer/src-4th/ode2/data/high_mut')
-
-    n_generations = data_low_mut.shape[1]
-    x = np.arange(0, n_generations)
-
-    med_low_mut, perc_25_low_mut, perc_75_low_mut = _perc(data_low_mut)
-    med_high_mut, perc_25_high_mut, perc_75_high_mut = _perc(data_high_mut)
-
-    fig = figure()
-    fig.subplots_adjust(left=0.09, right=0.99, top=0.99, wspace=0.1)
-    ax1 = fig.add_subplot(121)
-    ax2 = fig.add_subplot(122)
-    plot_data(ax1, x, np.array([med_low_mut, med_high_mut]).T, True, True)
-    plot_data(ax2, x, np.array([med_low_mut, med_high_mut]).T, False, False)
-
-    # labeling
-    fig.text(0.01, 0.98, "A", weight="bold", horizontalalignment='left', verticalalignment='center')
-    fig.text(0.54, 0.98, "B", weight="bold", horizontalalignment='left', verticalalignment='center')
-
-def _load(dir):
-    f_list = glob.glob(dir + '/*/*/bestfit.dat')
-    num_lines = sum(1 for line in open(f_list[0]))
-    i = 0;
-    data = np.zeros((len(f_list), num_lines))
-    for f in f_list:
-        data[i, :] = np.loadtxt(f)[:,1]
-        i += 1
-    return data
-
-def _perc(data):
-    median = np.zeros(data.shape[1])
-    perc_25 = np.zeros(data.shape[1])
-    perc_75 = np.zeros(data.shape[1])
-    for i in range(0, len(median)):
-        median[i] = np.median(data[:, i])
-        perc_25[i] = np.percentile(data[:, i], 25)
-        perc_75[i] = np.percentile(data[:, i], 75)
-    return median, perc_25, perc_75
+    raise NotImplementedError
 
 if __name__ == '__main__':
     test_PlotScript()

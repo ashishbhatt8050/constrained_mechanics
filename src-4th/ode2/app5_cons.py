@@ -13,18 +13,17 @@ and bases from podDEIM.
 
 import numpy as np
 from numpy import linalg as LA
-from pylab import *
+from pylab import  log, r_, c_, cos, sin, zeros, eye, sqrt, diag, reshape, linspace, roll, figure, argmin, norm, zeros_like
 import ODESolver
 from System import System
-from podDEIM import DEIM, orthogonalize, POD
-from PlotScript import plot_data, tex_table, logplot
+from podDEIM import orthogonalize, POD
+from PlotScript import plot_data, tex_table, logplot, save_figure
 from time import process_time
 import scipy as sp
 import gc
 from datetime import datetime
 from matplotlib import rc
 import matplotlib.pyplot as plt
-import os
 plt.rc('text', usetex=True)  # Enable LaTeX rendering
 rc('text.latex', preamble=r'\usepackage{amsfonts}')  # Load AMSFonts for Fraktur
 from matplotlib.ticker import MaxNLocator
@@ -32,39 +31,30 @@ from matplotlib.ticker import MaxNLocator
 from Newton import fixed_point
 
 #%% Parameters class
-class Params(object):
-    """ Class of parameters """
-    def __init__(self, **kwds):
-        "Oscillator properties"
-        self.system_type = kwds['system_type']
+class Params(System):
+    """ Class of MechSystem parameters """
+    def __init__(self, kwds):
+        "MechSystem properties"
         
-        System.set_system(self, kwds)
+        for key, value in kwds.items():
+            setattr(self, key, value)
+        
+        System.__init__(self)
         
         "Projection matrices"
-        if 'RB' in kwds:
-            self.RB = kwds['RB']
-            self.nosc_r = kwds['nosc_r']
-            # self.i_range_r = kwds['i_range_r']
-        else:
-            self.RB = None
-                
-        System.set_constraints(self, kwds)
-            
-        self.i_range = kwds['i_range']
-            
-        if 'W_r' in kwds:
-            self.W_r = kwds['W_r']
+        if hasattr(self, 'W_r'):
             self.y_init = self.W_r.T @ self.y_init
+            
+            if self.reducer == 'pod':
+                self.JJ_r = self.W_r.T @ self.JJ() @ self.W_r
+            elif self.reducer == 'psd':
+                self.JJ_r = self.JJ(self.nosc_r)
         else:
             self.W_r = None
+            self.RB = None
             
-        if 'U' in kwds:
-            self.U = kwds['U']
-        else:
-            self.U = None
-            
-        if 'P' in kwds:
-            self.P = kwds['P']
+        "hyper-reduction"
+        if hasattr(self, 'P'):
             self.RBxU = self.RB.T @ self.U
             self.UxRB = self.RBxU.T
             self.PxU = self.P.T @ self.U
@@ -85,22 +75,9 @@ class Params(object):
             self.IPt = lambda y: self.P @ sys_solve(self.UxP, self.U.T @y)
         else:
             self.P = None
-            
-        "Reduced MechSystem constituents"
-        self.reducer = kwds['reducer']
-        if self.W_r is not None:
-            if self.reducer == 'pod':
-                self.JJ_r = self.W_r.T @ self.JJ() @ self.W_r
-            elif self.reducer == 'psd':
-                self.JJ_r = self.JJ(self.nosc_r)
+            self.U = None
         
-        "Numerical solver and its properties"
-        self.registered_solver_classes = kwds['registered_solver_classes']
-            
-        self.solver_class = kwds['solver_class']
-        
-        self.dt = kwds['dt']
-         
+        "Numerical solver and its properties"         
         self.T_final = 2
         
         w_values = [0.28, 0.62546642846767004501]
@@ -111,10 +88,8 @@ class Params(object):
         assert np.isclose(sum(w_values), 1), 'sum_i w_i must be 1'
         self.w_values = w_values
         
-        if self.solver_class in [ODESolver.ConformalStormerVerlet, ODESolver.ForwardEuler]:
-            self.solver = self.solver_class(self, self.jacobian)
-        elif self.solver_class in [ODESolver.ConformalImplicitMidpoint, ODESolver.ImplicitMidpoint]:
-            self.solver = self.solver_class(self, self.jacobian)
+        if self.solver_class in [ODESolver.ConformalImplicitMidpoint, ODESolver.ConformalStormerVerlet, ODESolver.ImplicitMidpoint]:
+            self.solver = self.solver_class(self)
         else:
             NameError('Unknown solver class - %s' % self.solver_class.__name__)
         
@@ -129,34 +104,19 @@ class Params(object):
     @u_init.setter
     def u_init(self, value):
         self.y_init = value
- 
-#%% Define the system
-class MechSystem(Params):
-    "Define the Mechanical system as a sub-class of Params"
-    #TODO: have the __call__ return jacobian as well.
-        
-    def __call__(self, y, t):
-        
-        return System.get_func(self, y, t)
-            
-
-    def jacobian(self, y, t, *arg):
-        "Jacobian of the function f"
-        
-        return System.get_jacobian(self, y, t)
-
-    def en_err(self):
-        "Energy error"
-        assert self.beta == 0, 'Energy is only defined for beta = 0'
-        
-        return System.get_en_err(self)
-                
 
 #%% Solve the system and find convergence rates
-class MechSystemSolver(MechSystem):
-    """
-    Class for solving problems of the class MechSystem
-    """
+class MechSystemSolver(Params):
+    "Define the Mechanical system as a sub-class of Params"
+    
+    def __init__(self, kwds):
+        "Initiate and set-up the Mechanical system properties and parameters"
+        
+        Params.__init__(self, kwds)
+        
+    def __call__(self, y, t, *arg, **kwargs):
+        
+        return Params.get_func(self, y, t, **kwargs)
         
     def solve(self):
             
@@ -171,9 +131,9 @@ class MechSystemSolver(MechSystem):
         else:
             self.y = np.zeros((self.n+1, 2*self.nosc_r))
             
-            if self.constraint_type and self.system_type == 'oscillator':
+            if self.constraint_type:
                 X_U = np.array([self.y_init, self.y_init])
-                X_U, _, self.g_arr[0] = fixed_point(self._g, (self.RB @X_U.T).T, self._g_prime, self.tol, self.M, False)
+                X_U, _, self.g_arr[0] = fixed_point(self._g, X_U @ self.RB.T, self._g_prime, self.tol, self.M, False)
                 self.y_init = self.RB.T @X_U[1]
             
         self.y[0] = self.y_init
@@ -189,17 +149,14 @@ class MechSystemSolver(MechSystem):
                 if self.store: self.info.append(np.array(info_[0::1]))
                 
                 # enforce constraints
-                if self.constraint_type and self.system_type == 'oscillator':
+                if self.constraint_type:
                     
                     if self.RB is None:
                         pass
                     else:
-                        y_ = (self.RB @y_.T).T
+                        y_ = y_ @ self.RB.T
                     
                     y_, _, self.g_arr[k+1] = fixed_point(self._g, y_, self._g_prime, self.tol, self.M, False)
-                elif self.constraint_type:
-                    y_[1] = np.exp(-2*self.beta*self.dt) *LA.norm(self.y[k])/LA.norm(y_[1]) *y_[1]
-                    
 
             if self.RB is None or self.constraint_type is None:
                 self.y[k+1] = y_[1]
@@ -212,7 +169,7 @@ class MechSystemSolver(MechSystem):
 
         if self.RB is not None:
             self.y_red = self.y
-            self.y = (self.RB @ self.y.T).T
+            self.y = self.y @ self.RB.T
         
         if self.var == True:
             self.var_solve()
@@ -235,8 +192,10 @@ class MechSystemSolver(MechSystem):
             sym_error_ =self.solver.symplectic_error(self.dpsi, self.t_points[k:k+2])
             self.sym_error[k+1] = sym_error_[-1]
 
-    def plot(self, fig):
+    def plot(self):
         "plot the results"
+        
+        fig = figure()
         
         gs = fig.add_gridspec(2, 2, hspace=1)
         # ax = gs.subplots()
@@ -248,24 +207,18 @@ class MechSystemSolver(MechSystem):
         
         if hasattr(self, 'sym_error'):
             plot_data(ax0, self.t_points, self.sym_error)
-            if max(abs(self.sym_error)) < 1e-15:
-                factor = 1e-15
-            else:
-                factor = 0
-                
-            ax0.set_ylim((-max(self.sym_error)*1e1 -factor, max(self.sym_error)*1e1 +factor))
+            
+            ax0.margins(y=0.5)
+            
             ax0.set_xlim((0, self.T_final))
             ax0.set_ylabel(r'$\Delta Sp$')
             
-            np.save('sym_error', self.sym_error)
-            
         if hasattr(self, 'eng_error'):
             plot_data(ax1, self.t_points, self.eng_error)
-            ax1.set_ylim((-max(self.eng_error)*1e1, max(self.eng_error)*1e1))
+            # ax1.set_ylim((-max(self.eng_error)*1e1, max(self.eng_error)*1e1))
+            ax1.margins(y=0.5)
             ax1.set_xlim((0, self.T_final))
-            
-        elif hasattr(self, 'norm_error'):
-            plot_data(ax1, self.t_points, self.norm_error)
+            ax1.set_ylabel(r'$\Delta H$')
             
         elif hasattr(self, '_g'):
             if hasattr(self, 'y_red') and False:
@@ -277,59 +230,32 @@ class MechSystemSolver(MechSystem):
             # temp = log(temp/np.roll(temp, 1))
             # temp = r_[0, temp[1:]]
             plot_data(ax1, self.t_points, temp)
-            ax1.set_ylim((-max(temp)*1e1, max(temp)*1e1))
+            # ax1.set_ylim((-max(temp)*1e1, max(temp)*1e1))
+            ax1.margins(y=0.5)
             ax1.set_xlim((0, self.T_final))
             # plot_data(ax2, self.t_points, temp[1])
             # ax2.set_ylim((min(temp[1])*1e-1, max(temp[1])*1e1))
+            ax1.set_ylabel(r'$\Delta \mathfrak{P}$')
             
         ax1.set_xlabel('time')
-        ax1.set_ylabel(r'$\Delta \mathfrak{P}$')
-            
-        # plot_data(ax[0,1], self.t_points, )
-        # ax3 = fig.add_subplot(gs[0:2, -1])
-        # ax4 = fig.add_subplot(gs[2:4, -1])
-            
-        if self.system_type == 'oscillator':
-            # if self.RB is not None:
-            #     plot_data(ax3, self.y_red[:,self.i_range_r], self.y_red[:,self.nosc_r+self.i_range_r])
                 
-            plot_data(ax4, self.y[:,self.i_range], self.y[:,self.nosc+self.i_range])
-            ax4.set_xlim((np.amin(self.y[:,self.i_range])-0.2, np.amax(self.y[:,self.i_range])+0.2))
-            ax4.set_ylim((np.amin(self.y[:,self.nosc+self.i_range])-0.1, np.amax(self.y[:,self.nosc+self.i_range])+0.1))
-            ax4.set_aspect(1.0/ax4.get_data_ratio(), adjustable='box')
-            ax4.set_xlabel('q')
-            ax4.set_ylabel('p')
-            ax4.grid(axis='x', color="0.9", linestyle='-', linewidth=1)
-            # ax4.set_ylim((min(temp[0])*1e-1, max(temp[0])*1e1))
-            # ax[3,1].set_xlabel('time')
-        else:
-            # plot_data(ax[0,1], self.t_points, )
-            ax4 = fig.add_subplot(gs[2:4, -1])
-                
-            plot_data(ax4, self.x_points, self.y[[0,-1]].T)
-            
-        if self.RB is not None:
-            string = self.solver_class.__name__ + '_reduced'
-        else:
-            string = self.solver_class.__name__ + '_full'
-            
-        # Get the current working directory
-        cwd = os.getcwd()
-        
-        # Construct the data folder path (adjust as needed)
-        data_folder = os.path.join(cwd, "data")
-        
-        if not os.path.exists(data_folder):
-            os.makedirs(data_folder)
-
-        filename = datetime.now().strftime('%Y-%m-%d_%H-%M-%S_') +'osc_' +string
-        fig_path = os.path.join(data_folder, filename +'.pdf')
-        data_path = os.path.join(data_folder, filename +'.npy')
-        # fig.savefig(fig_path, bbox_inches='tight')
-        # np.save(data_path, [self.sym_error, temp, self.t_points])
+        plot_data(ax4, self.y[:,self.osc_idx], self.y[:,self.nosc+self.osc_idx])
+        ax4.margins(0.5, 0.5)
+        ax4.set_aspect(1.0/ax4.get_data_ratio(), adjustable='box')
+        ax4.set_xlabel('q')
+        ax4.set_ylabel('p')
+        ax4.grid(axis='x', color="0.9", linestyle='-', linewidth=1)
         
         for ax in [ax0, ax1]:
             ax.label_outer()
+            
+        if self.RB is not None:
+            string =  '_reduced'
+        else:
+            string = '_full'
+
+        filename = self.keep_time +'osc_' +self.solver_class.__name__ +string +'.pdf'
+        # save_figure(fig, filename)
         
 
     def measures(self, errors, dt_space):
@@ -360,55 +286,37 @@ class MechSystemSolver(MechSystem):
             tex_table(self.solver_class.__name__, temp.T)
     
         # Plot the measures
-        fig = figure()
-        self.plot(fig)
+        self.plot()
   
 #%% Main driver function
 def mor_demo():
     "Model order reduction of the MechSystem using MechSystemSolver"
     
-    registered_solver_classes, nosc = [ODESolver.ConformalImplicitMidpoint, ODESolver.ConformalStormerVerlet], 500
-    registered_reducers = ['pod', 'psd']
-    num_solver_classes = len(registered_solver_classes)
-        
-    dt_space_dim = 5
-    
-    kwds = {'system_type': 'oscillator', 'reducer': 'psd'}
-    
-    if kwds['system_type'] == 'oscillator':
+    nosc = 100
             
-        Omega2_space_dim = 1
-        # Omega2_space = np.append(1 +np.random.rand(Omega2_space_dim, 3)/10, 1 +np.random.rand(Omega2_space_dim, nosc-3)/10, 1)
-        Omega2_space = 3*(1 -np.random.rand(Omega2_space_dim, nosc))
-        Omega2_space.sort()
+    kwds = {'system_type': 'oscillator', 'reducer': 'psd',\
+            'registered_solver_classes': [ODESolver.ConformalImplicitMidpoint, ODESolver.ConformalStormerVerlet],\
+            'nosc': nosc,\
+            'dt_space_dim': 5,\
+            'Omega2_space_dim': 1}
         
-        i_range = np.random.randint(0, nosc-30, 1)
-        i_range = np.append(i_range, [i_range+10, i_range+20])
-        
-        kwds.update({'nosc': nosc, \
-                    'dt_space': linspace(0.01, 0.05, num=dt_space_dim), \
-                    'Omega2_space': Omega2_space[:Omega2_space_dim], \
-                    'registered_solver_classes': registered_solver_classes, \
-                    'i_range': i_range})
-    else:
-        Omega2_space_dim = 1
-        kwds.update({'dt_space': linspace(0.001, 0.009, num=dt_space_dim), \
-                    'Omega2_space': np.ones((Omega2_space_dim,nosc)), \
-                    'registered_solver_classes': registered_solver_classes, \
-                    'i_range': i_range})
+    Omega2_space = np.sort(3*(1 -np.random.rand(kwds['Omega2_space_dim'], nosc)))
+    
+    kwds.update({'dt_space': linspace(0.01, 0.05, num=kwds['dt_space_dim']), \
+                'Omega2_space': Omega2_space[:kwds['Omega2_space_dim']], \
+                'osc_idx': np.sort(np.random.randint(0, nosc, 5)), \
+                'keep_time': datetime.now().strftime('%Y-%m-%d_%H-%M_')})
         
     MSsolvers = solver(kwds)
     
     if MSsolvers[-1].non_quad: # is not None
-        assert Omega2_space_dim == 1
+        assert kwds['Omega2_space_dim'] == 1
     
-    time_lapsed = [reshape([x.time_lapsed for x in MSsolvers],\
-                           (num_solver_classes, dt_space_dim, Omega2_space_dim))]
+    array_shape = (len(kwds['registered_solver_classes']), kwds['dt_space_dim'], kwds['Omega2_space_dim'])
+    time_lapsed = [reshape([x.time_lapsed for x in MSsolvers], array_shape)]
         
-    # _errors = [reshape([np.amax(x.sym_error) for x in MSsolvers],\
-    #                        (num_solver_classes, dt_space_dim, Omega2_space_dim))]
-        
-    print(datetime.now().strftime('%Y-%m-%d_%H-%M'))
+    # _errors = [reshape([np.amax(x.sym_error) for x in MSsolvers], array_shape)]
+    
     print('Assembling snapshots ...')
     y_list = np.hstack([MSsolver.y[np.unique(np.random.randint(0,MSsolver.n,int(MSsolver.n/10)))].T for MSsolver in MSsolvers])
     print(y_list.shape)
@@ -418,9 +326,6 @@ def mor_demo():
          'sqrt': sp.linalg.sqrtm(MSsolvers[-1].Q_spd()), \
          'eye': np.eye(2*nosc), \
          'eye_half': np.eye(nosc)}
-    
-    fig = figure()
-    ax = fig.add_subplot(111)
         
     if MSsolvers[-1].non_quad:
         np.linalg.cholesky(X['Q'])
@@ -491,60 +396,11 @@ def mor_demo():
                 c_[zeros_like(RB), RB]]
         W_r = RB
         
-    #     if MSsolvers[-1].solver_class in [ODESolver.ConformalStormerVerlet]:
-    #         np.save('sv_sp_csv.npy', sv_sp)        
-        
-    #         try:
-    #             # Attempt to load the array
-    #             sv_sp_cimp = np.load('sv_sp_cimp.npy')
-    #         except FileNotFoundError:
-    #             # Handle the case where the file doesn't exist
-    #             print("Error: The file 'sv_sp_cimp.npy' was not found.")
-    #             sv_sp_cimp = np.zeros_like(sv_sp)
-    #         except IOError:
-    #             # Handle other potential I/O errors
-    #             print("Error: An I/O error occurred while loading the file.")
-        
-    #         s = [sv_sp_cimp, sv_sp]
-            
-    #     else:
-    #         np.save('sv_sp_cimp.npy', sv_sp)        
-        
-    #         try:
-    #             # Attempt to load the array
-    #             sv_sp_csv = np.load('sv_sp_csv.npy')
-    #         except FileNotFoundError:
-    #             # Handle the case where the file doesn't exist
-    #             print("Error: The file 'sv_sp_imp.npy' was not found.")
-    #             sv_sp_imp = np.zeros_like(sv_sp)
-    #         except IOError:
-    #             # Handle other potential I/O errors
-    #             print("Error: An I/O error occurred while loading the file.")
-        
-    #         s = [sv_sp, sv_sp_csv]
-                
-    # for y in s:
-        
-    logplot(ax, sv_sp)
-        
-    # ax.legend((r'$\mathbb{S}$ (PCIMP)',r'$\mathbb{S}$ (PCSV)'), loc='upper right')
-    ax.set_xlabel('index of singular values')
-    ax.set_ylim((np.amin(sv_sp)*1e-3, np.amax(sv_sp)*1e3))
-    ax.set_xlim((0, len(sv_sp)))
+    fig, ax = logplot(sv_sp, xlabel='index of singular values',\
+            xlims=(0, len(sv_sp)))
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-            
-    # Get the current working directory
-    cwd = os.getcwd()
-    
-    # # Construct the data folder path (adjust as needed)
-    data_folder = os.path.join(cwd, "data")
-    
-    if not os.path.exists(data_folder):
-        os.makedirs(data_folder)
-
-    filename = datetime.now().strftime('%Y-%m-%d_%H-%M_') +'osc_sv' + '.pdf'
-    fig_path = os.path.join(data_folder, filename)
-    # fig.savefig(fig_path, bbox_inches='tight')
+    filename = kwds['keep_time'] +'osc_sv' + '.pdf'
+    # save_figure(fig, filename)
     
     # assert that W_r and RB are orthogonal
     M = W_r.T @ RB
@@ -557,14 +413,13 @@ def mor_demo():
                 'W_r': W_r,\
                 'nosc_r': nosc_r,\
                 'Omega2_space': Omega2_space, \
-                # 'i_range_r': np.random.randint(0, nosc_r, 3),\
                     })
         
     print('solving reduced system ...')
     MSsolvers_r = solver(kwds)
           
     print('solution errors')
-    print(reshape([np.amax(abs(MSsolvers[i].y -MSsolvers_r[i].y)) for i in range(len(MSsolvers))], (num_solver_classes, dt_space_dim, Omega2_space_dim)))
+    print(reshape([np.amax(abs(MSsolvers[i].y -MSsolvers_r[i].y)) for i in range(len(MSsolvers))], array_shape))
     
     time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
                                 time_lapsed[0].shape)/time_lapsed[0]*100)    
@@ -573,14 +428,12 @@ def mor_demo():
     print('time lapsed')    
     print(time_lapsed)
         
-    _errors = [reshape([np.amax(x.sym_error) for x in MSsolvers_r],\
-                           (num_solver_classes, dt_space_dim, Omega2_space_dim))]
+    # _errors = [reshape([np.amax(x.sym_error) for x in MSsolvers_r], array_shape)]
         
-    _errors.append(reshape([np.amax(LA.norm(x.g_arr, axis=1)) for x in MSsolvers_r],\
-                            (num_solver_classes, dt_space_dim, Omega2_space_dim)))
+    # _errors.append(reshape([np.amax(LA.norm(x.g_arr, axis=1)) for x in MSsolvers_r], array_shape))
         
-    print('constraint-errors')
-    print(_errors)
+    # print('constraint-errors')
+    # print(_errors)
 
     # Hyper-reduced model
     '''
@@ -622,17 +475,10 @@ def mor_demo():
         # Hyper-reduced model is efficient and accurate only for the non-conservative case.
         # Structure-preserving hyper-reduced model: the solution either doesn't converge or is highly inaccurate
         # and inefficient when it converges but the symplectic error is zero.
-        # The inaccuracy in the solution of the hyper-reduced model might have to
-        # do with the DEIM Hamiltonian not being close to the original Hamiltonian
         # Symplectic error is the same for methods of different orders.
         
     # Next steps:
         # Implement structure-preserving hyper-reduction
-        
-    # TODOs:
-        # Pass Omega as a parameter
-        # find derivatives symbolically 
-        # Simulate with a simpler Hamiltonian
     
     
 def solver(kwds):
@@ -646,8 +492,7 @@ def solver(kwds):
                     'dt': dt, \
                     'Omega2': Omega2})
         
-        MSsolver = MechSystemSolver(**kwds)
-        nosc = MSsolver.nosc
+        MSsolver = MechSystemSolver(kwds)
                 
         start = process_time()
         MSsolver.solve()
@@ -658,28 +503,17 @@ def solver(kwds):
              # compute errors only for fixed Omega2
             if (not MSsolver.beta) and (MSsolver.constraint_type is None):
                 "Energy (Hamiltonian) is an invariant for unconstrained conservative system"
-                MSsolver.eng_error =MSsolver.en_err()
+                MSsolver.eng_error =MSsolver.get_en_err()
                 errors['energy'].append(sqrt(dt)*LA.norm(MSsolver.eng_error))
             
             if MSsolver.var:
                 errors['spl'].append(sqrt(dt)*LA.norm(MSsolver.sym_error))
-                
-            if kwds['system_type'] == 'KdV':
-                norm_y = LA.norm(MSsolver.y, axis=1)
-                norm_error = log(norm_y/(np.exp(-2*MSsolver.beta*MSsolver.dt)*np.roll(norm_y, 1)))
-                MSsolver.norm_error = r_[0, norm_error[1:]]
             
-        if 'RB' not in kwds and MSsolver.system_type == 'oscillator' and False:
+        if 'RB' not in kwds and False:
             MSsolver.F2 = np.array([MSsolver.ham_z(*np.split(y,2)) for y in MSsolver.info]).T
                 
             if MSsolver.non_quad:
                 MSsolver.F3 = np.array([MSsolver.non_quad_z(*np.split(y,2)) for y in MSsolver.info]).T
-            
-        elif 'RB' not in kwds and MSsolver.system_type == 'KdV':
-            MSsolver.F2 = np.array([MSsolver.ham_z(y) for y in MSsolver.info]).T
-                
-            if MSsolver.non_quad:
-                MSsolver.F3 = np.array([MSsolver.non_quad_z(y) for y in MSsolver.info]).T
             
         MSsolvers.append(MSsolver)
         

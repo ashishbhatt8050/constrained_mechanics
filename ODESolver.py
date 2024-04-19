@@ -27,6 +27,9 @@ class ODESolver(object):
         
         self.dfdu = lambda u, t, *arg: MechSys(u, t, arg, func=False, jac=True)
         
+        self.beta = MechSys.beta
+        self.Ecoeff = lambda dt: np.exp(self.beta*dt/2)
+        
         if hasattr(MechSys, 'JJ_r'):
             self.JJ_r = MechSys.JJ_r
         if hasattr(MechSys, 'JJ'):
@@ -82,6 +85,7 @@ class ODESolver(object):
         # Time loop
         for k in range(n-1):
             self.k = k
+            self.dt = self.t[k+1] -self.t[k]
             self.u[k+1], info_ = self.advance()
             if terminate(self.u, self.t, self.k+1):
                 break  # terminate loop over k
@@ -116,6 +120,7 @@ class ODESolver(object):
         # Time loop
         for k in range(n-1):
             self.k = k
+            self.dt = self.t[k+1] -self.t[k]
             self.du[k+1] = self.var_advance()
             if terminate(self.u, self.t, self.k+1):
                 break  # terminate loop over k
@@ -153,70 +158,6 @@ class ForwardEuler(ODESolver):
         u_new = u[k] + dt*f(u[k], t[k])
         return u_new
 
-class RungeKutta4(ODESolver):
-    def advance(self):
-        u, f, k, t = self.u, self.f, self.k, self.t
-        dt = t[k+1] - t[k]
-        dt2 = dt/2.0
-        K1 = dt*f(u[k], t[k])
-        K2 = dt*f(u[k] + 0.5*K1, t[k] + dt2)
-        K3 = dt*f(u[k] + 0.5*K2, t[k] + dt2)
-        K4 = dt*f(u[k] + K3, t[k] + dt)
-        u_new = u[k] + (1/6.0)*(K1 + 2*K2 + 2*K3 + K4)
-        return u_new
-
-class ConformalStormerVerlet(ODESolver):
-    def __init__(self, MechSys):
-        ODESolver.__init__(self, MechSys)
-
-        self.Ecoeff = lambda dt: np.exp(MechSys.beta*dt/2)
-        self.Gamma_p, self.Gamma_m = lambda dt: 1 + MechSys.beta*dt/2, lambda dt: 1 - MechSys.beta*dt/2
-        
-        self.H_zz = MechSys.ham_zz
-        self.H_z = MechSys.ham_z
-
-    def advance(self):
-        u, f, k, t, Ecoeff, neq = self.u, self.f, self.k, self.t, self.Ecoeff, \
-                                    self.neq
-        
-        dt = t[k+1] - t[k]
-        Gamma_p, Gamma_m = self.Gamma_p(dt), self.Gamma_m(dt)
-        
-        u_new = np.zeros(neq)
-        u_new[neq//2:] = (Ecoeff(-dt)*u[k,neq//2:] +dt/2*f(u[k], t[k])[neq//2:])/Gamma_p
-        u_new[:neq//2] = (Gamma_p*Ecoeff(-dt)*u[k,:neq//2] +dt*f(np.reshape([u[k,:neq//2], u_new[neq//2:]],neq), t[k])[:neq//2]) \
-            * Ecoeff(-dt)/Gamma_m
-        u_new[neq//2:] = Ecoeff(-dt)*(Gamma_m*u_new[neq//2:] +dt/2*f(np.reshape([u_new[:neq//2], u_new[neq//2:]],neq), t[k])[neq//2:])
-        
-        return u_new, u_new
-
-    def var_advance(self):
-        u, f, dfdu, k, t, Ecoeff, neq = self.u, self.f, self.dfdu, self.k, \
-                                            self.t, self.Ecoeff, self.neq
-        dt = t[k+1] - t[k]
-        Gamma_p, Gamma_m = self.Gamma_p(dt), self.Gamma_m(dt)
-                
-        # u_new = (Ecoeff(-dt)*u[k,neq//2:] +dt/2*f(Ecoeff(-dt)*u[k], t[k])[neq//2:])/Gamma_p
-        
-        u_new = (Ecoeff(-dt)*u[k,neq//2:] +dt/2*f(u[k], t[k])[neq//2:])/Gamma_p
-        
-        # H_qq_m = self.H_zz(u[k,:neq//2], u_new)[:neq//2, :neq//2]
-        # H_qq_p = self.H_zz(u[k+1,:neq//2], u_new)[:neq//2, :neq//2]
-        # H_pp = self.H_zz(u[k,:neq//2], u_new)[neq//2:, neq//2:]
-        
-        H_qq_m = -dfdu(np.reshape([u[k,:neq//2], u_new],neq), t[k])[neq//2:,:neq//2]
-        H_qq_p = -dfdu(np.reshape([u[k+1,:neq//2], u_new],neq), t[k])[neq//2:,:neq//2]
-        H_pp = dfdu(np.reshape([u[k,:neq//2], u_new],neq), t[k])[:neq//2, neq//2:]
-        
-        du_11 = (Gamma_p*np.eye(neq//2) -dt**2*H_pp @ H_qq_m/2/Gamma_p)/Gamma_m
-        du_12 = dt*H_pp/Gamma_p/Gamma_m
-        du_21 = -Gamma_m/Gamma_p * dt/2 * H_qq_m - dt/2 * H_qq_p @ du_11
-        du_22 = Gamma_m/Gamma_p*np.eye(neq//2) - dt/2 * H_qq_p @ du_12
-        
-        du = r_[c_[du_11, du_12], c_[du_21, du_22]]*Ecoeff(-2*dt)
-        
-        return du
-
 class BackwardEuler(ODESolver):
     """Backward Euler solver for scalar or vector ODEs."""
     def __init__(self, MechSys):
@@ -247,7 +188,7 @@ Could not import module "Newton". Place Newton.py in this directory
 
     def advance(self):
         u, f, k, t = self.u, self.f, self.k, self.t
-        dt = t[k+1] - t[k]
+        dt = self.dt
 
         def F(w):
             return w - dt*f(w, t[k+1]) - u[k]
@@ -269,12 +210,65 @@ Could not import module "Newton". Place Newton.py in this directory
                   "(%d iterations)" % (t[k+1], n))
         return u_new
 
+class RungeKutta4(ODESolver):
+    def advance(self):
+        u, f, k, t = self.u, self.f, self.k, self.t
+        dt = t[k+1] - t[k]
+        dt2 = dt/2.0
+        K1 = dt*f(u[k], t[k])
+        K2 = dt*f(u[k] + 0.5*K1, t[k] + dt2)
+        K3 = dt*f(u[k] + 0.5*K2, t[k] + dt2)
+        K4 = dt*f(u[k] + K3, t[k] + dt)
+        u_new = u[k] + (1/6.0)*(K1 + 2*K2 + 2*K3 + K4)
+        return u_new
+
+class ConformalStormerVerlet(ODESolver):
+    def __init__(self, MechSys):
+        ODESolver.__init__(self, MechSys)
+        
+        self.Gamma_p, self.Gamma_m = lambda dt: 1 + self.beta*dt/2, lambda dt: 1 - self.beta*dt/2
+
+    def advance(self):
+        u, f, k, t, Ecoeff, neq = self.u, self.f, self.k, self.t, self.Ecoeff, \
+                                    self.neq
+        
+        dt = self.dt
+        Gamma_p, Gamma_m = self.Gamma_p(dt), self.Gamma_m(dt)
+        
+        u_new = np.zeros(neq)
+        u_new[neq//2:] = (Ecoeff(-dt)*u[k,neq//2:] +dt/2*f(u[k], t[k])[neq//2:])/Gamma_p
+        u_new[:neq//2] = (Gamma_p*Ecoeff(-dt)*u[k,:neq//2] +dt*f(np.reshape([u[k,:neq//2], u_new[neq//2:]],neq), t[k])[:neq//2]) \
+            * Ecoeff(-dt)/Gamma_m
+        u_new[neq//2:] = Ecoeff(-dt)*(Gamma_m*u_new[neq//2:] +dt/2*f(np.reshape([u_new[:neq//2], u_new[neq//2:]],neq), t[k])[neq//2:])
+        
+        return u_new, u_new
+
+    def var_advance(self):
+        u, f, dfdu, k, t, Ecoeff, neq = self.u, self.f, self.dfdu, self.k, \
+                                            self.t, self.Ecoeff, self.neq
+        dt = self.dt
+        Gamma_p, Gamma_m = self.Gamma_p(dt), self.Gamma_m(dt)
+                
+        # u_new = (Ecoeff(-dt)*u[k,neq//2:] +dt/2*f(Ecoeff(-dt)*u[k], t[k])[neq//2:])/Gamma_p
+        
+        u_new = (Ecoeff(-dt)*u[k,neq//2:] +dt/2*f(u[k], t[k])[neq//2:])/Gamma_p
+        
+        H_qq_m = -dfdu(np.reshape([u[k,:neq//2], u_new],neq), t[k])[neq//2:,:neq//2]
+        H_qq_p = -dfdu(np.reshape([u[k+1,:neq//2], u_new],neq), t[k])[neq//2:,:neq//2]
+        H_pp = dfdu(np.reshape([u[k,:neq//2], u_new],neq), t[k])[:neq//2, neq//2:]
+        
+        du_11 = (Gamma_p*np.eye(neq//2) -dt**2*H_pp @ H_qq_m/2/Gamma_p)/Gamma_m
+        du_12 = dt*H_pp/Gamma_p/Gamma_m
+        du_21 = -Gamma_m/Gamma_p * dt/2 * H_qq_m - dt/2 * H_qq_p @ du_11
+        du_22 = Gamma_m/Gamma_p*np.eye(neq//2) - dt/2 * H_qq_p @ du_12
+        
+        du = r_[c_[du_11, du_12], c_[du_21, du_22]]*Ecoeff(-2*dt)
+        
+        return du
+    
 class ImplicitMidpoint(ODESolver):
     def __init__(self, MechSys):
         ODESolver.__init__(self, MechSys)
-
-        # Define Ecoeff for computing symplectic error
-        self.Ecoeff = lambda dt: np.exp(MechSys.beta*dt/4)
 
         # BackwardEuler needs to import function Newton from Newton.py:
         try:
@@ -306,7 +300,7 @@ Could not import module "Newton". Place Newton.py in this directory
 
     def advance(self, w_start=None):
         u, f, k, t = self.u, self.f, self.k, self.t
-        dt = t[k+1] - t[k]
+        dt = self.dt
 
         def F(w):
             return w - dt*f((w +u[k])/2, (t[k+1] +t[k])/2) - u[k]
@@ -330,7 +324,7 @@ Could not import module "Newton". Place Newton.py in this directory
 
     def var_advance(self):
         u, k, t, I_mat = self.u, self.k, self.t, self.I_mat
-        dt = t[k+1] - t[k]
+        dt = self.dt
 
         temp = dt/2.0*self.dfdu((u[k+1] +u[k])/2.0, (t[k+1] +t[k])/2.0)
         du_new = LA.solve((I_mat -temp), (I_mat +temp))
@@ -340,12 +334,10 @@ class ConformalImplicitMidpoint(ImplicitMidpoint):
     def __init__(self, MechSys):
         ImplicitMidpoint.__init__(self, MechSys)
 
-        self.beta = MechSys.beta
-
     def advance(self):
         
         k = self.k
-        dt = self.t[k+1] -self.t[k]
+        dt = self.dt
         self.u[k] = self.Ecoeff(-dt)*self.u[k]
         w_start = self.u[k] + dt*(self.f(self.u[k], self.t[k]) -self.beta/2*self.u[k])  # Forward Euler step
         
@@ -361,7 +353,7 @@ class ConformalImplicitMidpoint(ImplicitMidpoint):
     def var_advance(self):
         u, k, t, Ecoeff, I_mat = self.u, self.k, self.t, \
                                         self.Ecoeff, self.I_mat
-        dt = t[k+1] - t[k]
+        dt = self.dt
 
         temp = dt/2.0*self.dfdu((Ecoeff(dt)*u[k+1] +Ecoeff(-dt)*u[k])/2.0, (Ecoeff(dt)*t[k+1] +Ecoeff(-dt)*t[k])/2.0)
         du_new = LA.solve(Ecoeff(dt)*(I_mat -temp), Ecoeff(-dt)*(I_mat +temp))

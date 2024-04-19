@@ -10,111 +10,39 @@ import numpy as np
 from pylab import log, r_, c_, cos, sin, zeros, eye, sqrt, diag, sum
 import ODESolver
 
-# TODO: 1. decorate IMP
-#       4. symbolic calculations
-
 class System(object):
     
     def __init__(self):
-        
-        nosc = self.nosc
-        Omega2 = self.Omega2
-        self.Omega2_00 = lambda Omega2=Omega2: r_[Omega2, np.ones_like(Omega2)]
-        
-        alpha = list(np.linspace(0.1,0.5,num=nosc))
-        alpha /= sqrt(sum(np.array(alpha)**2))
-        assert np.isclose(np.array(alpha).dot(alpha), 1), "alpha**2 must be equal to 1"
-        self.alpha = alpha
-        self.beta = (max(1e-2, 0*np.random.rand()/10))*0
 
         "MechSystem constituents"
-        kin = lambda u: sum((u**2), axis=1)/2.0
-        pot = lambda x, Omega2=Omega2: 1-sum(cos(Omega2*x), axis=1)
-        # pot = lambda x, Omega2=Omega2: 1 -sum(1-(Omega2*x)**2/2+(Omega2*x)**4/24, axis=1)
+        nosc = self.nosc
+        Omega2 = self.Omega2        
         
-        "Find symbolic quantities"
-        # def get_equations(d=nosc):
-        #     x_ = sympy.Matrix([sympy.symbols('x%d' % i) for i in range(d)])
-        #     u_ = sympy.Matrix([sympy.symbols('u%d' % i) for i in range(d)])
-        #     Omega2_ = sympy.Matrix([sympy.symbols('Omega2%d' % i) for i in range(d)])
-            
-        #     kin_ = u_.dot(u_)/2
-        #     pot_ = 1 -sum(sympy.Matrix([sympy.cos(\
-        #                             sympy.matrices.dense.matrix_multiply_elementwise(Omega2_, x_)[i])\
-        #                             for i in range(d)]))
-        #     ham_ = kin_ +pot_
-        #     f_ham = sympy.lambdify((x_,u_,Omega2_), ham_, 'numpy')
-            
-        #     ham_z_ = sympy.Matrix([ham_]).jacobian([x_,u_]).T
-        #     f_ham_z = sympy.lambdify((x_,u_,Omega2_), ham_z_, 'numpy')
-            
-        #     ham_zz_ = ham_z_.jacobian([x_,u_])
-        #     f_ham_zz = sympy.lambdify((x_,u_,Omega2_), ham_zz_, 'numpy')
-            
-        #     return f_ham, f_ham_z, f_ham_zz
-        
-        # f_ham, f_ham_z, f_ham_zz = get_equations()
-            
-        # self.ham = lambda x, u, Omega2=Omega2: f_ham(x, u, Omega2)
-        # self.ham_z = lambda x, u, Omega2=Omega2: f_ham_z(x, u, Omega2)
-        # self.ham_zz = lambda x, u, Omega2=Omega2: f_ham_zz(x, u, Omega2)
-        
-        self.ham = lambda x, u, Omega2=Omega2: pot(x, Omega2) +kin(u) +self.beta/2 * sum(x*u, axis=1)
-                                                
-        self.ham_z = lambda x, u, Omega2=Omega2, beta=self.beta: self.Omega2_00(Omega2) * r_[sin(Omega2*x), u] \
-                                                +beta/2 * r_[u, x]
-        self.ham_zz = lambda x, u, Omega2=Omega2, beta=self.beta: diag(self.Omega2_00(Omega2) * r_[cos(Omega2*x), np.ones_like(x)] *self.Omega2_00(Omega2)) \
-                                            + beta/2 * r_[c_[zeros(x.shape*2), eye(x.shape[0])],\
-                                                                c_[eye(x.shape[0]), zeros(x.shape*2)]]
-        self.drag = lambda x, u: self.beta/2 * r_[x, u]
-        self.drag_z = lambda x, u: self.beta/2 * eye(2*x.shape[0])
-                                                
-        self.JJ = lambda d=nosc: r_[c_[zeros((d,d)), eye(d)],\
-                                      c_[-eye(d), zeros((d,d))]]
-            
-                                                
-        self.Q_spd = lambda Omega2=Omega2: self.ham_zz(0*Omega2,0*Omega2, Omega2)            
-        self.non_quad = lambda x, u, Omega2=Omega2: self.ham(x,u, Omega2) -1/2 *c_[x, u] @ self.Q_spd() @ c_[x, u].T
-        self.non_quad_z = lambda x, u, Omega2=Omega2: self.ham_z(x,u,Omega2) - self.Q_spd(Omega2) @ r_[x, u]
-        self.non_quad_zz = lambda x, u, Omega2=Omega2: self.ham_zz(x,u,Omega2) - self.Q_spd(Omega2)
-        self.non_quad = None
-    
-        "Initial conditions"
-        y_init = r_[np.linspace(1,5,nosc), np.zeros(nosc)]
-        
-        self.constraint_type = None
-        if self.constraint_type == 'linear':
-            y_init[nosc-1] = -(y_init[:nosc-1].dot(alpha[:nosc-1]))/alpha[nosc-1] # project on the manifold
-            assert np.isclose(y_init[:nosc].dot(alpha[:nosc]), 0), "alpha:y should be 0" 
-        elif self.constraint_type == 'spherical':
-            y_init /= sqrt((y_init[:nosc]**2).dot(alpha[:nosc])) # project on the manifold
-            assert np.isclose((y_init[:nosc]**2).dot(alpha[:nosc]), 1), "alpha:y^2 should be 1" 
-        elif self.constraint_type == None:
-            pass
-        else:
-            raise NameError
-        self.y_init = y_init
-    
-        "Constraints"
-        if self.constraint_type == 'linear':
-            self._g = lambda y, alpha=alpha: r_[y[:, :nosc].dot(alpha), y[:, nosc:].dot(alpha)]
-            self._g_prime = lambda y, alpha=alpha: r_[c_[np.array(alpha, ndmin=2), zeros((1,nosc))],\
-                                        c_[zeros((1,nosc)), np.array(alpha, ndmin=2)]]
-            raise NotImplementedError
-        elif self.constraint_type == 'spherical':
-            Alpha = np.diag(alpha)
-            self.A_mat = r_[c_[Alpha, np.zeros_like(Alpha)],\
-                       c_[np.zeros_like(Alpha), np.zeros_like(Alpha)]]
-            self.B_mat = r_[c_[np.zeros_like(Alpha), Alpha],\
-                       c_[Alpha, np.zeros_like(Alpha)]]
-                
-            self._g = lambda y, alpha=[self.A_mat, self.B_mat]: r_[y @ alpha[0] @ y.T -1.0,\
-                                                y @ alpha[1] @ y.T]
-            self._g_prime = lambda y, alpha=[self.A_mat, self.B_mat]: c_[2*y @alpha[0],\
-                                                      2*y @alpha[1]].T
+        self.ham = lambda x, u, Omega2=self.Omega2, beta=self.beta: self.ham_(x, u, Omega2, beta)
+        self.ham_z = lambda x, u, Omega2=self.Omega2, beta=self.beta: self.ham_z_(x, u, Omega2, beta).squeeze()
+        self.ham_zz = lambda x, u, Omega2=self.Omega2, beta=self.beta: self.ham_zz_(x, u, Omega2, beta).squeeze()
 
-        "Fixed-point nonliner equations solver properties"
-        self.tol, self.M, self.var, self.store = 1.0E-12, 100, True, False
+        "MechSystem constituents"
+        # self.Omega2_00 = lambda Omega2=Omega2: r_[Omega2, np.ones_like(Omega2)]        
+        # kin = lambda u: sum((u**2), axis=1)/2.0
+        # pot = lambda x, Omega2=Omega2: 1-sum(cos(Omega2*x), axis=1)
+        # pot = lambda x, Omega2=Omega2: 1 -sum(1-(Omega2*x)**2/2+(Omega2*x)**4/24, axis=1)
+        # print(ham_zz(u_arr, v_arr, Om2_arr, 0.1))
+        
+        # self.ham = lambda x, u, Omega2=Omega2, beta=self.beta: pot(x, Omega2) +kin(u) +beta/2 * sum(x*u, axis=1)
+                                                
+        # self.ham_z = lambda x, u, Omega2=Omega2, beta=self.beta: self.Omega2_00(Omega2) * r_[sin(Omega2*x), u] \
+        #                                         +beta/2 * r_[u, x]
+        # self.ham_zz = lambda x, u, Omega2=Omega2, beta=self.beta: diag(self.Omega2_00(Omega2) * r_[cos(Omega2*x), np.ones_like(x)] *self.Omega2_00(Omega2)) \
+        #                                     + beta/2 * r_[c_[zeros(x.shape*2), eye(x.shape[0])],\
+        #                                                         c_[eye(x.shape[0]), zeros(x.shape*2)]]
+            
+                                                
+        self.Q_spd = lambda Omega2=self.Omega2: self.ham_zz(0*Omega2,0*Omega2, Omega2)            
+        self.non_quad = lambda x, u, Omega2=self.Omega2: self.ham(x,u, Omega2) -1/2 *c_[x, u] @ self.Q_spd() @ c_[x, u].T
+        self.non_quad_z = lambda x, u, Omega2=self.Omega2: self.ham_z(x,u,Omega2) - self.Q_spd(Omega2) @ r_[x, u]
+        self.non_quad_zz = lambda x, u, Omega2=self.Omega2: self.ham_zz(x,u,Omega2) - self.Q_spd(Omega2)
+        self.non_quad = None
             
     def get_func(self, y, t, *args, **kwargs):
         
@@ -262,7 +190,7 @@ class System(object):
         if self.P is not None:
             x, u = np.split((self.IPt(self.y.T)).T, 2, axis=1)
         else:
-            x, u = np.split(self.y, 2, axis=1)
+            x, u = np.split(self.y.T, 2, axis=0)
             
         if self.non_quad and self.P is not None:
             return log(\
@@ -270,7 +198,7 @@ class System(object):
                         /(self.non_quad(x[0:1, :], u[None, 0, :]) +1/2 *self.y @ self.Q_spd() @self.y.T)\
                         )
         else:
-            return log(self.ham(x, u)/self.ham(x[0:1, :], u[None, 0, :]))
+            return log(self.ham(x, u)/self.ham(x[:, 0], u[:, 0]))
 
             
 if __name__ == '__main__':

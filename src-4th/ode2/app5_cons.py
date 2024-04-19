@@ -12,6 +12,7 @@ and bases from podDEIM.
 """
 
 import numpy as np
+import sympy as smp
 from numpy import linalg as LA
 from pylab import  log, r_, c_, cos, sin, zeros, eye, sqrt, diag, reshape, linspace, roll, figure, argmin, norm, zeros_like
 import ODESolver
@@ -77,9 +78,7 @@ class Params(System):
             self.P = None
             self.U = None
         
-        "Numerical solver and its properties"         
-        self.T_final = 2
-        
+        "Numerical solver and its properties"
         w_values = [0.28, 0.62546642846767004501]
         w_values.append(1.0 -2.0*(sum(w_values)))
         w_values.append(w_values[1])
@@ -119,10 +118,6 @@ class MechSystemSolver(Params):
         return Params.get_func(self, y, t, **kwargs)
         
     def solve(self):
-            
-        self.n = int(round(self.T_final/self.dt))
-
-        self.t_points = linspace(0, self.T_final, self.n+1)
         
         self.g_arr = np.zeros((self.n+1, 2))
         
@@ -287,6 +282,54 @@ class MechSystemSolver(Params):
     
         # Plot the measures
         self.plot()
+        
+    @staticmethod  
+    def solver(kwds):
+    
+        MSsolvers = []
+        errors = {'energy': [], 'spl': []}
+    
+        for solver_class, dt, Omega2 in [(x,y,z) for x in kwds['registered_solver_classes'] for y in kwds['dt_space'] for z in kwds['Omega2_space']]:
+            
+            kwds.update({'solver_class': solver_class, \
+                        'dt': dt, \
+                        'Omega2': Omega2, \
+                        'n': int(round(kwds['T_final']/dt))})
+            
+            kwds.update({'t_points': linspace(0, kwds['T_final'], kwds['n']+1)})
+            
+            MSsolver = MechSystemSolver(kwds)
+                    
+            start = process_time()
+            MSsolver.solve()
+            end = process_time()
+            MSsolver.time_lapsed.append(end-start)
+            
+            if kwds['dt_space'].size > 1 and np.allclose(MSsolver.Omega2, kwds['Omega2_space'][-1]):
+                 # compute errors only for fixed Omega2
+                if (not MSsolver.beta) and (MSsolver.constraint_type is None):
+                    "Energy (Hamiltonian) is an invariant for unconstrained conservative system"
+                    MSsolver.eng_error =MSsolver.get_en_err()
+                    errors['energy'].append(sqrt(dt)*LA.norm(MSsolver.eng_error))
+                
+                if MSsolver.var:
+                    errors['spl'].append(sqrt(dt)*LA.norm(MSsolver.sym_error))
+                
+            if 'RB' not in kwds and False:
+                MSsolver.F2 = np.array([MSsolver.ham_z(*np.split(y,2)) for y in MSsolver.info]).T
+                    
+                if MSsolver.non_quad:
+                    MSsolver.F3 = np.array([MSsolver.non_quad_z(*np.split(y,2)) for y in MSsolver.info]).T
+                
+            MSsolvers.append(MSsolver)
+            
+        errors_ = {'energy': [], 'spl': errors['spl']}
+        for i in np.arange(0,  len(kwds['registered_solver_classes'] * len(kwds['dt_space']) * len(kwds['Omega2_space'])), len(kwds['dt_space']) * len(kwds['Omega2_space'])):
+            errors_['energy'] = errors['energy'][i:i+5]
+            MSsolvers[i].measures(errors_, kwds['dt_space'])
+            
+        return MSsolvers
+        
   
 #%% Main driver function
 def mor_demo():
@@ -297,17 +340,112 @@ def mor_demo():
     kwds = {'system_type': 'oscillator', 'reducer': 'psd',\
             'registered_solver_classes': [ODESolver.ConformalImplicitMidpoint, ODESolver.ConformalStormerVerlet],\
             'nosc': nosc,\
-            'dt_space_dim': 5,\
-            'Omega2_space_dim': 1}
+            'dt_space_dim': 3,\
+            'Omega2_space_dim': 3,\
+            'beta': (max(1e-2, 0*np.random.rand()/10))*1,\
+            'JJ': lambda d=nosc: r_[c_[zeros((d,d)), eye(d)],\
+                                      c_[-eye(d), zeros((d,d))]] \
+                }
         
     Omega2_space = np.sort(3*(1 -np.random.rand(kwds['Omega2_space_dim'], nosc)))
     
     kwds.update({'dt_space': linspace(0.01, 0.05, num=kwds['dt_space_dim']), \
+                 'T_final': 2, \
                 'Omega2_space': Omega2_space[:kwds['Omega2_space_dim']], \
-                'osc_idx': np.sort(np.random.randint(0, nosc, 5)), \
+                'osc_idx': np.array([0,1,2, nosc//2-1, nosc//2, nosc//2+1, nosc-3, nosc-2, nosc-1]), \
                 'keep_time': datetime.now().strftime('%Y-%m-%d_%H-%M_')})
         
-    MSsolvers = solver(kwds)
+    "Find symbolic quantities"
+    x = smp.Matrix(smp.symbols('x0:{}'.format(nosc)))
+    u = smp.Matrix(smp.symbols('u0:{}'.format(nosc)))
+    Omega2 = smp.Matrix(smp.symbols('Om0:{}'.format(nosc)))
+    beta = smp.symbols('beta')
+    
+    kin_expr = sum((u[i]**2)/2.0 for i in range(nosc))
+    # kin = smp.lambdify((u,), kin_expr, modules='numpy')
+    
+    pot_expr = 1 -sum(smp.cos(Omega2[i]*x[i]) for i in range(nosc))
+    # pot = smp.lambdify((x, Omega2), pot_expr)
+    
+    ham_expr = kin_expr + pot_expr +beta/2 * sum(x[i]*u[i] for i in range(nosc))
+    ham_lam = smp.lambdify((x, u, Omega2, beta), ham_expr, "sympy")
+    # print(ham_lam(x, u, Omega2, beta))
+    
+    ham_ = smp.lambdify((x, u, Omega2, beta), ham_expr)
+    # self.ham = lambda x, u, Omega2=self.Omega2, beta=self.beta: ham_(x, u, Omega2, beta)
+    # u_arr, v_arr, Om2_arr = np.random.rand(3,nosc)
+    # print(ham(u_arr, v_arr, Om2_arr, 0.1))
+    
+    ham_z_expr = smp.Matrix([ham_lam(x, u, Omega2, beta)]).jacobian(list(x)+list(u)).T
+    ham_z_lam = smp.lambdify((x, u, Omega2, beta), ham_z_expr, "sympy")
+    # print(ham_z_lam(x, u, Omega2, beta))
+    
+    ham_z_ = smp.lambdify((x, u, Omega2, beta), ham_z_expr)
+    # self.ham_z = lambda x, u, Omega2=self.Omega2, beta=self.beta: ham_z_(x, u, Omega2, beta).squeeze()
+    # print(ham_z(u_arr, v_arr, Om2_arr, 0.1))
+    
+    ham_zz_expr = ham_z_lam(x, u, Omega2, beta).jacobian(list(x)+list(u))
+    # ham_zz_lam = smp.lambdify((x, u, Omega2, beta), ham_zz_expr, "sympy")
+    # print(ham_zz_lam(x, u, Omega2, beta))
+    
+    ham_zz_ = smp.lambdify((x, u, Omega2, beta), ham_zz_expr)
+    # self.ham_zz = lambda x, u, Omega2=self.Omega2, beta=self.beta: ham_zz_(x, u, Omega2, beta).squeeze()
+        
+    kwds.update({\
+            'drag': lambda x, u: kwds['beta']/2 * r_[x, u],\
+            'drag_z': lambda x, u: kwds['beta']/2 * eye(2*x.shape[0]),\
+            'ham_': ham_, \
+            'ham_z_': ham_z_, \
+            'ham_zz_': ham_zz_, \
+                })
+    
+    "Initial conditions"
+    y_init = r_[np.linspace(1,5,nosc), np.zeros(nosc)]
+    
+    "Initial condition"
+    kwds.update({'constraint_type': 'spherical'})
+    
+    alpha = list(np.linspace(0.1,0.5,num=nosc))
+    alpha /= sqrt(sum(np.array(alpha)**2))
+    assert np.isclose(np.array(alpha).dot(alpha), 1), "alpha**2 must be equal to 1"
+    kwds.update({'alpha': alpha})
+    
+    if kwds['constraint_type'] == 'linear':
+        y_init[nosc-1] = -(y_init[:nosc-1].dot(alpha[:nosc-1]))/alpha[nosc-1] # project on the manifold
+        assert np.isclose(y_init[:nosc].dot(alpha[:nosc]), 0), "alpha:y should be 0" 
+    elif kwds['constraint_type'] == 'spherical':
+        y_init /= sqrt((y_init[:nosc]**2).dot(alpha[:nosc])) # project on the manifold
+        assert np.isclose((y_init[:nosc]**2).dot(alpha[:nosc]), 1), "alpha:y^2 should be 1" 
+    elif kwds['constraint_type'] == None:
+        pass
+    else:
+        raise NameError
+        
+    kwds['y_init'] = y_init
+
+    "Constraints"
+    if kwds['constraint_type'] == 'linear':
+        kwds['_g'] = lambda y, alpha=alpha: r_[y[:, :nosc].dot(alpha), y[:, nosc:].dot(alpha)]
+        kwds['_g_prime'] = lambda y, alpha=alpha: r_[c_[np.array(alpha, ndmin=2), zeros((1,nosc))],\
+                                    c_[zeros((1,nosc)), np.array(alpha, ndmin=2)]]
+        raise NotImplementedError
+    elif kwds['constraint_type'] == 'spherical':
+        Alpha = np.diag(alpha)
+        A_mat = r_[c_[Alpha, np.zeros_like(Alpha)],\
+                   c_[np.zeros_like(Alpha), np.zeros_like(Alpha)]]
+        B_mat = r_[c_[np.zeros_like(Alpha), Alpha],\
+                   c_[Alpha, np.zeros_like(Alpha)]]
+            
+        kwds['_g'] = lambda y, alpha=[A_mat, B_mat]: r_[y @ alpha[0] @ y.T -1.0,\
+                                            y @ alpha[1] @ y.T]
+        kwds['_g_prime'] = lambda y, alpha=[A_mat, B_mat]: c_[2*y @alpha[0],\
+                                                  2*y @alpha[1]].T
+
+    "Fixed-point nonliner equations solver properties"
+    kwds['tol'], kwds['M'], kwds['var'], kwds['store'] = 1.0E-12, 100, True, False
+        
+    "Full order solution"    
+    MSsolvers = MechSystemSolver.solver(kwds)
     
     if MSsolvers[-1].non_quad: # is not None
         assert kwds['Omega2_space_dim'] == 1
@@ -396,8 +534,7 @@ def mor_demo():
                 c_[zeros_like(RB), RB]]
         W_r = RB
         
-    fig, ax = logplot(sv_sp, xlabel='index of singular values',\
-            xlims=(0, len(sv_sp)))
+    fig, ax = logplot(sv_sp, xlabel='index of singular values', xlims=(0, len(sv_sp)))
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
     filename = kwds['keep_time'] +'osc_sv' + '.pdf'
     # save_figure(fig, filename)
@@ -416,7 +553,7 @@ def mor_demo():
                     })
         
     print('solving reduced system ...')
-    MSsolvers_r = solver(kwds)
+    MSsolvers_r = MechSystemSolver.solver(kwds)
           
     print('solution errors')
     print(reshape([np.amax(abs(MSsolvers[i].y -MSsolvers_r[i].y)) for i in range(len(MSsolvers))], array_shape))
@@ -480,50 +617,6 @@ def mor_demo():
     # Next steps:
         # Implement structure-preserving hyper-reduction
     
-    
-def solver(kwds):
-
-    MSsolvers = []
-    errors = {'energy': [], 'spl': []}
-
-    for solver_class, dt, Omega2 in [(x,y,z) for x in kwds['registered_solver_classes'] for y in kwds['dt_space'] for z in kwds['Omega2_space']]:
-        
-        kwds.update({'solver_class': solver_class, \
-                    'dt': dt, \
-                    'Omega2': Omega2})
-        
-        MSsolver = MechSystemSolver(kwds)
-                
-        start = process_time()
-        MSsolver.solve()
-        end = process_time()
-        MSsolver.time_lapsed.append(end-start)
-        
-        if kwds['dt_space'].size > 1 and np.allclose(MSsolver.Omega2, kwds['Omega2_space'][-1]):
-             # compute errors only for fixed Omega2
-            if (not MSsolver.beta) and (MSsolver.constraint_type is None):
-                "Energy (Hamiltonian) is an invariant for unconstrained conservative system"
-                MSsolver.eng_error =MSsolver.get_en_err()
-                errors['energy'].append(sqrt(dt)*LA.norm(MSsolver.eng_error))
-            
-            if MSsolver.var:
-                errors['spl'].append(sqrt(dt)*LA.norm(MSsolver.sym_error))
-            
-        if 'RB' not in kwds and False:
-            MSsolver.F2 = np.array([MSsolver.ham_z(*np.split(y,2)) for y in MSsolver.info]).T
-                
-            if MSsolver.non_quad:
-                MSsolver.F3 = np.array([MSsolver.non_quad_z(*np.split(y,2)) for y in MSsolver.info]).T
-            
-        MSsolvers.append(MSsolver)
-        
-    errors_ = {'energy': [], 'spl': errors['spl']}
-    for i in np.arange(0,  len(kwds['registered_solver_classes'] * len(kwds['dt_space']) * len(kwds['Omega2_space'])), len(kwds['dt_space']) * len(kwds['Omega2_space'])):
-        errors_['energy'] = errors['energy'][i:i+5]
-        MSsolvers[i].measures(errors_, kwds['dt_space'])
-        
-    return MSsolvers
-        
 if __name__ == '__main__':
     mor_demo()
     

@@ -1,0 +1,13 @@
+name: modred-dae
+channels:
+  - conda-forge
+dependencies:
+  - brewer2mpl
+  - cycler
+  - matplotlib
+  - numpy
+  - scipy
+  - spyder
+  - sympy
+  - time
+prefix: /home/bhattah/miniconda3/envs/modred-dae

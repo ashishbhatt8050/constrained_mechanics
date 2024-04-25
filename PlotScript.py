@@ -12,7 +12,7 @@ from pylab import figure, rcParams, cm
 import brewer2mpl
 from cycler import cycler
 import os
-import pickle
+import pickle as pickle
 
  # brewer2mpl.get_map args: set name  set type  number of colors
 bmap = brewer2mpl.get_map('Set2', 'qualitative', 7)
@@ -31,6 +31,20 @@ params = {
     'figure.autolayout': True
 }
 rcParams.update(params)
+
+from functools import wraps
+from time import time
+
+def timing(f):
+    @wraps(f)
+    def wrap(*args, **kw):
+        ts = time()
+        _ = f(*args, **kw)
+        te = time()
+        # print('func:%r args:[%r, %r] took: %2.4f sec' % \
+        #   (f.__name__, args, kw, te-ts))
+        return te-ts
+    return wrap
 
 def plot_data(ax, x_data, y_data, use_y_labels=True, use_legend=False):
     # now all plot function should be applied to ax

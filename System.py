@@ -9,14 +9,15 @@ Created on Tue Aug  2 12:40:39 2022
 import numpy as np
 from pylab import log, r_, c_, cos, sin, zeros, eye, sqrt, diag, sum
 import ODESolver
+    
 
 class System(object):
     
-    def __init__(self):
+    def __init__(self, kwds):
+        
+        self.__dict__.update(kwds)
 
         "MechSystem constituents"
-        nosc = self.nosc
-        Omega2 = self.Omega2        
         
         self.ham = lambda x, u, Omega2=self.Omega2, beta=self.beta: self.ham_(x, u, Omega2, beta)
         self.ham_z = lambda x, u, Omega2=self.Omega2, beta=self.beta: self.ham_z_(x, u, Omega2, beta).squeeze()
@@ -44,7 +45,7 @@ class System(object):
         self.non_quad_zz = lambda x, u, Omega2=self.Omega2: self.ham_zz(x,u,Omega2) - self.Q_spd(Omega2)
         self.non_quad = None
             
-    def get_func(self, y, t, *args, **kwargs):
+    def __call__(self, y, t, *args, **kwargs):
         
         solver_class = self.solver_class
         P, RB, W_r = self.P, self.RB, self.W_r

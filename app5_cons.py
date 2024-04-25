@@ -13,14 +13,13 @@ and bases from podDEIM.
 
 import numpy as np
 import sympy as smp
+import scipy as sp
 from numpy import linalg as LA
-from pylab import  log, r_, c_, cos, sin, zeros, eye, sqrt, diag, reshape, linspace, roll, figure, argmin, norm, zeros_like
+from pylab import  log, r_, c_, zeros, eye, sqrt, reshape, linspace, roll, figure, argmin, norm, zeros_like
 import ODESolver
 from System import System
 from podDEIM import orthogonalize, POD
-from PlotScript import plot_data, tex_table, logplot, save_figure
-from time import process_time
-import scipy as sp
+from PlotScript import plot_data, tex_table, logplot, save_figure, timing
 import gc
 from datetime import datetime
 from matplotlib import rc
@@ -31,16 +30,88 @@ from matplotlib.ticker import MaxNLocator
 
 from Newton import fixed_point
 
-#%% Parameters class
-class Params(System):
-    """ Class of MechSystem parameters """
+#%% Solve the system and find convergence rates
+class MechSystem(System):
+    """ Class of MechSystem methods """
+        
+    "Numerical solver and its properties"
+    w_values = [0.28, 0.62546642846767004501]
+    w_values.append(1.0 -2.0*(sum(w_values)))
+    w_values.append(w_values[1])
+    w_values.append(w_values[0])
+    w_values = [1]
+    assert np.isclose(sum(w_values), 1), 'sum_i w_i must be 1'
+
+    "Fixed-point nonliner equations solver properties"
+    tol, M, var, store = 1.0E-12, 100, True, False
+    
+    "System parameters"
+    nosc = 100
+        
+    # These two properties only have effect during reduction
+    reducer = 'psd'
+    predict = True # False = reproduce
+    
+    registered_solver_classes = [ODESolver.ConformalImplicitMidpoint, ODESolver.ConformalStormerVerlet]
+    dt_space_dim = 1
+    Omega2_space_dim = 3
+    beta = (max(1e-2, 0*np.random.rand()/10))*1
+    JJ = lambda self, d=nosc: r_[c_[zeros((d,d)), eye(d)], c_[-eye(d), zeros((d,d))]]
+    
+    Omega2_space = np.sort(3*(1 -np.random.rand(Omega2_space_dim, nosc)))
+        
+    dt_space = linspace(0.01, 0.05, num=dt_space_dim)
+    T_final = 2
+    
+    osc_idx = np.array([0, 1, 2, nosc//2-1, nosc//2, nosc//2+1, nosc-3, nosc-2, nosc-1])
+    keep_time = datetime.now().strftime('%Y-%m-%d_%H-%M_')
+    
+    "Initial conditions"
+    y_init = r_[np.linspace(1,5,nosc), np.zeros(nosc)]
+    
+    "Initial condition"
+    constraint_type = 'spherical'
+    
+    alpha = list(np.linspace(0.1,0.5,num=nosc))
+    alpha /= sqrt(sum(np.array(alpha)**2))
+    assert np.isclose(np.array(alpha).dot(alpha), 1), "alpha**2 must be equal to 1"
+    
+    if constraint_type == 'linear':
+        y_init[nosc-1] = -(y_init[:nosc-1].dot(alpha[:nosc-1]))/alpha[nosc-1] # project on the manifold
+        assert np.isclose(y_init[:nosc].dot(alpha[:nosc]), 0), "alpha:y should be 0" 
+    elif constraint_type == 'spherical':
+        y_init /= sqrt((y_init[:nosc]**2).dot(alpha[:nosc])) # project on the manifold
+        assert np.isclose((y_init[:nosc]**2).dot(alpha[:nosc]), 1), "alpha:y^2 should be 1" 
+    elif constraint_type == None:
+        pass
+    else:
+        raise NameError
+
+    "Constraints"    
+    if constraint_type == 'linear':
+        g = lambda self, y, alpha=alpha: r_[y[:, :nosc].dot(alpha), y[:, nosc:].dot(alpha)]
+        g_prime = lambda self, y, alpha=alpha: r_[c_[np.array(alpha, ndmin=2), zeros((1,nosc))],\
+                                                    c_[zeros((1,nosc)), np.array(alpha, ndmin=2)]]
+        raise NotImplementedError
+        
+    elif constraint_type == 'spherical':
+        Alpha = np.diag(alpha)
+        A_mat = r_[c_[Alpha, np.zeros_like(Alpha)], c_[np.zeros_like(Alpha), np.zeros_like(Alpha)]]
+        B_mat = r_[c_[np.zeros_like(Alpha), Alpha], c_[Alpha, np.zeros_like(Alpha)]]
+            
+        g = lambda self, y, alpha=[A_mat, B_mat]: r_[y @ alpha[0] @ y.T -1.0,\
+                                                      y @ alpha[1] @ y.T]
+        g_prime = lambda self, y, alpha=[A_mat, B_mat]: c_[2*y @alpha[0],\
+                                                            2*y @alpha[1]].T
+    
+    
+    drag = lambda self, x, u: beta/2 * r_[x, u]
+    drag_z = lambda self, x, u: beta/2 * eye(2*x.shape[0])
+            
     def __init__(self, kwds):
         "MechSystem properties"
         
-        for key, value in kwds.items():
-            setattr(self, key, value)
-        
-        System.__init__(self)
+        System.__init__(self, kwds)
         
         "Projection matrices"
         if hasattr(self, 'W_r'):
@@ -78,15 +149,6 @@ class Params(System):
             self.P = None
             self.U = None
         
-        "Numerical solver and its properties"
-        w_values = [0.28, 0.62546642846767004501]
-        w_values.append(1.0 -2.0*(sum(w_values)))
-        w_values.append(w_values[1])
-        w_values.append(w_values[0])
-        w_values = [1]
-        assert np.isclose(sum(w_values), 1), 'sum_i w_i must be 1'
-        self.w_values = w_values
-        
         if self.solver_class in [ODESolver.ConformalImplicitMidpoint, ODESolver.ConformalStormerVerlet, ODESolver.ImplicitMidpoint]:
             self.solver = self.solver_class(self)
         else:
@@ -103,20 +165,76 @@ class Params(System):
     @u_init.setter
     def u_init(self, value):
         self.y_init = value
-
-#%% Solve the system and find convergence rates
-class MechSystemSolver(Params):
-    "Define the Mechanical system as a sub-class of Params"
+        
+    @staticmethod
+    def solver():
     
-    def __init__(self, kwds):
-        "Initiate and set-up the Mechanical system properties and parameters"
+        MSsolvers = []
+        errors = {'energy': [], 'spl': []}
         
-        Params.__init__(self, kwds)
+        if MechSystem.predict: # prediction experiment
+            
+            if (not hasattr(MechSystem, 'RB')):
+                # training parameters
+                Omega2_space = MechSystem.Omega2_space[:-1]
+                Omega2_space_dim = len(Omega2_space)
+                
+            else:
+                # testing parameters
+                Omega2_space = MechSystem.Omega2_space[-1:]
+                Omega2_space_dim = len(Omega2_space)
+                
+        else: # reproduction
+            Omega2_space = MechSystem.Omega2_space
+            Omega2_space_dim = len(Omega2_space)
+            
+            
+        errors.update({'Omega2_space_dim': Omega2_space_dim})
         
-    def __call__(self, y, t, *arg, **kwargs):
+        for solver_class, dt, Omega2 in [(x, y, z) for x in MechSystem.registered_solver_classes for y in MechSystem.dt_space for z in Omega2_space]:
         
-        return Params.get_func(self, y, t, **kwargs)
+            kwds = {'solver_class': solver_class, \
+                    'dt': dt, \
+                    'Omega2': Omega2, \
+                    'n': int(round(MechSystem.T_final/dt)),\
+                    'ham_': ham_, \
+                    'ham_z_': ham_z_, \
+                    'ham_zz_': ham_zz_, \
+                    }
+            
+            kwds.update({'t_points': linspace(0, MechSystem.T_final, kwds['n']+1)})
+            
+            MSsolver = MechSystem(kwds)
+            
+            tl = MSsolver.solve()
+            
+            MSsolver.time_lapsed.append(tl)
+            
+            if MechSystem.dt_space_dim > 1 and MechSystem.Omega2_space_dim == 1:
+                 # compute errors only for fixed Omega2_space of length 1
+                if (not MSsolver.beta) and (MSsolver.constraint_type is None):
+                    "Energy (Hamiltonian) is an invariant for unconstrained conservative system"
+                    MSsolver.eng_error = MSsolver.get_en_err()
+                    errors['energy'].append(sqrt(dt)*LA.norm(MSsolver.eng_error))
+                
+            if MSsolver.var:
+                MSsolver.var_solve()
+                # errors['spl'].append(sqrt(dt)*LA.norm(MSsolver.sym_error))
+                
+            if (not hasattr(MechSystem, 'RB')) and False:
+                MSsolver.F2 = np.array([MSsolver.ham_z(*np.split(y, 2)) for y in MSsolver.info]).T
+                    
+                if MSsolver.non_quad:
+                    MSsolver.F3 = np.array([MSsolver.non_quad_z(*np.split(y, 2)) for y in MSsolver.info]).T
+                
+            MSsolvers.append(MSsolver)
+            
+        MechSystem.measures(MSsolvers, errors)
+    
+        return MSsolvers
+    
         
+    @timing
     def solve(self):
         
         self.g_arr = np.zeros((self.n+1, 2))
@@ -128,7 +246,7 @@ class MechSystemSolver(Params):
             
             if self.constraint_type:
                 X_U = np.array([self.y_init, self.y_init])
-                X_U, _, self.g_arr[0] = fixed_point(self._g, X_U @ self.RB.T, self._g_prime, self.tol, self.M, False)
+                X_U, _, self.g_arr[0] = fixed_point(self.g, X_U @ self.RB.T, self.g_prime, self.tol, self.M, False)
                 self.y_init = self.RB.T @X_U[1]
             
         self.y[0] = self.y_init
@@ -151,7 +269,7 @@ class MechSystemSolver(Params):
                     else:
                         y_ = y_ @ self.RB.T
                     
-                    y_, _, self.g_arr[k+1] = fixed_point(self._g, y_, self._g_prime, self.tol, self.M, False)
+                    y_, _, self.g_arr[k+1] = fixed_point(self.g, y_, self.g_prime, self.tol, self.M, False)
 
             if self.RB is None or self.constraint_type is None:
                 self.y[k+1] = y_[1]
@@ -165,9 +283,6 @@ class MechSystemSolver(Params):
         if self.RB is not None:
             self.y_red = self.y
             self.y = self.y @ self.RB.T
-        
-        if self.var == True:
-            self.var_solve()
 
     def var_solve(self):
         nosc = self.nosc
@@ -215,11 +330,11 @@ class MechSystemSolver(Params):
             ax1.set_xlim((0, self.T_final))
             ax1.set_ylabel(r'$\Delta H$')
             
-        elif hasattr(self, '_g'):
+        elif hasattr(self, 'g'):
             if hasattr(self, 'y_red') and False:
-                temp = np.hstack([self._g(self.y_red[[i],:]) for i in range(self.n+1)])
+                temp = np.hstack([self.g(self.y_red[[i],:]) for i in range(self.n+1)])
             elif False:
-                temp = np.hstack([self._g(self.y[[i],:]) for i in range(self.n+1)])
+                temp = np.hstack([self.g(self.y[[i],:]) for i in range(self.n+1)])
                 
             temp = LA.norm(self.g_arr, axis=1)
             # temp = log(temp/np.roll(temp, 1))
@@ -243,217 +358,107 @@ class MechSystemSolver(Params):
         
         for ax in [ax0, ax1]:
             ax.label_outer()
-            
+                
         if self.RB is not None:
-            string =  '_reduced'
+            if self.predict: string = '_predict'
+            else: string = '_repro'
         else:
             string = '_full'
 
         filename = self.keep_time +'osc_' +self.solver_class.__name__ +string +'.pdf'
         # save_figure(fig, filename)
         
-
-    def measures(self, errors, dt_space):
+    @staticmethod
+    def measures(MSsolvers, errors):
         "Various measurements based on the solution"
-        
-        r_values = []
-        C_values = []
         
         r_form = lambda numer, denom: (log(roll(numer, -1)/numer)/log(roll(denom, -1)/denom))[:-1]
         C_form = lambda numer, denom, r: numer[:-1]/(denom[:-1]**r)
-        
-        if errors['energy']:
-            "Compute convergence rates from the error in Energy"
-            r_values.append(r_form(errors['energy'],dt_space))
-            C_values.append(C_form(errors['energy'],dt_space,r_values[-1]))
             
-        if self.solver_class == ODESolver.ImplicitMidpoint and self.beta != 0 and errors['spl']:
-            '''Compute convergence rate from the error in symplecticness
-            Only applicable if the error is non-zero'''
-            r_values.append(r_form(errors['spl'],dt_space))
-            C_values.append(C_form(errors['spl'],dt_space,r_values[-1]))
+        for i in np.arange(0, len(MSsolvers), MechSystem.dt_space_dim * errors['Omega2_space_dim']):
+            MSsolver = MSsolvers[i]
             
-        # Display convergence rates if available
-        if r_values:
-            temp = r_[ reshape(dt_space, (1,-1)), \
-                      c_[np.reshape([float('nan')]*len(r_values), (len(r_values),1)), r_values]].T
+            r_values = []
+            C_values = []
+            
+            if errors['energy']:
+                "Compute convergence rates from the error in Energy"
+                r_values.append(r_form(errors['energy'][i:i+MechSystem.dt_space_dim], MechSystem.dt_space))
+                C_values.append(C_form(errors['energy'][i:i+MechSystem.dt_space_dim], MechSystem.dt_space,r_values[-1]))
                 
-            tex_table(self.solver_class.__name__, temp.T)
-    
-        # Plot the measures
-        self.plot()
-        
-    @staticmethod  
-    def solver(kwds):
-    
-        MSsolvers = []
-        errors = {'energy': [], 'spl': []}
-    
-        for solver_class, dt, Omega2 in [(x,y,z) for x in kwds['registered_solver_classes'] for y in kwds['dt_space'] for z in kwds['Omega2_space']]:
-            
-            kwds.update({'solver_class': solver_class, \
-                        'dt': dt, \
-                        'Omega2': Omega2, \
-                        'n': int(round(kwds['T_final']/dt))})
-            
-            kwds.update({'t_points': linspace(0, kwds['T_final'], kwds['n']+1)})
-            
-            MSsolver = MechSystemSolver(kwds)
+            if False:
+                '''Compute convergence rate from the error in symplecticness
+                Only applicable if the error is non-zero'''
+                r_values.append(r_form(errors['spl'][i:i+MechSystem.dt_space_dim],MechSystem.dt_space))
+                C_values.append(C_form(errors['spl'][i:i+MechSystem.dt_space_dim],MechSystem.dt_space,r_values[-1]))
+                
+            # Display convergence rates if available
+            if r_values:
+                temp = r_[ reshape(MechSystem.dt_space, (1,-1)), \
+                          c_[np.reshape([float('nan')]*len(r_values), (len(r_values),1)), r_values]].T
                     
-            start = process_time()
-            MSsolver.solve()
-            end = process_time()
-            MSsolver.time_lapsed.append(end-start)
-            
-            if kwds['dt_space'].size > 1 and np.allclose(MSsolver.Omega2, kwds['Omega2_space'][-1]):
-                 # compute errors only for fixed Omega2
-                if (not MSsolver.beta) and (MSsolver.constraint_type is None):
-                    "Energy (Hamiltonian) is an invariant for unconstrained conservative system"
-                    MSsolver.eng_error =MSsolver.get_en_err()
-                    errors['energy'].append(sqrt(dt)*LA.norm(MSsolver.eng_error))
-                
-                if MSsolver.var:
-                    errors['spl'].append(sqrt(dt)*LA.norm(MSsolver.sym_error))
-                
-            if 'RB' not in kwds and False:
-                MSsolver.F2 = np.array([MSsolver.ham_z(*np.split(y,2)) for y in MSsolver.info]).T
-                    
-                if MSsolver.non_quad:
-                    MSsolver.F3 = np.array([MSsolver.non_quad_z(*np.split(y,2)) for y in MSsolver.info]).T
-                
-            MSsolvers.append(MSsolver)
-            
-        errors_ = {'energy': [], 'spl': errors['spl']}
-        for i in np.arange(0,  len(kwds['registered_solver_classes'] * len(kwds['dt_space']) * len(kwds['Omega2_space'])), len(kwds['dt_space']) * len(kwds['Omega2_space'])):
-            errors_['energy'] = errors['energy'][i:i+5]
-            MSsolvers[i].measures(errors_, kwds['dt_space'])
-            
-        return MSsolvers
+                tex_table(MSsolver.solver_class.__name__, temp.T)
         
-  
-#%% Main driver function
-def mor_demo():
-    "Model order reduction of the MechSystem using MechSystemSolver"
-    
-    nosc = 100
-            
-    kwds = {'system_type': 'oscillator', 'reducer': 'psd',\
-            'registered_solver_classes': [ODESolver.ConformalImplicitMidpoint, ODESolver.ConformalStormerVerlet],\
-            'nosc': nosc,\
-            'dt_space_dim': 3,\
-            'Omega2_space_dim': 3,\
-            'beta': (max(1e-2, 0*np.random.rand()/10))*1,\
-            'JJ': lambda d=nosc: r_[c_[zeros((d,d)), eye(d)],\
-                                      c_[-eye(d), zeros((d,d))]] \
-                }
-        
-    Omega2_space = np.sort(3*(1 -np.random.rand(kwds['Omega2_space_dim'], nosc)))
-    
-    kwds.update({'dt_space': linspace(0.01, 0.05, num=kwds['dt_space_dim']), \
-                 'T_final': 2, \
-                'Omega2_space': Omega2_space[:kwds['Omega2_space_dim']], \
-                'osc_idx': np.array([0,1,2, nosc//2-1, nosc//2, nosc//2+1, nosc-3, nosc-2, nosc-1]), \
-                'keep_time': datetime.now().strftime('%Y-%m-%d_%H-%M_')})
-        
-    "Find symbolic quantities"
-    x = smp.Matrix(smp.symbols('x0:{}'.format(nosc)))
-    u = smp.Matrix(smp.symbols('u0:{}'.format(nosc)))
-    Omega2 = smp.Matrix(smp.symbols('Om0:{}'.format(nosc)))
-    beta = smp.symbols('beta')
-    
-    kin_expr = sum((u[i]**2)/2.0 for i in range(nosc))
-    # kin = smp.lambdify((u,), kin_expr, modules='numpy')
-    
-    pot_expr = 1 -sum(smp.cos(Omega2[i]*x[i]) for i in range(nosc))
-    # pot = smp.lambdify((x, Omega2), pot_expr)
-    
-    ham_expr = kin_expr + pot_expr +beta/2 * sum(x[i]*u[i] for i in range(nosc))
-    ham_lam = smp.lambdify((x, u, Omega2, beta), ham_expr, "sympy")
-    # print(ham_lam(x, u, Omega2, beta))
-    
-    ham_ = smp.lambdify((x, u, Omega2, beta), ham_expr)
-    # self.ham = lambda x, u, Omega2=self.Omega2, beta=self.beta: ham_(x, u, Omega2, beta)
-    # u_arr, v_arr, Om2_arr = np.random.rand(3,nosc)
-    # print(ham(u_arr, v_arr, Om2_arr, 0.1))
-    
-    ham_z_expr = smp.Matrix([ham_lam(x, u, Omega2, beta)]).jacobian(list(x)+list(u)).T
-    ham_z_lam = smp.lambdify((x, u, Omega2, beta), ham_z_expr, "sympy")
-    # print(ham_z_lam(x, u, Omega2, beta))
-    
-    ham_z_ = smp.lambdify((x, u, Omega2, beta), ham_z_expr)
-    # self.ham_z = lambda x, u, Omega2=self.Omega2, beta=self.beta: ham_z_(x, u, Omega2, beta).squeeze()
-    # print(ham_z(u_arr, v_arr, Om2_arr, 0.1))
-    
-    ham_zz_expr = ham_z_lam(x, u, Omega2, beta).jacobian(list(x)+list(u))
-    # ham_zz_lam = smp.lambdify((x, u, Omega2, beta), ham_zz_expr, "sympy")
-    # print(ham_zz_lam(x, u, Omega2, beta))
-    
-    ham_zz_ = smp.lambdify((x, u, Omega2, beta), ham_zz_expr)
-    # self.ham_zz = lambda x, u, Omega2=self.Omega2, beta=self.beta: ham_zz_(x, u, Omega2, beta).squeeze()
-        
-    kwds.update({\
-            'drag': lambda x, u: kwds['beta']/2 * r_[x, u],\
-            'drag_z': lambda x, u: kwds['beta']/2 * eye(2*x.shape[0]),\
-            'ham_': ham_, \
-            'ham_z_': ham_z_, \
-            'ham_zz_': ham_zz_, \
-                })
-    
-    "Initial conditions"
-    y_init = r_[np.linspace(1,5,nosc), np.zeros(nosc)]
-    
-    "Initial condition"
-    kwds.update({'constraint_type': 'spherical'})
-    
-    alpha = list(np.linspace(0.1,0.5,num=nosc))
-    alpha /= sqrt(sum(np.array(alpha)**2))
-    assert np.isclose(np.array(alpha).dot(alpha), 1), "alpha**2 must be equal to 1"
-    kwds.update({'alpha': alpha})
-    
-    if kwds['constraint_type'] == 'linear':
-        y_init[nosc-1] = -(y_init[:nosc-1].dot(alpha[:nosc-1]))/alpha[nosc-1] # project on the manifold
-        assert np.isclose(y_init[:nosc].dot(alpha[:nosc]), 0), "alpha:y should be 0" 
-    elif kwds['constraint_type'] == 'spherical':
-        y_init /= sqrt((y_init[:nosc]**2).dot(alpha[:nosc])) # project on the manifold
-        assert np.isclose((y_init[:nosc]**2).dot(alpha[:nosc]), 1), "alpha:y^2 should be 1" 
-    elif kwds['constraint_type'] == None:
-        pass
-    else:
-        raise NameError
-        
-    kwds['y_init'] = y_init
+            # Plot the measures
+            MSsolver.plot()
 
-    "Constraints"
-    if kwds['constraint_type'] == 'linear':
-        kwds['_g'] = lambda y, alpha=alpha: r_[y[:, :nosc].dot(alpha), y[:, nosc:].dot(alpha)]
-        kwds['_g_prime'] = lambda y, alpha=alpha: r_[c_[np.array(alpha, ndmin=2), zeros((1,nosc))],\
-                                    c_[zeros((1,nosc)), np.array(alpha, ndmin=2)]]
-        raise NotImplementedError
-    elif kwds['constraint_type'] == 'spherical':
-        Alpha = np.diag(alpha)
-        A_mat = r_[c_[Alpha, np.zeros_like(Alpha)],\
-                   c_[np.zeros_like(Alpha), np.zeros_like(Alpha)]]
-        B_mat = r_[c_[np.zeros_like(Alpha), Alpha],\
-                   c_[Alpha, np.zeros_like(Alpha)]]
-            
-        kwds['_g'] = lambda y, alpha=[A_mat, B_mat]: r_[y @ alpha[0] @ y.T -1.0,\
-                                            y @ alpha[1] @ y.T]
-        kwds['_g_prime'] = lambda y, alpha=[A_mat, B_mat]: c_[2*y @alpha[0],\
-                                                  2*y @alpha[1]].T
 
-    "Fixed-point nonliner equations solver properties"
-    kwds['tol'], kwds['M'], kwds['var'], kwds['store'] = 1.0E-12, 100, True, False
+#%% symbolic computation
+"Find symbolic quantities"
+nosc = MechSystem.nosc
+x = smp.Matrix(smp.symbols('x0:{}'.format(nosc)))
+u = smp.Matrix(smp.symbols('u0:{}'.format(nosc)))
+Omega2 = smp.Matrix(smp.symbols('Om0:{}'.format(nosc)))
+beta = smp.symbols('beta')
+
+kin_expr = sum((u[i]**2)/2.0 for i in range(nosc))
+# kin = smp.lambdify((u,), kin_expr, modules='numpy')
+
+pot_expr = 1 -sum(smp.cos(Omega2[i]*x[i]) for i in range(nosc))
+# pot = smp.lambdify((x, Omega2), pot_expr)
+
+ham_expr = kin_expr + pot_expr +beta/2 * sum(x[i]*u[i] for i in range(nosc))
+ham_lam = smp.lambdify((x, u, Omega2, beta), ham_expr, "sympy")
+# print(ham_lam(x, u, Omega2, beta))
+
+ham_ = smp.lambdify((x, u, Omega2, beta), ham_expr)
+# self.ham = lambda x, u, Omega2=self.Omega2, beta=self.beta: ham_(x, u, Omega2, beta)
+# u_arr, v_arr, Om2_arr = np.random.rand(3,nosc)
+# print(ham(u_arr, v_arr, Om2_arr, 0.1))
+
+ham_z_expr = smp.Matrix([ham_lam(x, u, Omega2, beta)]).jacobian(list(x)+list(u)).T
+ham_z_lam = smp.lambdify((x, u, Omega2, beta), ham_z_expr, "sympy")
+# print(ham_z_lam(x, u, Omega2, beta))
+
+ham_z_ = smp.lambdify((x, u, Omega2, beta), ham_z_expr)
+# self.ham_z = lambda x, u, Omega2=self.Omega2, beta=self.beta: ham_z_(x, u, Omega2, beta).squeeze()
+# print(ham_z(u_arr, v_arr, Om2_arr, 0.1))
+
+ham_zz_expr = ham_z_lam(x, u, Omega2, beta).jacobian(list(x)+list(u))
+# ham_zz_lam = smp.lambdify((x, u, Omega2, beta), ham_zz_expr, "sympy")
+# print(ham_zz_lam(x, u, Omega2, beta))
+
+ham_zz_ = smp.lambdify((x, u, Omega2, beta), ham_zz_expr)
+# self.ham_zz = lambda x, u, Omega2=self.Omega2, beta=self.beta: ham_zz_(x, u, Omega2, beta).squeeze()
+
+#%% Main driver
+if __name__ == '__main__':
+    "Model order reduction of the MechSystem using MechSystem"
         
-    "Full order solution"    
-    MSsolvers = MechSystemSolver.solver(kwds)
+    nosc = MechSystem.nosc
+    
+    "Full order solution"
+    MSsolvers = MechSystem.solver()
     
     if MSsolvers[-1].non_quad: # is not None
-        assert kwds['Omega2_space_dim'] == 1
-    
-    array_shape = (len(kwds['registered_solver_classes']), kwds['dt_space_dim'], kwds['Omega2_space_dim'])
-    time_lapsed = [reshape([x.time_lapsed for x in MSsolvers], array_shape)]
+        assert MechSystem.Omega2_space_dim == 1
         
-    # _errors = [reshape([np.amax(x.sym_error) for x in MSsolvers], array_shape)]
+    if MechSystem.predict:
+        array_shape = (len(MechSystem.registered_solver_classes), MechSystem.dt_space_dim, MechSystem.Omega2_space_dim-1)
+    else:
+        array_shape = (len(MechSystem.registered_solver_classes), MechSystem.dt_space_dim, MechSystem.Omega2_space_dim)        
+    
+    time_lapsed = [reshape([x.time_lapsed for x in MSsolvers], array_shape)]
     
     print('Assembling snapshots ...')
     y_list = np.hstack([MSsolver.y[np.unique(np.random.randint(0,MSsolver.n,int(MSsolver.n/10)))].T for MSsolver in MSsolvers])
@@ -494,7 +499,7 @@ def mor_demo():
         W_r = orthogonalize(W_r_, RB, X['eye'])
         assert (W_r.shape == RB.shape)
     
-    elif kwds['reducer'] == 'pod':
+    elif MechSystem.reducer == 'pod':
         RBq, sv_pod_q = POD(c_[y_list[:nosc,:], F2[:nosc,:]], X['eye_half'])
         RBp, sv_pod_p = POD(c_[y_list[nosc:,:], F2[nosc:,:]], X['eye_half'])
     
@@ -518,7 +523,7 @@ def mor_demo():
         
         s = c_[sv_pod_q, sv_pod_p].T
         
-    elif kwds['reducer'] == 'psd':
+    elif MechSystem.reducer == 'psd':
         RB, sv_sp = POD(c_[y_list[:nosc,:], y_list[nosc:,:]], X['eye_half'])
     
         nosc_r = argmin(abs(np.asarray([norm(sv_sp[:i]**2)/norm(sv_sp**2) for i in range(len(sv_sp))]) -1 +1e-12))
@@ -536,7 +541,7 @@ def mor_demo():
         
     fig, ax = logplot(sv_sp, xlabel='index of singular values', xlims=(0, len(sv_sp)))
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-    filename = kwds['keep_time'] +'osc_sv' + '.pdf'
+    filename = MechSystem.keep_time +'osc_sv' + '.pdf'
     # save_figure(fig, filename)
     
     # assert that W_r and RB are orthogonal
@@ -546,31 +551,25 @@ def mor_demo():
     del y_list
     gc.collect()
     
-    kwds.update({'RB': RB,\
-                'W_r': W_r,\
-                'nosc_r': nosc_r,\
-                'Omega2_space': Omega2_space, \
-                    })
+    MechSystem.RB = RB
+    MechSystem.W_r = W_r
+    MechSystem.nosc_r = nosc_r
         
     print('solving reduced system ...')
-    MSsolvers_r = MechSystemSolver.solver(kwds)
-          
-    print('solution errors')
-    print(reshape([np.amax(abs(MSsolvers[i].y -MSsolvers_r[i].y)) for i in range(len(MSsolvers))], array_shape))
+    MSsolvers_r = MechSystem.solver()
+         
+    if len(MSsolvers) == len(MSsolvers_r):
+        print('solution errors')
+        print(reshape([np.amax(abs(MSsolvers[i].y -MSsolvers_r[i].y)) for i in range(len(MSsolvers))], array_shape))
     
-    time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
-                                time_lapsed[0].shape)/time_lapsed[0]*100)    
-    # time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
-    #                             time_lapsed[0].shape[:2]))
+        time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
+                                    time_lapsed[0].shape)/time_lapsed[0]*100)
+    else:
+        time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
+                                    time_lapsed[0].shape[:2]))
+    
     print('time lapsed')    
     print(time_lapsed)
-        
-    # _errors = [reshape([np.amax(x.sym_error) for x in MSsolvers_r], array_shape)]
-        
-    # _errors.append(reshape([np.amax(LA.norm(x.g_arr, axis=1)) for x in MSsolvers_r], array_shape))
-        
-    # print('constraint-errors')
-    # print(_errors)
 
     # Hyper-reduced model
     '''
@@ -616,7 +615,4 @@ def mor_demo():
         
     # Next steps:
         # Implement structure-preserving hyper-reduction
-    
-if __name__ == '__main__':
-    mor_demo()
-    
+        

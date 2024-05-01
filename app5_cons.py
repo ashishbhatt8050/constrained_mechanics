@@ -18,7 +18,7 @@ from numpy import linalg as LA
 from pylab import  log, r_, c_, zeros, eye, sqrt, reshape, linspace, roll, figure, argmin, norm, zeros_like
 import ODESolver
 from System import System
-from podDEIM import orthogonalize, POD
+from podDEIM import orthogonalize, POD, DEIM
 from PlotScript import plot_data, tex_table, logplot, save_figure, timing
 import gc
 from datetime import datetime
@@ -30,7 +30,6 @@ from matplotlib.ticker import MaxNLocator
 
 from Newton import fixed_point
 
-#%% Solve the system and find convergence rates
 class MechSystem(System):
     """ Class of MechSystem methods """
         
@@ -50,15 +49,15 @@ class MechSystem(System):
         
     # These two properties only have effect during reduction
     reducer = 'psd'
-    predict = True # False = reproduce
+    predict = False # False = reproduce
     
     registered_solver_classes = [ODESolver.ConformalImplicitMidpoint, ODESolver.ConformalStormerVerlet]
-    dt_space_dim = 1
-    Omega2_space_dim = 3
-    beta = (max(1e-2, 0*np.random.rand()/10))*1
+    dt_space_dim = 5
+    Omega2_space_dim = 1
+    beta = (max(1e-2, 0*np.random.rand()/10))*0
     JJ = lambda self, d=nosc: r_[c_[zeros((d,d)), eye(d)], c_[-eye(d), zeros((d,d))]]
     
-    Omega2_space = np.sort(3*(1 -np.random.rand(Omega2_space_dim, nosc)))
+    Omega2_space = np.sort(2*(1 -np.random.rand(Omega2_space_dim, nosc)))
         
     dt_space = linspace(0.01, 0.05, num=dt_space_dim)
     T_final = 2
@@ -70,7 +69,7 @@ class MechSystem(System):
     y_init = r_[np.linspace(1,5,nosc), np.zeros(nosc)]
     
     "Initial condition"
-    constraint_type = 'spherical'
+    constraint_type = None #'spherical'
     
     alpha = list(np.linspace(0.1,0.5,num=nosc))
     alpha /= sqrt(sum(np.array(alpha)**2))
@@ -127,24 +126,26 @@ class MechSystem(System):
             
         "hyper-reduction"
         if hasattr(self, 'P'):
-            self.RBxU = self.RB.T @ self.U
-            self.UxRB = self.RBxU.T
+            # self.RBxU = self.RB.T @ self.U
+            # self.UxRB = self.RBxU.T
+            # self.UxP = self.PxU.T
+            # self.PxP = self.P.T @ self.P
+            
             self.PxU = self.P.T @ self.U
-            self.UxP = self.PxU.T
-            self.PxP = self.P.T @ self.P
             
             if self.P.shape == self.U.shape: #POD-DEIM
                 sys_solve = LA.solve
             else: #Gappy-POD
                 sys_solve = lambda A, b: LA.lstsq(A, b, rcond=None)[0]
                 
-            self.PxIPxRB = lambda y: self.PxP @ sys_solve(self.UxP, self.UxRB @ y)
-            self.PxIPxRBxI = self.PxP @ sys_solve(self.UxP, self.UxRB)
-            # self.PxIPxRBxP = lambda y: self.PxP @ sys_solve(self.UxP, self.UxRB @ y) @self.P.T
-            self.hat = lambda foPxIPxRBxy: self.RBxU @ sys_solve(self.PxU, foPxIPxRBxy)
-            self.hhat = lambda ffoPxIPxRBxy: self.hat(ffoPxIPxRBxy) @ self.PxIPxRBxI
+            self.hat = lambda foRBxy: sys_solve(self.PxU, foRBxy)
+            self.hhat = lambda ffoRBxy: self.hat(self.hat(ffoRBxy.T).T)
             
-            self.IPt = lambda y: self.P @ sys_solve(self.UxP, self.U.T @y)
+            # self.PxIPxRB = lambda y: self.PxP @ sys_solve(self.UxP, self.UxRB @ y)
+            # self.PxIPxRBxI = self.PxP @ sys_solve(self.UxP, self.UxRB)
+            # self.PxIPxRBxP = lambda y: self.PxP @ sys_solve(self.UxP, self.UxRB @ y) @self.P.T
+            # self.IPxV = lambda y: self.U @ sys_solve(self.PxU, self.PxU @ y)
+            # self.IPt = lambda y: self.P @ sys_solve(self.UxP, self.U.T @y)
         else:
             self.P = None
             self.U = None
@@ -167,7 +168,7 @@ class MechSystem(System):
         self.y_init = value
         
     @staticmethod
-    def solver():
+    def solver(kwds):
     
         MSsolvers = []
         errors = {'energy': [], 'spl': []}
@@ -193,14 +194,14 @@ class MechSystem(System):
         
         for solver_class, dt, Omega2 in [(x, y, z) for x in MechSystem.registered_solver_classes for y in MechSystem.dt_space for z in Omega2_space]:
         
-            kwds = {'solver_class': solver_class, \
-                    'dt': dt, \
-                    'Omega2': Omega2, \
-                    'n': int(round(MechSystem.T_final/dt)),\
-                    'ham_': ham_, \
-                    'ham_z_': ham_z_, \
-                    'ham_zz_': ham_zz_, \
-                    }
+            kwds.update({'solver_class': solver_class, \
+                        'dt': dt, \
+                        'Omega2': Omega2, \
+                        'n': int(round(MechSystem.T_final/dt)),\
+                        # 'ham_': ham_, \
+                        # 'ham_z_': ham_z_, \
+                        # 'ham_zz_': ham_zz_, \
+                        })
             
             kwds.update({'t_points': linspace(0, MechSystem.T_final, kwds['n']+1)})
             
@@ -221,8 +222,9 @@ class MechSystem(System):
                 MSsolver.var_solve()
                 # errors['spl'].append(sqrt(dt)*LA.norm(MSsolver.sym_error))
                 
-            if (not hasattr(MechSystem, 'RB')) and False:
-                MSsolver.F2 = np.array([MSsolver.ham_z(*np.split(y, 2)) for y in MSsolver.info]).T
+            if not hasattr(MechSystem, 'RB'):
+                #TODO: try to do without list comprehension
+                MSsolver.F2 = np.array([MSsolver.ham_z(*np.split(y, 2)) for y in MSsolver.y])
                     
                 if MSsolver.non_quad:
                     MSsolver.F3 = np.array([MSsolver.non_quad_z(*np.split(y, 2)) for y in MSsolver.info]).T
@@ -401,54 +403,62 @@ class MechSystem(System):
         
             # Plot the measures
             MSsolver.plot()
+            
 
+#%%    "Find symbolic quantities"
 
-#%% symbolic computation
-"Find symbolic quantities"
 nosc = MechSystem.nosc
 x = smp.Matrix(smp.symbols('x0:{}'.format(nosc)))
 u = smp.Matrix(smp.symbols('u0:{}'.format(nosc)))
-Omega2 = smp.Matrix(smp.symbols('Om0:{}'.format(nosc)))
+omega2 = smp.Matrix(smp.symbols('omega^2_0:{}'.format(nosc)))
 beta = smp.symbols('beta')
 
 kin_expr = sum((u[i]**2)/2.0 for i in range(nosc))
 # kin = smp.lambdify((u,), kin_expr, modules='numpy')
 
-pot_expr = 1 -sum(smp.cos(Omega2[i]*x[i]) for i in range(nosc))
-# pot = smp.lambdify((x, Omega2), pot_expr)
+pot_expr = 1 -sum(smp.cos(omega2[i]*x[i]) for i in range(nosc))
+# pot = smp.lambdify((x, omega2), pot_expr)
 
 ham_expr = kin_expr + pot_expr +beta/2 * sum(x[i]*u[i] for i in range(nosc))
-ham_lam = smp.lambdify((x, u, Omega2, beta), ham_expr, "sympy")
-# print(ham_lam(x, u, Omega2, beta))
+ham_lam = smp.lambdify((x, u, omega2, beta), ham_expr, "sympy")
+# print(ham_lam(x, u, omega2, beta))
 
-ham_ = smp.lambdify((x, u, Omega2, beta), ham_expr)
-# self.ham = lambda x, u, Omega2=self.Omega2, beta=self.beta: ham_(x, u, Omega2, beta)
+ham_ = smp.lambdify((x, u, omega2, beta), ham_expr)
+# self.ham = lambda x, u, omega2=self.omega2, beta=self.beta: ham_(x, u, omega2, beta)
 # u_arr, v_arr, Om2_arr = np.random.rand(3,nosc)
 # print(ham(u_arr, v_arr, Om2_arr, 0.1))
 
-ham_z_expr = smp.Matrix([ham_lam(x, u, Omega2, beta)]).jacobian(list(x)+list(u)).T
-ham_z_lam = smp.lambdify((x, u, Omega2, beta), ham_z_expr, "sympy")
-# print(ham_z_lam(x, u, Omega2, beta))
+ham_z_expr = smp.Matrix([ham_lam(x, u, omega2, beta)]).jacobian(list(x)+list(u)).T
+ham_z_lam = smp.lambdify((x, u, omega2, beta), ham_z_expr, "sympy")
+# print(ham_z_lam(x, u, omega2, beta))
 
-ham_z_ = smp.lambdify((x, u, Omega2, beta), ham_z_expr)
-# self.ham_z = lambda x, u, Omega2=self.Omega2, beta=self.beta: ham_z_(x, u, Omega2, beta).squeeze()
+ham_z_ = smp.lambdify((x, u, omega2, beta), ham_z_expr)
+# self.ham_z = lambda x, u, omega2=self.omega2, beta=self.beta: ham_z_(x, u, omega2, beta).squeeze()
 # print(ham_z(u_arr, v_arr, Om2_arr, 0.1))
 
-ham_zz_expr = ham_z_lam(x, u, Omega2, beta).jacobian(list(x)+list(u))
-# ham_zz_lam = smp.lambdify((x, u, Omega2, beta), ham_zz_expr, "sympy")
-# print(ham_zz_lam(x, u, Omega2, beta))
+ham_zz_expr = ham_z_lam(x, u, omega2, beta).jacobian(list(x)+list(u))
+# ham_zz_lam = smp.lambdify((x, u, omega2, beta), ham_zz_expr, "sympy")
+# print(ham_zz_lam(x, u, omega2, beta))
 
-ham_zz_ = smp.lambdify((x, u, Omega2, beta), ham_zz_expr)
-# self.ham_zz = lambda x, u, Omega2=self.Omega2, beta=self.beta: ham_zz_(x, u, Omega2, beta).squeeze()
+ham_zz_ = smp.lambdify((x, u, omega2, beta), ham_zz_expr)
+# self.ham_zz = lambda x, u, omega2=self.omega2, beta=self.beta: ham_zz_(x, u, omega2, beta).squeeze()
 
 #%% Main driver
 if __name__ == '__main__':
     "Model order reduction of the MechSystem using MechSystem"
         
+#%%    "Full order solution"
+
     nosc = MechSystem.nosc
     
-    "Full order solution"
-    MSsolvers = MechSystem.solver()
+    # ham_, ham_z_, ham_zz_ = get_symbols(nosc)
+
+    kwds = {'ham_': ham_, \
+            'ham_z_': ham_z_, \
+            'ham_zz_': ham_zz_, \
+            }
+
+    MSsolvers = MechSystem.solver(kwds)
     
     if MSsolvers[-1].non_quad: # is not None
         assert MechSystem.Omega2_space_dim == 1
@@ -460,10 +470,12 @@ if __name__ == '__main__':
     
     time_lapsed = [reshape([x.time_lapsed for x in MSsolvers], array_shape)]
     
+#%% Reduced order solution"
     print('Assembling snapshots ...')
-    y_list = np.hstack([MSsolver.y[np.unique(np.random.randint(0,MSsolver.n,int(MSsolver.n/10)))].T for MSsolver in MSsolvers])
+    y_list = np.hstack([MSsolver.y[np.unique(np.random.randint(0,MSsolver.n,int(MSsolver.n)))].T for MSsolver in MSsolvers])
     print(y_list.shape)
-    # F2 = np.hstack([MSsolver.F2 for MSsolver in MSsolvers])
+    F2 = np.hstack([MSsolver.F2[np.unique(np.random.randint(0,MSsolver.n,int(MSsolver.n)))].T for MSsolver in MSsolvers])
+    print(F2.shape)
     
     X = {'Q': MSsolvers[-1].Q_spd(), \
          'sqrt': sp.linalg.sqrtm(MSsolvers[-1].Q_spd()), \
@@ -524,9 +536,9 @@ if __name__ == '__main__':
         s = c_[sv_pod_q, sv_pod_p].T
         
     elif MechSystem.reducer == 'psd':
-        RB, sv_sp = POD(c_[y_list[:nosc,:], y_list[nosc:,:]], X['eye_half'])
+        RB, sv_sp = POD(c_[y_list[:nosc,:], y_list[nosc:,:], F2[:nosc, :], F2[nosc:,:]], X['eye_half'])
     
-        nosc_r = argmin(abs(np.asarray([norm(sv_sp[:i]**2)/norm(sv_sp**2) for i in range(len(sv_sp))]) -1 +1e-12))
+        nosc_r = argmin(abs(np.asarray([norm(sv_sp[:i]**2)/norm(sv_sp**2) for i in range(len(sv_sp))]) -1 +MechSystem.tol))
         if nosc_r %  2 == 1:
             nosc_r = nosc_r + 1  # ensure nosc_r is even
     
@@ -548,7 +560,7 @@ if __name__ == '__main__':
     M = W_r.T @ RB
     assert np.allclose(M, X['eye_r'])
             
-    del y_list
+    del y_list, F2
     gc.collect()
     
     MechSystem.RB = RB
@@ -556,7 +568,7 @@ if __name__ == '__main__':
     MechSystem.nosc_r = nosc_r
         
     print('solving reduced system ...')
-    MSsolvers_r = MechSystem.solver()
+    MSsolvers_r = MechSystem.solver(kwds)
          
     if len(MSsolvers) == len(MSsolvers_r):
         print('solution errors')
@@ -567,40 +579,55 @@ if __name__ == '__main__':
     else:
         time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
                                     time_lapsed[0].shape[:2]))
-    
-    print('time lapsed')    
-    print(time_lapsed)
 
-    # Hyper-reduced model
-    '''
-    if MSsolvers[-1].non_quad:
-        F3 = np.hstack([MSsolver.F3 for MSsolver in MSsolvers])
-        noise = np.random.normal(0, 0, F3.shape)
-        U, s = POD(X['sqrt'] @(F3+noise), X['eye'])
-        U_ = LA.solve(X['sqrt'], U)
-        U = U_[:, :2*nosc_r]
-        assert np.allclose(U.T @ X['Q'] @ U, X['eye_r'])
-    else:
-        noise = np.random.normal(0, 0, F2.shape)
-        U_, s = POD(F2+noise, X['eye'])
-        U = U_[:, :2*nosc_r]
+#%% Hyper-reduced model
+
+    # if MSsolvers[-1].non_quad:
+    #     F3 = np.hstack([MSsolver.F3 for MSsolver in MSsolvers])
+    #     noise = np.random.normal(0, 0, F3.shape)
+    #     U, s = POD(X['sqrt'] @(F3+noise), X['eye'])
+    #     U_ = LA.solve(X['sqrt'], U)
+    #     U = U_[:, :2*nosc_r]
+    #     assert np.allclose(U.T @ X['Q'] @ U, X['eye_r'])
+    # else:
+    #     noise = np.random.normal(0, 0, F2.shape)
+    #     U_, s = POD(F2+noise, X['eye'])
+    #     U = U_[:, :2*nosc_r]
         
-    ax.semilogy(s)
+    # ax.semilogy(s)
         
-    P, _ = DEIM(U, plot_deim=False)
+    P, _ = DEIM(RB, plot_deim=False)
     
     # P = P[:, :2*nosc_r]
     
-    kwds.update({'U': U,\
-                'P': P})
-    
-    # POD-DEIM reduced model
-    MSsolvers_dr = solver(kwds)
+    MechSystem.U = RB
+    MechSystem.P = P
         
-    print(np.amax(abs(MSsolvers[-1].y -MSsolvers_dr[-1].y)))
+    # ham_, ham_z_, ham_zz_ = get_symbols(MechSystem.nosc)
     
-    time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_dr],\
-                               time_lapsed[0].shape)/time_lapsed[0]*100)
+    Pxham_z_ = smp.lambdify((x, u, omega2, beta), P.T @ ham_z_expr)
+    Pxham_zz_ = smp.lambdify((x, u, omega2, beta), P.T @ ham_zz_expr @ P)
+
+    kwds = {'ham_': ham_, \
+            'ham_z_': Pxham_z_, \
+            'ham_zz_': Pxham_zz_, \
+            }
+        
+    print('solving hyper-reduced system ...')
+    MSsolvers_dr = MechSystem.solver(kwds)
+         
+    if len(MSsolvers) == len(MSsolvers_dr):
+        print('solution errors')
+        print(reshape([np.amax(abs(MSsolvers[i].y -MSsolvers_dr[i].y)) for i in range(len(MSsolvers))], array_shape))
+    
+        time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_dr],\
+                                    time_lapsed[0].shape)/time_lapsed[0]*100)
+    else:
+        time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_dr],\
+                                    time_lapsed[0].shape[:2]))
+    
+    print('time lapsed')    
+    print(time_lapsed)
     
     # tex_table('', time_lapsed)
     '''
@@ -616,3 +643,10 @@ if __name__ == '__main__':
     # Next steps:
         # Implement structure-preserving hyper-reduction
         
+    # In case of nonlinear solver non-convergence, try the following:
+        # reduce dt
+        # reduce Omega2_space
+        # Increase solution vectors into the snapshot matrix
+        # Create a separate basis for each reproduction experiment involving
+        # only solutions from that paramter space.
+    '''

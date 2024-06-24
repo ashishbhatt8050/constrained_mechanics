@@ -13,12 +13,11 @@ and bases from podDEIM.
 
 import numpy as np
 import sympy as smp
-import scipy as sp
 from numpy import linalg as LA
-from pylab import  log, r_, c_, zeros, eye, sqrt, reshape, linspace, roll, figure, argmin, norm, zeros_like
+from pylab import  log, r_, c_, zeros, eye, sqrt, reshape, linspace, roll, figure, zeros_like
 import ODESolver
 from System import System
-from podDEIM import orthogonalize, POD, DEIM
+from podDEIM import POD, DEIM
 from PlotScript import plot_data, tex_table, logplot, save_figure, timing
 import gc
 from datetime import datetime
@@ -49,18 +48,19 @@ class MechSystem(System):
         
     # These two properties only have effect during reduction
     reducer = 'psd'
-    predict = False # False = reproduce
+    predict = True # False = reproduce
+    hyperreducer = 'MDEIM'
     
     registered_solver_classes = [ODESolver.ConformalImplicitMidpoint, ODESolver.ConformalStormerVerlet]
-    dt_space_dim = 5
-    Omega2_space_dim = 1
-    beta = (max(1e-2, 0*np.random.rand()/10))*0
+    dt_space_dim = 3
+    Omega2_space_dim = 3
+    beta = (max(1e-2, 0*np.random.rand()/10))*1
     JJ = lambda self, d=nosc: r_[c_[zeros((d,d)), eye(d)], c_[-eye(d), zeros((d,d))]]
     
     Omega2_space = np.sort(2*(1 -np.random.rand(Omega2_space_dim, nosc)))
         
     dt_space = linspace(0.01, 0.05, num=dt_space_dim)
-    T_final = 2
+    T_final = 5
     
     osc_idx = np.array([0, 1, 2, nosc//2-1, nosc//2, nosc//2+1, nosc-3, nosc-2, nosc-1])
     keep_time = datetime.now().strftime('%Y-%m-%d_%H-%M_')
@@ -68,8 +68,9 @@ class MechSystem(System):
     "Initial conditions"
     y_init = r_[np.linspace(1,5,nosc), np.zeros(nosc)]
     
-    "Initial condition"
-    constraint_type = None #'spherical'
+    "Constraints"
+    constraint_type = 'spherical'
+    constraints_reduce = True # Reduce constraint jacobian g_prime
     
     alpha = list(np.linspace(0.1,0.5,num=nosc))
     alpha /= sqrt(sum(np.array(alpha)**2))
@@ -85,24 +86,6 @@ class MechSystem(System):
         pass
     else:
         raise NameError
-
-    "Constraints"    
-    if constraint_type == 'linear':
-        g = lambda self, y, alpha=alpha: r_[y[:, :nosc].dot(alpha), y[:, nosc:].dot(alpha)]
-        g_prime = lambda self, y, alpha=alpha: r_[c_[np.array(alpha, ndmin=2), zeros((1,nosc))],\
-                                                    c_[zeros((1,nosc)), np.array(alpha, ndmin=2)]]
-        raise NotImplementedError
-        
-    elif constraint_type == 'spherical':
-        Alpha = np.diag(alpha)
-        A_mat = r_[c_[Alpha, np.zeros_like(Alpha)], c_[np.zeros_like(Alpha), np.zeros_like(Alpha)]]
-        B_mat = r_[c_[np.zeros_like(Alpha), Alpha], c_[Alpha, np.zeros_like(Alpha)]]
-            
-        g = lambda self, y, alpha=[A_mat, B_mat]: r_[y @ alpha[0] @ y.T -1.0,\
-                                                      y @ alpha[1] @ y.T]
-        g_prime = lambda self, y, alpha=[A_mat, B_mat]: c_[2*y @alpha[0],\
-                                                            2*y @alpha[1]].T
-    
     
     drag = lambda self, x, u: beta/2 * r_[x, u]
     drag_z = lambda self, x, u: beta/2 * eye(2*x.shape[0])
@@ -113,39 +96,44 @@ class MechSystem(System):
         System.__init__(self, kwds)
         
         "Projection matrices"
-        if hasattr(self, 'W_r'):
-            self.y_init = self.W_r.T @ self.y_init
+        if hasattr(self, 'RB'):
+            self.y_init = self.RB.T @ self.y_init
             
             if self.reducer == 'pod':
-                self.JJ_r = self.W_r.T @ self.JJ() @ self.W_r
+                self.JJ_r = self.RB.T @ self.JJ() @ self.RB
             elif self.reducer == 'psd':
                 self.JJ_r = self.JJ(self.nosc_r)
+                
+            if self.hyperreducer == 'MDEIM':
+                self.JJ_rxRB = self.JJ_r @ self.RB.T
         else:
-            self.W_r = None
             self.RB = None
             
         "hyper-reduction"
         if hasattr(self, 'P'):
-            # self.RBxU = self.RB.T @ self.U
-            # self.UxRB = self.RBxU.T
-            # self.UxP = self.PxU.T
-            # self.PxP = self.P.T @ self.P
-            
-            self.PxU = self.P.T @ self.U
+                            
+            _PxU_inv = LA.inv(self.P.T @ self.U)
             
             if self.P.shape == self.U.shape: #POD-DEIM
-                sys_solve = LA.solve
+                _sys_solve = LA.solve
             else: #Gappy-POD
-                sys_solve = lambda A, b: LA.lstsq(A, b, rcond=None)[0]
+                _sys_solve = lambda A, b: LA.lstsq(A, b, rcond=None)[0]
                 
-            self.hat = lambda foRBxy: sys_solve(self.PxU, foRBxy)
-            self.hhat = lambda ffoRBxy: self.hat(self.hat(ffoRBxy.T).T)
+            self.hat = lambda foRBxy: _PxU_inv @ foRBxy #_sys_solve(_PxU, foRBxy)
             
-            # self.PxIPxRB = lambda y: self.PxP @ sys_solve(self.UxP, self.UxRB @ y)
-            # self.PxIPxRBxI = self.PxP @ sys_solve(self.UxP, self.UxRB)
-            # self.PxIPxRBxP = lambda y: self.PxP @ sys_solve(self.UxP, self.UxRB @ y) @self.P.T
-            # self.IPxV = lambda y: self.U @ sys_solve(self.PxU, self.PxU @ y)
-            # self.IPt = lambda y: self.P @ sys_solve(self.UxP, self.U.T @y)
+            if MechSystem.hyperreducer == 'MDEIM':    
+                
+                _IPxUjxPjxUj_inv = self.IP.T @ self.Uj @ LA.inv(self.Pj.T @ self.Uj)
+                                    
+                self.hat_jac = lambda PjxIPxJac: np.reshape(_IPxUjxPjxUj_inv @ PjxIPxJac, (2*nosc, 2*nosc))
+                
+                # self.hat_jac = lambda jac: np.sum( [self.theta(jac)[i] * self.Jn[i] for i in range(self.mj)], axis=0 )
+                        
+            if self.constraints_reduce:
+                    
+                self.g_prime = lambda y : c_[self.hat_gp0(y),\
+                                             self.hat_gp1(y)].T
+                
         else:
             self.P = None
             self.U = None
@@ -223,11 +211,7 @@ class MechSystem(System):
                 # errors['spl'].append(sqrt(dt)*LA.norm(MSsolver.sym_error))
                 
             if not hasattr(MechSystem, 'RB'):
-                #TODO: try to do without list comprehension
                 MSsolver.F2 = np.array([MSsolver.ham_z(*np.split(y, 2)) for y in MSsolver.y])
-                    
-                if MSsolver.non_quad:
-                    MSsolver.F3 = np.array([MSsolver.non_quad_z(*np.split(y, 2)) for y in MSsolver.info]).T
                 
             MSsolvers.append(MSsolver)
             
@@ -405,7 +389,7 @@ class MechSystem(System):
             MSsolver.plot()
             
 
-#%%    "Find symbolic quantities"
+#%% Find symbolic quantities
 
 nosc = MechSystem.nosc
 x = smp.Matrix(smp.symbols('x0:{}'.format(nosc)))
@@ -443,12 +427,32 @@ ham_zz_expr = ham_z_lam(x, u, omega2, beta).jacobian(list(x)+list(u))
 ham_zz_ = smp.lambdify((x, u, omega2, beta), ham_zz_expr)
 # self.ham_zz = lambda x, u, omega2=self.omega2, beta=self.beta: ham_zz_(x, u, omega2, beta).squeeze()
 
+#%%
+if MechSystem.constraint_type is not None:
+    alpha = smp.Matrix(MechSystem.alpha)
+    y = smp.Matrix(smp.symbols('y:{}'.format(2*nosc)))
+    
+    A_mat = smp.zeros(2*nosc, 2*nosc)
+    A_mat[:nosc, :nosc] = smp.diag(*alpha)
+    B_mat = smp.zeros(2*nosc, 2*nosc)
+    B_mat[:nosc, nosc:] = smp.diag(*alpha)
+    B_mat[nosc:, :nosc] = smp.diag(*alpha)
+    
+    g_expr = smp.Matrix([y.T * A_mat * y - smp.Matrix([1]), y.T * B_mat * y])
+    g_prime_expr = g_expr.jacobian(y)
+    _g_lam = smp.lambdify((y,), g_expr)
+    _g_prime_lam = smp.lambdify((y,), g_prime_expr)
+    
+    g_lam = lambda x: _g_lam(x).squeeze()
+    g_prime_lam = lambda x: _g_prime_lam(x)
+    
+    # del A_mat, B_mat, alpha, y, g, g_prime
+
 #%% Main driver
 if __name__ == '__main__':
     "Model order reduction of the MechSystem using MechSystem"
         
-#%%    "Full order solution"
-
+#%% Full order solution
     nosc = MechSystem.nosc
     
     # ham_, ham_z_, ham_zz_ = get_symbols(nosc)
@@ -456,6 +460,8 @@ if __name__ == '__main__':
     kwds = {'ham_': ham_, \
             'ham_z_': ham_z_, \
             'ham_zz_': ham_zz_, \
+            'g': g_lam, \
+            'g_prime': g_prime_lam, \
             }
 
     MSsolvers = MechSystem.solver(kwds)
@@ -470,101 +476,49 @@ if __name__ == '__main__':
     
     time_lapsed = [reshape([x.time_lapsed for x in MSsolvers], array_shape)]
     
-#%% Reduced order solution"
+#%% Reduced order solution
     print('Assembling snapshots ...')
     y_list = np.hstack([MSsolver.y[np.unique(np.random.randint(0,MSsolver.n,int(MSsolver.n)))].T for MSsolver in MSsolvers])
     print(y_list.shape)
     F2 = np.hstack([MSsolver.F2[np.unique(np.random.randint(0,MSsolver.n,int(MSsolver.n)))].T for MSsolver in MSsolvers])
     print(F2.shape)
     
-    X = {'Q': MSsolvers[-1].Q_spd(), \
-         'sqrt': sp.linalg.sqrtm(MSsolvers[-1].Q_spd()), \
+    X = {'Q_half': MSsolvers[-1].Q_spd()[:nosc, :nosc], \
+         # 'sqrt': sp.linalg.sqrtm(MSsolvers[-1].Q_spd()), \
          'eye': np.eye(2*nosc), \
          'eye_half': np.eye(nosc)}
-        
-    if MSsolvers[-1].non_quad:
-        np.linalg.cholesky(X['Q'])
-        RB, s = POD(X['sqrt'] @ y_list, X['eye'])
-        RB = LA.solve(X['sqrt'], RB)
     
-        nosc_r = argmin(abs(np.asarray([norm(s[:i])/norm(s) for i in range(len(s))]) -0.99))
-        if nosc_r % 20 == 1:
-            nosc_r = nosc_r + 1  # ensure nosc_r is even
-            
-        X.update({'eye_r': np.eye(2*nosc_r)})
-            
-        print('nosc_r = %s' %nosc_r)
-        
-        RB = RB[:, :2*nosc_r]
+    if MechSystem.reducer == 'pod':
+        RBq, sv_pod_q, nosc_q = POD(c_[y_list[:nosc,:], F2[:nosc,:]], X['eye_half'], MechSystem.tol)
+        RBp, sv_pod_p, nosc_p = POD(c_[y_list[nosc:,:], F2[nosc:,:]], X['eye_half'], MechSystem.tol)
     
-        # Orthogonalize RB wrt Q_spd
-        # U = sp.linalg.cholesky(RB.T @ X['Q'] @ RB) # upper triangular Cholesky factor
-        # RB = RB @ sp.linalg.solve(U, X['eye_r'])
-        assert np.allclose(RB.T @ X['Q'] @ RB, X['eye_r'])
-        
-        W_r_, s = POD(F2, X['eye'])
-        # W_r_ = LA.solve(X['sqrt'], W_r_)
-        W_r_ = W_r_[:, :2*nosc_r]
-        # W_r = RB
-        
-        # Orthognalize W_r_ wrt RB
-        W_r = orthogonalize(W_r_, RB, X['eye'])
-        assert (W_r.shape == RB.shape)
-    
-    elif MechSystem.reducer == 'pod':
-        RBq, sv_pod_q = POD(c_[y_list[:nosc,:], F2[:nosc,:]], X['eye_half'])
-        RBp, sv_pod_p = POD(c_[y_list[nosc:,:], F2[nosc:,:]], X['eye_half'])
-    
-        nosc_r = max(\
-                     argmin(abs(np.asarray([norm(sv_pod_q[:i])/norm(sv_pod_q) for i in range(len(sv_pod_q))]) -0.99)),\
-                     argmin(abs(np.asarray([norm(sv_pod_p[:i])/norm(sv_pod_p) for i in range(len(sv_pod_p))]) -0.99)),\
-                    )
-            
-        if nosc_r <  20:
-            nosc_r = 40  # ensure nosc_r is even
-    
-        X.update({'eye_r': np.eye(2*nosc_r)})
-            
-        print('nosc_r = %s' %nosc_r)
+        nosc_r = max(nosc_q, nosc_p)
         
         RBq = RBq[:, :nosc_r]
         RBp = RBp[:, :nosc_r]
         RB = r_[c_[RBq, zeros_like(RBq)],\
                 c_[zeros_like(RBp), RBp]]
-        W_r = RB
         
-        s = c_[sv_pod_q, sv_pod_p].T
+        sv = c_[sv_pod_q, sv_pod_p].T
         
     elif MechSystem.reducer == 'psd':
-        RB, sv_sp = POD(c_[y_list[:nosc,:], y_list[nosc:,:], F2[:nosc, :], F2[nosc:,:]], X['eye_half'])
-    
-        nosc_r = argmin(abs(np.asarray([norm(sv_sp[:i]**2)/norm(sv_sp**2) for i in range(len(sv_sp))]) -1 +MechSystem.tol))
-        if nosc_r %  2 == 1:
-            nosc_r = nosc_r + 1  # ensure nosc_r is even
-    
-        X.update({'eye_r': np.eye(2*nosc_r)})
-            
-        print('2*nosc_r = %s' %(2*nosc_r))
+        RB, sv, nosc_r = POD(c_[y_list[:nosc,:], y_list[nosc:,:], F2[:nosc, :], F2[nosc:,:]], X['eye_half'], MechSystem.tol)
         
         RB = RB[:, :nosc_r]
         RB = r_[c_[RB, zeros_like(RB)],\
                 c_[zeros_like(RB), RB]]
-        W_r = RB
+                    
+    print('2*nosc_r = %s' %(2*nosc_r))
         
-    fig, ax = logplot(sv_sp, xlabel='index of singular values', xlims=(0, len(sv_sp)))
+    fig, ax = logplot(sv, xlabel='index of singular values', xlims=(0, len(sv)))
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
     filename = MechSystem.keep_time +'osc_sv' + '.pdf'
     # save_figure(fig, filename)
-    
-    # assert that W_r and RB are orthogonal
-    M = W_r.T @ RB
-    assert np.allclose(M, X['eye_r'])
             
     del y_list, F2
     gc.collect()
     
     MechSystem.RB = RB
-    MechSystem.W_r = W_r
     MechSystem.nosc_r = nosc_r
         
     print('solving reduced system ...')
@@ -579,40 +533,104 @@ if __name__ == '__main__':
     else:
         time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
                                     time_lapsed[0].shape[:2]))
+            
 
 #%% Hyper-reduced model
-
-    # if MSsolvers[-1].non_quad:
-    #     F3 = np.hstack([MSsolver.F3 for MSsolver in MSsolvers])
-    #     noise = np.random.normal(0, 0, F3.shape)
-    #     U, s = POD(X['sqrt'] @(F3+noise), X['eye'])
-    #     U_ = LA.solve(X['sqrt'], U)
-    #     U = U_[:, :2*nosc_r]
-    #     assert np.allclose(U.T @ X['Q'] @ U, X['eye_r'])
-    # else:
-    #     noise = np.random.normal(0, 0, F2.shape)
-    #     U_, s = POD(F2+noise, X['eye'])
-    #     U = U_[:, :2*nosc_r]
-        
-    # ax.semilogy(s)
         
     P, _ = DEIM(RB, plot_deim=False)
     
-    # P = P[:, :2*nosc_r]
-    
     MechSystem.U = RB
     MechSystem.P = P
-        
-    # ham_, ham_z_, ham_zz_ = get_symbols(MechSystem.nosc)
-    
+
     Pxham_z_ = smp.lambdify((x, u, omega2, beta), P.T @ ham_z_expr)
-    Pxham_zz_ = smp.lambdify((x, u, omega2, beta), P.T @ ham_zz_expr @ P)
+    Pxham_zz_ = smp.lambdify((x, u, omega2, beta), P.T @ ham_zz_expr)
 
     kwds = {'ham_': ham_, \
             'ham_z_': Pxham_z_, \
             'ham_zz_': Pxham_zz_, \
+            'g': g_lam, \
+            'g_prime': g_prime_lam, \
             }
+            
+    if MechSystem.hyperreducer == 'MDEIM':
+        non_zero_indices = np.nonzero(MSsolvers[0].ham_zz(*np.split(MSsolvers[0].y[0], 2)).flatten())[0]
         
+        IP = np.zeros((len(non_zero_indices), (2*nosc)**2))
+        
+        for i, val in enumerate(non_zero_indices):
+            IP[i, val] = 1
+        
+        F3 = [np.array([IP @ MSsolver.ham_zz(*np.split(y, 2)).flatten() for y in MSsolver.y]) for MSsolver in MSsolvers]
+        
+        F3 = np.hstack([F3[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)))].T for i in range(len(MSsolvers))])
+        print(F3.shape)
+        
+        Uj, sv, mj = POD(F3, np.eye(F3.shape[0]), MechSystem.tol)
+        del F3
+        # _J = [Uj[:,i].reshape(2*nosc, -1) for i in range(mj)]
+        # Jn = [RB.T @ _J[i] @ RB for i in range(mj)]
+            
+        fig, ax = logplot(sv, xlabel='index of singular values', xlims=(0, len(sv)))
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        filename = MechSystem.keep_time +'osc_mdeim_sv' + '.pdf'
+        # save_figure(fig, filename)
+        
+        Pj, _ = DEIM(Uj, plot_deim=False)
+        # Sj = Pj.T @ RB
+        
+        ham_zz_col = Pj.T @ IP @ ham_zz_expr.reshape((2*nosc)**2, 1)
+        
+        Pxham_zz_ = smp.lambdify((x, u, omega2, beta), ham_zz_col)
+        
+        kwds.update({'ham_zz_': Pxham_zz_, \
+                    'Uj': Uj, \
+                    'Pj': Pj, \
+                    'IP': IP, \
+                    })
+                    
+    if MechSystem.constraints_reduce:
+        
+        F4_0 = [np.array([MSsolver.g_prime(y)[0] for y in MSsolver.y]) for MSsolver in MSsolvers]
+        F4_1 = [np.array([MSsolver.g_prime(y)[1] for y in MSsolver.y]) for MSsolver in MSsolvers]
+        
+        F4_0 = np.hstack([F4_0[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)))].T for i in range(len(MSsolvers))])
+        print(F4_0.shape)
+        
+        Ugp0, sv_gp0, mgp0 = POD(F4_0, np.eye(F4_0.shape[0]), MechSystem.tol)
+        del F4_0
+            
+        fig, ax = logplot(sv_gp0, xlabel='index of singular values', xlims=(0, len(sv_gp0)))
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        filename = MechSystem.keep_time +'osc_mdeim_sv' + '.pdf'
+        # save_figure(fig, filename)
+        
+        Pgp0, _ = DEIM(Ugp0, plot_deim=False)
+        Pgp0xgp0 = smp.lambdify((y,), Pgp0.T @ g_prime_expr[0,:].T)
+        # Sj = Pj.T @ RB
+        
+        F4_1= np.hstack([F4_1[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)))].T for i in range(len(MSsolvers))])
+        print(F4_1.shape)
+        
+        Ugp1, sv_gp1, mgp1 = POD(F4_1, np.eye(F4_1.shape[0]), MechSystem.tol)
+        del F4_1
+            
+        fig, ax = logplot(sv_gp1, xlabel='index of singular values', xlims=(0, len(sv_gp1)))
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        filename = MechSystem.keep_time +'osc_mdeim_sv' + '.pdf'
+        # save_figure(fig, filename)
+        
+        Pgp1, _ = DEIM(Ugp1, plot_deim=False)
+        Pgp1xgp1 = smp.lambdify((y,), Pgp1.T @ g_prime_expr[1,:].T)
+        # Sj = Pj.T @ RB
+            
+        _UxPxU_inv_gp0 = Ugp0 @ LA.inv(Pgp0.T @ Ugp0)
+            
+        _UxPxU_inv_gp1 = Ugp1 @ LA.inv(Pgp1.T @ Ugp1)
+        
+        kwds.update({'hat_gp0': lambda y: _UxPxU_inv_gp0 @ Pgp0xgp0(y), \
+                     'hat_gp1': lambda y: _UxPxU_inv_gp1 @ Pgp1xgp1(y), \
+                    })        
+                
     print('solving hyper-reduced system ...')
     MSsolvers_dr = MechSystem.solver(kwds)
          
@@ -631,22 +649,18 @@ if __name__ == '__main__':
     
     # tex_table('', time_lapsed)
     '''
-
-    # What works:
-        # Results are sensitive to parameters
-        # Reduced model works perfectly: efficient and accurate
-        # Hyper-reduced model is efficient and accurate only for the non-conservative case.
-        # Structure-preserving hyper-reduced model: the solution either doesn't converge or is highly inaccurate
-        # and inefficient when it converges but the symplectic error is zero.
-        # Symplectic error is the same for methods of different orders.
+    
+    Observations:
+        - hyperreduced model is efficient
+            - and symplecitc with sparse MDEIM
+            - and not demonstrable symplectic with DEIM
+            - order of numerical methods is not verified.
+        - The Jacobian calculation in the hyperreduced model
+            - is also reduced with DEIM
+        - Weighted psd basis gives wrong eigenvalues of the snapshot matrix
+            - sort eigenvalues in increasing order
+            - multiply Chi by Xh_half
         
     # Next steps:
-        # Implement structure-preserving hyper-reduction
-        
-    # In case of nonlinear solver non-convergence, try the following:
-        # reduce dt
-        # reduce Omega2_space
-        # Increase solution vectors into the snapshot matrix
-        # Create a separate basis for each reproduction experiment involving
-        # only solutions from that paramter space.
+        # Implement elastic beam deformation
     '''

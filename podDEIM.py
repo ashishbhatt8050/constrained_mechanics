@@ -35,34 +35,40 @@ def rb_svd(y):
     return u, s, vh
 
 def POD(S, Xh, eps=None):
-    
-    if np.allclose(Xh, np.eye(Xh.shape[0])):
-        Chi, Sigma, _ = rb_svd(S)
-        Sigma2 = Sigma**2
-    else:
-        Nh, ns = S.shape
-        if ns <= Nh:
-            C_ = S.T @ Xh @ S
-            Sigma2_, Psi = np.linalg.eigh(C_)
-            # Sigma2, Psi = np.flip(Sigma2), np.flip(Psi, axis=1)
-            Sigma2, Psi = Sigma2_[Sigma2_>0], Psi.T[Sigma2_>0].T
-            Chi = S @ Psi/np.sqrt(Sigma2)
-        else:
-            Xh_half = sp.linalg.sqrtm(Xh)
-            K_ = Xh_half @ S @ S.T @ Xh_half
-            Sigma2_, Chi_ = np.linalg.eigh(K_)
-            # Sigma2, Chi_ = np.flip(Sigma2), np.flip(Chi_, axis=1)
-            Sigma2, Chi_ = Sigma2_[Sigma2_>0], Chi_.T[Sigma2_>0].T
-            Chi = np.linalg.solve(Xh_half, Chi_)
         
-        assert np.allclose(Chi.T @ Xh @ Chi, np.eye(Chi.shape[1]))
+    Nh, ns = S.shape
+    Xh_half = sp.linalg.sqrtm(Xh) if np.allclose(Xh, np.eye(Xh.shape[0])) else np.eye(Xh.shape[0])
+    
+    if ns <= Nh:
+        C_ = S.T @ Xh @ S
+        Sigma2, Psi = np.linalg.eigh(C_)
+        Sigma2, Psi = np.flip(Sigma2), np.flip(Psi, axis=1)
+        Sigma2, Psi = Sigma2[Sigma2>0], Psi.T[Sigma2>0].T
+        
+        assert np.allclose(C_ @ Psi, Sigma2 * Psi)
+        
+        Chi = S @ Psi/np.sqrt(Sigma2)
+    else:
+        K_ = Xh_half @ S @ S.T @ Xh_half
+        Sigma2, Chi_ = np.linalg.eigh(K_)
+        Sigma2, Chi_ = np.flip(Sigma2), np.flip(Chi_, axis=1)
+        Sigma2, Chi_ = Sigma2[Sigma2>0], Chi_.T[Sigma2>0].T
+        
+        assert np.allclose(K_ @ Chi_, Sigma2 * Chi_)
+        
+        Chi = np.linalg.solve(Xh_half, Chi_)
+        
+    assert np.allclose(Chi.T @ Xh @ Chi, np.eye(Chi.shape[1]))
+    # Chi = Xh_half @ Chi
         
     if eps is not None:
-        N = np.argmin([sum(Sigma2[:i])/sum(Sigma2) -1 +eps for i in range(Sigma2.size)])
+        N = pl.argmin(abs(np.asarray([pl.norm(Sigma2[:i])/pl.norm(Sigma2) for i in range(len(Sigma2))]) -1 +eps))
+        if N %  2 == 1:
+            N = N + 1  # ensure N is even
     else:
         N = Sigma2.size
         
-    return Chi[:, :N], np.sqrt(Sigma2)
+    return Chi[:, :N], np.sqrt(Sigma2), N
 # %%
 
 

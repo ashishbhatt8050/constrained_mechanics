@@ -20,10 +20,10 @@ class System(object):
         self.__dict__.update(kwds)
 
         "MechSystem constituents"
-        
+        # TODO: Pre-squeeze ham_z_ before initializing this object
         self.ham = lambda x, u, Omega2=self.Omega2, beta=self.beta: self.ham_(x, u, Omega2, beta)
-        self.ham_z = lambda x, u, Omega2=self.Omega2, beta=self.beta: self.ham_z_(x, u, Omega2, beta).squeeze()
-        self.ham_zz = lambda x, u, Omega2=self.Omega2, beta=self.beta: self.ham_zz_(x, u, Omega2, beta).squeeze()
+        self.ham_z = lambda x, u, Omega2=self.Omega2, beta=self.beta: self.ham_z_(x, u, Omega2, beta)
+        self.ham_zz = lambda x, u, Omega2=self.Omega2, beta=self.beta: self.ham_zz_(x, u, Omega2, beta)
                                                 
         self.Q_spd = lambda Omega2=self.Omega2: self.ham_zz(0*Omega2, 0*Omega2, Omega2, 0)
         self.non_quad = lambda x, u, Omega2=self.Omega2: self.ham(x,u, Omega2) -1/2 *c_[x, u] @ self.Q_spd() @ c_[x, u].T

@@ -103,9 +103,7 @@ def DEIM(Ub, plot_deim=False):
 
     return P, idx_list
 
-# %%
-
-
+#%%
 def orthogonalize(W, V, X=None):
     """Orthogonalize W with respect to V such that V.T @ W = I
 

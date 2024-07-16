@@ -63,12 +63,11 @@ class MechSystem(System):
     dt_space = linspace(0.01, 0.05, num=dt_space_dim)
     T_final = 5
     
-    osc_idx = np.array([3*0, 3*5, 3*8])
+    
     keep_time = datetime.now().strftime('%Y-%m-%d_%H-%M_')
     
     "Initial conditions satisfying the constraints"
     positions = np.zeros((nosc//3, 3), dtype=int)
-    momenta = np.zeros((nosc, 1), dtype=int)
 
     for i in range(nosc//3):
         positions[i, 0] = i % 2
@@ -76,15 +75,15 @@ class MechSystem(System):
         positions[i, 2] = 0
         
     positions = positions.flatten().reshape(-1, 1)
-
-    for i in range(nosc):
-        if positions[i] == 0:
-            momenta[i] = (-1) ** i
-            
-    assert np.allclose(positions * momenta, 0), 'position and momenta are not orthogonal'
+    
+    momenta = np.zeros((nosc//3, 3))
+    momenta[::2] = np.random.uniform(-0.1, 0.1, momenta[::2].shape)
+    momenta[1::2] = momenta[::2]
+    assert np.allclose(momenta[1::2] - momenta[::2], 0), 'position and momenta are not orthogonal'
+    momenta = momenta.flatten().reshape(-1, 1)
     
     constraint_type = 'spherical'
-    constraints_reduce = False # True: Reduce constraint jacobian g_prime
+    constraints_reduce = True # True: Reduce constraint jacobian g_prime
     
     y_init = r_[positions, momenta].flatten()
     
@@ -105,31 +104,12 @@ class MechSystem(System):
             elif self.reducer == 'psd':
                 self.JJ_r = self.JJ(self.nosc_r)
                 
-            if self.hyperreducer == 'MDEIM':
-                self.JJ_rxRB = self.JJ_r @ self.RB.T
+            # if self.hyperreducer == 'MDEIM':
+            #     self.JJ_rxRB = self.JJ_r @ self.RB.T
         else:
             self.RB = None
-            
-        "hyper-reduction"
-        if hasattr(self, 'P'):
-                            
-            _PxU_inv = LA.inv(self.P.T @ self.U)
                 
-            self.hat = lambda foRBxy: _PxU_inv @ foRBxy #_sys_solve(_PxU, foRBxy)
-            
-            if MechSystem.hyperreducer == 'MDEIM':    
-                
-                #TODO: move down to main cell
-                _IPxUjxPjxUj_inv = self.IP.T @ self.Uj @ LA.inv(self.Pj.T @ self.Uj)
-                                    
-                self.hat_jac = lambda PjxIPxJac: np.reshape(_IPxUjxPjxUj_inv @ PjxIPxJac, (2*nosc, 2*nosc))
-                        
-            # if self.constraints_reduce:
-                    
-            #     self.g_prime = lambda y : c_[self.hat_gp0(y),\
-            #                                  self.hat_gp1(y)].T
-                
-        else:
+        if not hasattr(self, 'P'):
             self.P = None
             self.U = None
         
@@ -202,9 +182,6 @@ class MechSystem(System):
                 MSsolver.var_solve()
                 # errors['spl'].append(sqrt(dt)*LA.norm(MSsolver.sym_error))
                 
-            if not hasattr(MechSystem, 'RB'):
-                MSsolver.F2 = np.array([MSsolver.ham_z(*np.split(y, 2)) for y in MSsolver.y])
-                
             MSsolvers.append(MSsolver)
             
         MechSystem.measures(MSsolvers, errors)
@@ -215,20 +192,20 @@ class MechSystem(System):
     @timing
     def solve(self):
         
-        self.g_arr = np.zeros((self.n+1, self.g(np.zeros(2*self.nosc)).shape[0]))
-        
         if self.RB is None:
             self.y = np.zeros((self.n+1, 2*self.nosc))
         else:
             self.y = np.zeros((self.n+1, 2*self.nosc_r))
+            self.y_full = np.zeros((self.n+1, 2*self.nosc))
+            
+            y_ = np.array([self.y_init, self.y_init]) @ self.RB.T
             
             if self.constraint_type:
-                X_U = np.array([self.y_init, self.y_init])
-                if self.P is not None:
-                    pass
-                X_U, _, self.g_arr[0] = fixed_point(self.g, X_U @ self.RB.T, self.g_prime, self.tol, self.M, False)
-                self.y_init = self.RB.T @X_U[1]
+                fixed_point(self.g, y_, self.g_prime, self.tol, self.M, False)
             
+            self.y_full[0] = y_[1]
+            self.y_init = self.RB.T @y_[1]
+                
         self.y[0] = self.y_init
         if self.store: self.info = []
 
@@ -246,13 +223,13 @@ class MechSystem(System):
                     
                     if self.RB is not None:
                         y_ = y_ @ self.RB.T
-                    
-                    # TODO: don't return y_, don't evaluate self.g_arr
-                    y_, _, self.g_arr[k+1] = fixed_point(self.g, y_, self.g_prime, self.tol, self.M, False)
+                        
+                    fixed_point(self.g, y_, self.g_prime, self.tol, self.M, False)
 
             if self.RB is None or self.constraint_type is None:
                 self.y[k+1] = y_[1]
             else:
+                self.y_full[k+1] = y_[1]
                 self.y[k+1] = self.RB.T @y_[1]
             
         if self.store:
@@ -261,7 +238,7 @@ class MechSystem(System):
 
         if self.RB is not None:
             self.y_red = self.y
-            self.y = self.y @ self.RB.T
+            self.y = self.y_full
 
     def var_solve(self):
         nosc = self.nosc
@@ -286,13 +263,14 @@ class MechSystem(System):
         
         fig = figure()
         
-        gs = fig.add_gridspec(2, 2, hspace=1)
+        gs = fig.add_gridspec(3, 2, hspace=1)
         # ax = gs.subplots()
         
         ax0 = fig.add_subplot(gs[0,0])
         ax1 = fig.add_subplot(gs[1,0])
-        # ax2 = fig.add_subplot(gs[2,0])
-        ax4 = fig.add_subplot(gs[:,-1], projection='3d')
+        ax2 = fig.add_subplot(gs[2,0])
+        ax3 = fig.add_subplot(gs[2,-1])
+        ax4 = fig.add_subplot(gs[:2,-1], projection='3d')
         
         if hasattr(self, 'sym_error'):
             plot_data(ax0, self.t_points, self.sym_error)
@@ -309,29 +287,54 @@ class MechSystem(System):
             ax1.set_xlim((0, self.T_final))
             ax1.set_ylabel(r'$\Delta H$')
             
-        elif hasattr(self, 'g'):
-            if hasattr(self, 'y_red') and False:
-                temp = np.hstack([self.g(self.y_red[[i],:]) for i in range(self.n+1)])
-            elif False:
-                temp = np.hstack([self.g(self.y[[i],:]) for i in range(self.n+1)])
+        if hasattr(self, 'g'):
+            temp = np.vstack([self.g(y) for y in self.y])
                 
-            temp = LA.norm(self.g_arr, axis=1)
+            g_norm = LA.norm(temp, axis=1)
             # temp = log(temp/np.roll(temp, 1))
             # temp = r_[0, temp[1:]]
-            plot_data(ax1, self.t_points, temp)
+            plot_data(ax1, self.t_points, g_norm)
             # ax1.set_ylim((-max(temp)*1e1, max(temp)*1e1))
             ax1.margins(y=0.5)
             ax1.set_xlim((0, self.T_final))
             # plot_data(ax2, self.t_points, temp[1])
             # ax2.set_ylim((min(temp[1])*1e-1, max(temp[1])*1e1))
             ax1.set_ylabel(r'$\Delta \mathfrak{P}$')
+        
+        
+        lin_momentum = np.sum(self.y[:, nosc:].reshape(-1, nosc//3, 3), axis=1)
+        lim_momentum_err = r_[0, LA.norm(lin_momentum[1:] - lin_momentum[0], axis=1)]
+        
+        angular_momentum = np.cross(self.y[:, :nosc].reshape(-1, nosc//3, 3), self.y[:, nosc:].reshape(-1, nosc//3, 3))
+        angular_momentum_sum = np.sum(angular_momentum, axis=1)
+        angular_momentum_err = r_[0, LA.norm(angular_momentum_sum[1:] - angular_momentum_sum[0], axis=1)]
+        
+        plot_data(ax2, self.t_points, lim_momentum_err)
+        # ax1.set_ylim((-max(temp)*1e1, max(temp)*1e1))
+        ax2.margins(y=0.5)
+        ax2.set_xlim((0, self.T_final))
+        # plot_data(ax2, self.t_points, temp[1])
+        # ax2.set_ylim((min(temp[1])*1e-1, max(temp[1])*1e1))
+        ax2.set_ylabel(r'$\Delta L$')
             
-        ax1.set_xlabel('time')
+        ax2.set_xlabel('time')
                 
         
+        plot_data(ax3, self.t_points, angular_momentum_err)
+        # ax1.set_ylim((-max(temp)*1e1, max(temp)*1e1))
+        ax3.margins(y=0.5)
+        ax3.set_xlim((0, self.T_final))
+        # plot_data(ax2, self.t_points, temp[1])
+        # ax2.set_ylim((min(temp[1])*1e-1, max(temp[1])*1e1))
+        ax3.set_ylabel(r'$\Delta J$')
+            
+        ax3.set_xlabel('time')
+        
         # Plot the particle positions over time
-        particles_at_time = self.y[:,self.osc_idx[0]:self.osc_idx[0]+3]
-        ax4.scatter(particles_at_time[:, 0], particles_at_time[:, 1], particles_at_time[:, 2])
+        coords = self.y[:, :nosc].reshape(-1, nosc//3, 3)
+        for i in range(coords.shape[1]):
+            ax4.plot(coords[:, i, 0], coords[:, i, 1], coords[:, i, 2], 'k-')  # plot the trajectory of each particle
+            ax4.scatter(coords[-1, i, 0], coords[-1, i, 1], coords[-1, i, 2], s=20)  # plot the final position of each particle
         
         # Set the ax4is labels and title
         ax4.set_xlabel('x')
@@ -339,11 +342,11 @@ class MechSystem(System):
         ax4.set_zlabel('z')
         ax4.set_title('Phase portrait')
 
-        ax4.margins(0.5, 0.5, 0.5)
+        # ax4.margins(0.5, 0.5, 0.5)
         # ax4.set_aspect(1.0/ax4.get_data_ratio(), adjustable='box')
         # ax4.grid(axis='x', color="0.9", linestyle='-', linewidth=1)
         
-        for ax in [ax0, ax1]:
+        for ax in [ax0, ax1, ax2]:
             ax.label_outer()
                 
         if self.RB is not None:
@@ -392,33 +395,34 @@ class MechSystem(System):
 
 #%% Find symbolic quantities
 
-nosc = MechSystem.nosc
-q = smp.Matrix(smp.symbols('q_:{}_:{}'.format(nosc//3,3))).reshape(nosc//3,3)
-p = smp.Matrix(smp.symbols('p_:{}_:{}'.format(nosc//3,3)))
-omega2 = smp.Matrix(smp.symbols('omega^2_0:{}'.format(nosc//3-2)))
-beta = smp.symbols('beta')
-
-kin_expr = 0.5 * sum(x**2 for x in p)
-
-row_diffs = [q.row(i+2) - q.row(i) for i in range(nosc//3-2)]
-row_norms = [omega2[i] * (sum([x**2 for x in row_diff]) -1)**2 for (i,row_diff) in enumerate(row_diffs)]
-pot_expr = 0.5 * sum(row_norms)
-
-q = q.reshape(nosc,1)
-y = list(q)+list(p)
-
-ham_expr = kin_expr + pot_expr
-ham_z_expr = smp.Matrix([ham_expr]).jacobian(y)
-ham_zz_expr = ham_z_expr.jacobian(y)
-
-ham_ = smp.lambdify((q, p, omega2, beta), ham_expr)
-_ham_z_ = smp.lambdify((q, p, omega2, beta), ham_z_expr)
-ham_zz_ = smp.lambdify((q, p, omega2, beta), ham_zz_expr)
-
-ham_z_ = lambda q, p, omega2, beta: _ham_z_(q, p, omega2, beta).squeeze()
+if False:
+    nosc = MechSystem.nosc
+    q = smp.Matrix(smp.symbols('q_:{}_:{}'.format(nosc//3,3))).reshape(nosc//3,3)
+    p = smp.Matrix(smp.symbols('p_:{}_:{}'.format(nosc//3,3)))
+    omega2 = smp.Matrix(smp.symbols('omega^2_0:{}'.format(nosc//3-2)))
+    beta = smp.symbols('beta')
+    
+    kin_expr = 0.5 * sum(x**2 for x in p)
+    
+    row_diffs = [q.row(i+2) - q.row(i) for i in range(nosc//3-2)]
+    row_norms = [omega2[i] * (sum([x**2 for x in row_diff]) -1)**2 for (i,row_diff) in enumerate(row_diffs)]
+    pot_expr = 0.5 * sum(row_norms)
+    
+    q = q.reshape(nosc,1)
+    y = list(q)+list(p)
+    
+    ham_expr = kin_expr + pot_expr
+    ham_z_expr = smp.Matrix([ham_expr]).jacobian(y)
+    ham_zz_expr = ham_z_expr.jacobian(y)
+    
+    ham_ = smp.lambdify((q, p, omega2, beta), ham_expr)
+    _ham_z_ = smp.lambdify((q, p, omega2, beta), ham_z_expr)
+    ham_zz_ = smp.lambdify((q, p, omega2, beta), ham_zz_expr)
+    
+    ham_z_ = lambda q, p, omega2, beta: _ham_z_(q, p, omega2, beta).squeeze()
 
 #%%
-if MechSystem.constraint_type is not None:
+if MechSystem.constraint_type is not None and False:
     q = q.reshape(nosc//3,3)
     p = p.reshape(nosc//3,3)
     row_diffs_q = [q.row((i+1)) - q.row(i) for i in range(0, nosc//3, 2)]
@@ -469,9 +473,10 @@ if __name__ == '__main__':
     
 #%% Reduced order solution
     print('Assembling snapshots ...')
-    y_list = np.hstack([MSsolver.y[np.unique(np.random.randint(0,MSsolver.n,int(MSsolver.n)))].T for MSsolver in MSsolvers])
+    y_list = np.hstack([MSsolver.y[np.unique(np.random.randint(0,MSsolver.n,int(MSsolver.n)//2))].T for MSsolver in MSsolvers])
     print(f'{y_list.shape = }')
-    F2 = np.hstack([MSsolver.F2[np.unique(np.random.randint(0,MSsolver.n,int(MSsolver.n)))].T for MSsolver in MSsolvers])
+    F2 = [np.array([MSsolver.ham_z(*np.split(y, 2)) for y in MSsolver.y]) for MSsolver in MSsolvers]
+    F2 = np.hstack([F2[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)//2))].T for i in range(len(MSsolvers))])
     print(f'{F2.shape = }')
     
     X = {#'Q_half': MSsolvers[-1].Q_spd()[:nosc, :nosc], \
@@ -511,6 +516,9 @@ if __name__ == '__main__':
     
     MechSystem.RB = RB
     MechSystem.nosc_r = nosc_r
+
+    kwds.update({'ham_z_': lambda q, p, omega2, beta: RB.T @ ham_z_(q, p, omega2, beta),\
+                 'ham_zz_': lambda q, p, omega2, beta: RB.T @ ham_zz_(q, p, omega2, beta) @ RB})
         
     print('solving reduced system ...')
     MSsolvers_r = MechSystem.solver(kwds)
@@ -530,22 +538,20 @@ if __name__ == '__main__':
         
     P, _ = DEIM(RB, plot_deim=False)
     
-    MechSystem.U = RB
+    # MechSystem.U = RB
     MechSystem.P = P
+        
+    PxU_inv_ = LA.inv(P.T @ RB)
 
-    # TODO: complete the DEIM preparation here
     Pxham_z_ = smp.lambdify((q, p, omega2, beta), P.T @ ham_z_expr.flat())
-    Pxham_zz_ = smp.lambdify((q, p, omega2, beta), P.T @ ham_zz_expr)
 
-    kwds = {'ham_': ham_, \
-            'ham_z_': Pxham_z_, \
-            'ham_zz_': Pxham_zz_, \
-            'g': g_lam, \
-            'g_prime': g_prime_lam, \
-            }
+    kwds.update({'ham_z_': lambda q, p, omega2, beta: PxU_inv_ @ Pxham_z_(q, p, omega2, beta)})
             
-    # TODO: create new function MDEIM
-    if MechSystem.hyperreducer == 'MDEIM':
+    if MechSystem.hyperreducer == 'DEIM':
+        Pxham_zz_ = smp.lambdify((q, p, omega2, beta), P.T @ ham_zz_expr @ RB)
+        kwds.update({'ham_zz_': lambda q, p, omega2, beta: PxU_inv_ @ Pxham_zz_(q, p, omega2, beta)})
+        
+    elif MechSystem.hyperreducer == 'MDEIM':
         
         non_zero_indices = np.nonzero(MSsolvers[0].ham_zz(*np.split(MSsolvers[0].y[0], 2)).flatten())[0]
         
@@ -556,7 +562,7 @@ if __name__ == '__main__':
         
         F3 = [np.array([IP @ MSsolver.ham_zz(*np.split(y, 2)).flatten() for y in MSsolver.y]) for MSsolver in MSsolvers]
         
-        F3 = np.hstack([F3[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)))].T for i in range(len(MSsolvers))])
+        F3 = np.hstack([F3[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)//2))].T for i in range(len(MSsolvers))])
         print(f'{F3.shape = }')
         
         Uj, sv, mj = POD(F3, np.eye(F3.shape[0]), MSsolvers[0].tol)
@@ -569,22 +575,19 @@ if __name__ == '__main__':
         
         Pj, _ = DEIM(Uj, plot_deim=False)
         # Sj = Pj.T @ RB
+            
+        _IP_UxPxU_inv = IP.T @ Uj @ LA.inv(Pj.T @ Uj)
         
         ham_zz_col = Pj.T @ IP @ ham_zz_expr.reshape((2*nosc)**2, 1)
         
         Pxham_zz_ = smp.lambdify((q, p, omega2, beta), ham_zz_col)
         
-        kwds.update({'ham_zz_': Pxham_zz_, \
-                    'Uj': Uj, \
-                    'Pj': Pj, \
-                    'IP': IP, \
-                    })
+        kwds.update({'ham_zz_': lambda q, p, omega2, beta: RB.T @ np.reshape(_IP_UxPxU_inv @ Pxham_zz_(q, p, omega2, beta), (2*nosc, 2*nosc)) @ RB})
                     
-    if MechSystem.constraint_type is not None and MechSystem.constraints_reduce and False:
+    if MechSystem.constraint_type is not None and MechSystem.constraints_reduce:
         
-        F5 = [MSsolver.g_arr for MSsolver in MSsolvers]
-        
-        F5 = np.hstack([F5[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)))].T for i in range(len(MSsolvers))])
+        F5 = [np.array([MSsolver.g(y) +0.5 for y in MSsolver.y]) for MSsolver in MSsolvers]        
+        F5 = np.hstack([F5[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)//2))].T for i in range(len(MSsolvers))])
         print(f'{F5.shape = }')
         
         Uj, sv, mj = POD(F5, np.eye(F5.shape[0]), MechSystem.tol)
@@ -602,7 +605,7 @@ if __name__ == '__main__':
         
         _Pxg = smp.lambdify((y,), _g_col)
         
-        kwds.update({'g': lambda y: _UxPxU_inv @ _Pxg(y).squeeze()})
+        kwds.update({'g': lambda y: (_UxPxU_inv @ _Pxg(y) -0.5).squeeze()})
         
         non_zero_indices = np.nonzero(MSsolvers[0].g_prime(MSsolvers[0].y[0]).flatten())[0]
         
@@ -614,7 +617,7 @@ if __name__ == '__main__':
         
         F4 = [np.array([IP @ MSsolver.g_prime(y).flatten() for y in MSsolver.y]) for MSsolver in MSsolvers]
         
-        F4 = np.hstack([F4[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)))].T for i in range(len(MSsolvers))])
+        F4 = np.hstack([F4[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)//2))].T for i in range(len(MSsolvers))])
         print(f'{F4.shape = }')
         
         Uj, sv, mj = POD(F4, np.eye(F4.shape[0]), MechSystem.tol)
@@ -636,8 +639,7 @@ if __name__ == '__main__':
         
         kwds.update({'g_prime': lambda y: np.reshape(IP_UxPxU_inv_ @ Pxg_prime_(y), g_prime_shape), \
                     })
-         
-#%%             
+                
     gc.collect()
     print('solving hyper-reduced system ...')
     MSsolvers_dr = MechSystem.solver(kwds)

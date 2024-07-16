@@ -79,18 +79,11 @@ def fixed_point(g, x, dgdx, tol, M, store):
 
     #     # m, Delta_Lambda = m+1, g(x[1:2])/sum(dgdx(x[1:2])*dgdx(x[0:1]), axis=1)
     #     m, Delta_Lambda = m+1, g(x[1])/((dgdx(x[1:2]).dot(dgdx(x[0:1]).T)).diagonal())
-    #     x[0] = x[1] # TODO: needs further justification
     #     if store: info.append((m, Delta_Lambda, x[1]))
         
     # print('%s' %m)
         
     assert m < M, "Nonlinear solver did not converge"
-    
-    
-    if store:
-        return x, info
-    else:
-        return x, m, g(x[1])
 
 #%% Testing
 from numpy import sin, cos, exp, linspace, pi, array

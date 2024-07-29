@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on June 2024
+Created on July 17, 2024
 
 @author: ashishbhatt
 
@@ -16,28 +16,25 @@ import sympy as smp
 from numpy import linalg as LA
 from pylab import  log, r_, c_, zeros, eye, sqrt, reshape, linspace, roll, figure, zeros_like
 
-import dill as pickle
-import os
 import gc
 from datetime import datetime
 from matplotlib import rc
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
 plt.rc('text', usetex=True)  # Enable LaTeX rendering
 rc('text.latex', preamble=r'\usepackage{amsfonts}')  # Load AMSFonts for Fraktur
 from matplotlib.ticker import MaxNLocator
 
 import ODESolver
-from Newton import fixed_point
 from System import System
 from podDEIM import POD, DEIM
+from Newton import fixed_point
 from PlotScript import plot_data, tex_table, logplot, save_figure, timing
+
 
 class MechSystem(System):
     """ Class of MechSystem methods """
         
     "Numerical solver and its properties"
-    # TODO: make higher order integrator a decorator
     w_values = [0.28, 0.62546642846767004501]
     w_values.append(1.0 -2.0*(sum(w_values)))
     w_values.append(w_values[1])
@@ -49,8 +46,7 @@ class MechSystem(System):
     tol, M, var, store = 1.0E-12, 100, True, False
     
     "System parameters"
-    nosc = 50*3
-    assert nosc//3 % 2 == 0, 'nosc//3 must be even'
+    nosc = 40*2
         
     # These two properties only have effect during reduction
     reducer = 'psd'
@@ -58,36 +54,29 @@ class MechSystem(System):
     hyperreducer = 'MDEIM'
     
     registered_solver_classes = [ODESolver.ConformalImplicitMidpoint, ODESolver.ConformalStormerVerlet]
-    dt_space_dim = 3
-    Omega2_space_dim = 3
+    dt_space_dim = 1
+    omega_space_dim = 2
     beta = (max(1e-2, 0*np.random.rand()/10))*0
     JJ = lambda self, d=nosc: r_[c_[zeros((d,d)), eye(d)], c_[-eye(d), zeros((d,d))]]
     
-    Omega2_space = np.sort(2*(1 -np.random.rand(Omega2_space_dim, nosc//3-2)))
+    omega_space = np.random.uniform([1-0.9, 1-0.9, 0.01-0.009], [1+0.9, 1+0.9, 0.01+0.009], (omega_space_dim, 3))
         
     dt_space = linspace(0.01, 0.05, num=dt_space_dim)
     T_final = 5
     
+    
     keep_time = datetime.now().strftime('%Y-%m-%d_%H-%M_')
     
-    "Initial conditions satisfying the constraints"
-    positions = np.zeros((nosc//3, 3))
-
-    for i in range(nosc//3):
-        positions[i, 0] = i % 2 + 0*(i // 2 % 2) * 1e-1
-        positions[i, 1] = i // 2 + 0*(-1)**(i // 2) * 1e-1
-        positions[i, 2] = 0
-        
-    positions = positions.flatten().reshape(-1, 1)
+    "Initial conditions"
+    positions = np.zeros(nosc)
+    positions[:nosc//2:2] = np.arange(1,nosc//4+1) +np.random.rand(nosc//4)*1e-1
+    positions[1:nosc//2:2] = 1
+    positions[nosc//2::2] = np.arange(1,nosc//4+1) +np.random.rand(nosc//4)*1e-1
+    positions[nosc//2+1::2] = -1
     
-    momenta = np.zeros((nosc//3, 3))
-    momenta[::2] = np.random.uniform(-0.1, 0.1, momenta[::2].shape)
-    momenta[1::2] = momenta[::2]
-    assert np.allclose(momenta[1::2] - momenta[::2], 0), 'position and momenta are not orthogonal'
-    momenta = momenta.flatten().reshape(-1, 1)
+    momenta = np.zeros(nosc)
     
-    constraint_type = 'spherical'
-    constraints_reduce = True # True: Reduce constraint jacobian g_prime
+    constraint_type = None
     
     y_init = r_[positions, momenta].flatten()
     
@@ -144,26 +133,26 @@ class MechSystem(System):
             
             if (not hasattr(MechSystem, 'RB')):
                 # training parameters
-                Omega2_space = MechSystem.Omega2_space[:-1]
-                Omega2_space_dim = len(Omega2_space)
+                omega_space = MechSystem.omega_space[:-1]
+                omega_space_dim = len(omega_space)
                 
             else:
                 # testing parameters
-                Omega2_space = MechSystem.Omega2_space[-1:]
-                Omega2_space_dim = len(Omega2_space)
+                omega_space = MechSystem.omega_space[-1:]
+                omega_space_dim = len(omega_space)
                 
         else: # reproduction
-            Omega2_space = MechSystem.Omega2_space
-            Omega2_space_dim = len(Omega2_space)
+            omega_space = MechSystem.omega_space
+            omega_space_dim = len(omega_space)
             
             
-        errors.update({'Omega2_space_dim': Omega2_space_dim})
+        errors.update({'omega_space_dim': omega_space_dim})
         
-        for solver_class, dt, Omega2 in [(x, y, z) for x in MechSystem.registered_solver_classes for y in MechSystem.dt_space for z in Omega2_space]:
+        for solver_class, dt, omega in [(x, y, z) for x in MechSystem.registered_solver_classes for y in MechSystem.dt_space for z in omega_space]:
         
             kwds.update({'solver_class': solver_class, \
                         'dt': dt, \
-                        'Omega2': Omega2, \
+                        'Omega2': omega, \
                         'n': int(round(MechSystem.T_final/dt)),\
                         })
             
@@ -175,12 +164,10 @@ class MechSystem(System):
             
             MSsolver.time_lapsed.append(tl)
             
-            if MechSystem.dt_space_dim > 1 and MechSystem.Omega2_space_dim == 1:
-                 # compute errors only for fixed Omega2_space of length 1
-                if (not MSsolver.beta) and (MSsolver.constraint_type is None):
-                    "Energy (Hamiltonian) is an invariant for unconstrained conservative system"
-                    MSsolver.eng_error = MSsolver.get_en_err()
-                    errors['energy'].append(sqrt(dt)*LA.norm(MSsolver.eng_error))
+            if (not MSsolver.beta) and (MSsolver.constraint_type is None):
+                "Energy (Hamiltonian) is an invariant for unconstrained conservative system"
+                MSsolver.eng_error = MSsolver.get_en_err()
+                errors['energy'].append(sqrt(dt)*LA.norm(MSsolver.eng_error))
                 
             if MSsolver.var:
                 MSsolver.var_solve()
@@ -274,7 +261,7 @@ class MechSystem(System):
         ax1 = fig.add_subplot(gs[1,0])
         ax2 = fig.add_subplot(gs[2,0])
         ax3 = fig.add_subplot(gs[2,-1])
-        ax4 = fig.add_subplot(gs[:2,-1], projection='3d')
+        ax4 = fig.add_subplot(gs[:2,-1])
         
         if hasattr(self, 'sym_error'):
             plot_data(ax0, self.t_points, self.sym_error)
@@ -306,12 +293,12 @@ class MechSystem(System):
             ax1.set_ylabel(r'$\Delta \mathfrak{P}$')
         
         
-        lin_momentum = np.sum(self.y[:, nosc:].reshape(-1, nosc//3, 3), axis=1)
+        lin_momentum = np.sum(self.y[:, nosc:].reshape(-1, nosc//2, 2), axis=1)
         lim_momentum_err = r_[0, LA.norm(lin_momentum[1:] - lin_momentum[0], axis=1)]
         
-        angular_momentum = np.cross(self.y[:, :nosc].reshape(-1, nosc//3, 3), self.y[:, nosc:].reshape(-1, nosc//3, 3))
+        angular_momentum = np.cross(self.y[:, :nosc].reshape(-1, nosc//2, 2), self.y[:, nosc:].reshape(-1, nosc//2, 2))
         angular_momentum_sum = np.sum(angular_momentum, axis=1)
-        angular_momentum_err = r_[0, LA.norm(angular_momentum_sum[1:] - angular_momentum_sum[0], axis=1)]
+        angular_momentum_err = r_[0, angular_momentum_sum[1:] - angular_momentum_sum[0]]
         
         plot_data(ax2, self.t_points, lim_momentum_err)
         # ax1.set_ylim((-max(temp)*1e1, max(temp)*1e1))
@@ -335,18 +322,18 @@ class MechSystem(System):
         ax3.set_xlabel('time')
         
         # Plot the particle positions over time
-        coords = self.y[:, :nosc].reshape(-1, nosc//3, 3)
+        coords = self.y[:, :nosc].reshape(-1, nosc//2, 2)
         for i in range(coords.shape[1]):
-            ax4.plot(coords[:, i, 0], coords[:, i, 1], coords[:, i, 2], 'k-')  # plot the trajectory of each particle
-            ax4.scatter(coords[-1, i, 0], coords[-1, i, 1], coords[-1, i, 2], s=20)  # plot the final position of each particle
+            ax4.plot(coords[:, i, 0], coords[:, i, 1], 'k-')  # plot the trajectory of each particle
+            ax4.scatter(coords[0, i, 0], coords[0, i, 1], s=20)  # plot the initial position of each particle
         
         # Set the ax4is labels and title
         ax4.set_xlabel('x')
         ax4.set_ylabel('y')
-        ax4.set_zlabel('z')
         ax4.set_title('Phase portrait')
+        ax4.set_aspect('equal')
 
-        # ax4.margins(0.5, 0.5, 0.5)
+        ax4.margins(0.1, 1)
         # ax4.set_aspect(1.0/ax4.get_data_ratio(), adjustable='box')
         # ax4.grid(axis='x', color="0.9", linestyle='-', linewidth=1)
         
@@ -369,13 +356,13 @@ class MechSystem(System):
         r_form = lambda numer, denom: (log(roll(numer, -1)/numer)/log(roll(denom, -1)/denom))[:-1]
         C_form = lambda numer, denom, r: numer[:-1]/(denom[:-1]**r)
             
-        for i in np.arange(0, len(MSsolvers), MechSystem.dt_space_dim * errors['Omega2_space_dim']):
+        for i in np.arange(0, len(MSsolvers), MechSystem.dt_space_dim * errors['omega_space_dim']):
             MSsolver = MSsolvers[i]
             
             r_values = []
             C_values = []
             
-            if errors['energy']:
+            if errors['energy'] and MechSystem.dt_space_dim > 1 and MechSystem.predict is False:
                 "Compute convergence rates from the error in Energy"
                 r_values.append(r_form(errors['energy'][i:i+MechSystem.dt_space_dim], MechSystem.dt_space))
                 C_values.append(C_form(errors['energy'][i:i+MechSystem.dt_space_dim], MechSystem.dt_space,r_values[-1]))
@@ -398,146 +385,65 @@ class MechSystem(System):
             
 
 #%% Find symbolic quantities
-
-nosc = MechSystem.nosc
-
-# create the 'data' subfolder if it doesn't exist
-data_folder = 'data'
-if not os.path.exists(data_folder):
-    os.makedirs(data_folder)
-
-# try to load the expressions from disk
-filename = os.path.join(data_folder, f"ham_expr_{nosc}.pickle")
-try:
-    with open(filename, 'rb') as f:
-        loaded_expressions = pickle.load(f)
-    print("Loaded Hamiltonian expressions from disk.")
+#TODO: save and reload from disc
+if True:
+    nosc = MechSystem.nosc
+    q = smp.Matrix(smp.symbols('q_:{}_:{}'.format(nosc//2,2), real=True)).reshape(nosc//2,2)
+    p = smp.Matrix(smp.symbols('p_:{}_:{}'.format(nosc//2,2), real=True))
+    omega = smp.Matrix(smp.symbols('omega_0:{}'.format(3), real=True))
+    _l = 1 #1/(nosc//4)
+    beta = smp.symbols('beta')
     
-    ham_expr = loaded_expressions['ham_expr']
-    ham_z_expr = loaded_expressions['ham_z_expr']
-    ham_zz_expr = loaded_expressions['ham_zz_expr']
-    ham_ = loaded_expressions['ham_']
-    ham_z_ = loaded_expressions['ham_z_']
-    ham_zz_ = loaded_expressions['ham_zz_']
-    q = loaded_expressions['q']
-    p = loaded_expressions['p']
-    omega2 = loaded_expressions['omega2']
-    beta = loaded_expressions['beta']
+    kin_expr = 0.5 * omega[0] * sum(x**2 for x in p)
     
-except FileNotFoundError:
-    print("Hamiltonian expressions not found on disk. Computing and saving them...")
-
-    q = smp.Matrix(smp.symbols('q_:{}_:{}'.format(nosc//3,3), real=True)).reshape(nosc//3,3)
-    p = smp.Matrix(smp.symbols('p_:{}_:{}'.format(nosc//3,3), real=True))
-    omega2 = smp.Matrix(smp.symbols('omega^2_0:{}'.format(nosc//3-2), real=True))
-    beta = smp.symbols('beta', real=True)
+    row_diffs = [(q.row(i+1) - q.row(i)).norm(2)**2 - _l for i in range(nosc//4-1)]
+    row_diffs = row_diffs + [(q.row(i+1) - q.row(i)).norm(2)**2 - _l for i in range(nosc//4,nosc//2-1)]
+    pot_expr_1 = 0.5 * omega[1] * sum([row_diff**2 for row_diff in row_diffs])
+    # pot_expr_1 = 0.5 * omega[0] * sum(row_diffs**2)
     
-    kin_expr = 0.5 * p.dot(p)
-    
-    pi = smp.Matrix([(q.row(i+2) - q.row(i)).norm(2)**2 for i in range(nosc//3-2)])
-    pot_expr = 0.5 * omega2.dot((pi -smp.ones(nosc//3-2,1)))
+    pot_expr_2 = omega[2] * sum([smp.exp(-1/2/omega[1]**2 * (q.row(i) -q.row(nosc//4+j)).norm(2)**2) \
+                                       for i in range(nosc//4) for j in range(nosc//4)])
     
     q = q.reshape(nosc,1)
     y = list(q)+list(p)
     
-    ham_expr = kin_expr + pot_expr
+    ham_expr = kin_expr + pot_expr_1 + pot_expr_2
     ham_z_expr = smp.Matrix([ham_expr]).jacobian(y).T
     ham_zz_expr = ham_z_expr.jacobian(y)
     
-    ham_ = smp.lambdify((q, p, omega2, beta), ham_expr, modules=['numexpr'])
-    _ham_z_ = smp.lambdify((q, p, omega2, beta), ham_z_expr, modules=['scipy'])
-    ham_zz_ = smp.lambdify((q, p, omega2, beta), ham_zz_expr, modules=['scipy'])
+    ham_ = smp.lambdify((q, p, omega, beta), ham_expr)
+    _ham_z_ = smp.lambdify((q, p, omega, beta), ham_z_expr)
+    ham_zz_ = smp.lambdify((q, p, omega, beta), ham_zz_expr)
     
-    ham_z_ = lambda q, p, omega2, beta: _ham_z_(q, p, omega2, beta).squeeze()
-
-    expressions = {
-        "ham_expr": ham_expr,
-        "ham_z_expr": ham_z_expr,
-        "ham_zz_expr": ham_zz_expr,
-        "ham_": ham_,
-        "ham_z_": ham_z_,
-        "ham_zz_": ham_zz_,
-        "q": q, "p": p, "omega2": omega2, "beta": beta
-    }       
-    
-    # save the expressions to disk
-    with open(filename, 'wb') as f:
-        pickle.dump(expressions, f)
-    print("Hamiltonian expressions saved to disk.")
-
-#%% 
-if MechSystem.constraint_type is not None:
-
-    # try to load the expressions from disk
-    filename = os.path.join(data_folder, f"g_expr_{nosc}.pickle")
-    try:
-        with open(filename, 'rb') as f:
-            loaded_expressions = pickle.load(f)
-        print("Loaded constraints from disk.")
-        
-        g_expr = loaded_expressions['g_expr']
-        g_prime_expr = loaded_expressions['g_prime_expr']
-        g_lam = loaded_expressions['g_lam']
-        g_prime_lam = loaded_expressions['g_prime_lam']
-        
-    except FileNotFoundError:
-        print("Constraints not found on disk. Computing and saving them...")
-        
-        q = q.reshape(nosc//3,3)
-        p = p.reshape(nosc//3,3)
-        row_diffs_q = [q.row((i+1)) - q.row(i) for i in range(0, nosc//3, 2)]
-        row_diffs_p = [p.row((i+1)) - p.row(i) for i in range(0, nosc//3, 2)]
-        row_norms = [(row_diff.dot(row_diff) -1)/2 for row_diff in row_diffs_q]
-        ddt_row_norms = [row_diffs_q[i].dot(row_diffs_p[i]) for i in range(len(row_diffs_q))]
-        
-        q = q.reshape(nosc,1)
-        p = p.reshape(nosc,1)
-        y = list(q)+list(p)
-        g_expr = smp.Matrix(row_norms+ ddt_row_norms)
-        g_prime_expr = g_expr.jacobian(y)
-        
-        _g_lam = smp.lambdify((y,), g_expr, modules=['scipy'])
-        g_prime_lam = smp.lambdify((y,), g_prime_expr, modules=['scipy'])
-        
-        g_lam = lambda x: _g_lam(x).squeeze()
-
-        expressions = {
-            "g_expr": g_expr,
-            "g_prime_expr": g_prime_expr,
-            "g_lam": g_lam,
-            "g_prime_lam": g_prime_lam
-        }       
-        
-        # save the expressions to disk
-        with open(filename, 'wb') as f:
-            pickle.dump(expressions, f)
-        print("Constraints saved to disk.")
+    ham_z_ = lambda q, p, omega, beta: _ham_z_(q, p, omega, beta).squeeze()
 
 #%% Main driver
 if __name__ == '__main__':
     "Model order reduction of the MechSystem using MechSystem"
         
 #%% Full order solution
-    print('Computing full solution ...')
+    nosc = MechSystem.nosc
+    
+    # ham_, ham_z_, ham_zz_ = get_symbols(nosc)
 
     kwds = {'ham_': ham_, \
             'ham_z_': ham_z_, \
             'ham_zz_': ham_zz_, \
-            'g': g_lam, \
-            'g_prime': g_prime_lam, \
             }
 
     MSsolvers = MechSystem.solver(kwds)
     
     if MSsolvers[-1].non_quad: # is not None
-        assert MechSystem.Omega2_space_dim == 1
+        assert MechSystem.omega_space_dim == 1
         
     if MechSystem.predict:
-        array_shape = (len(MechSystem.registered_solver_classes), MechSystem.dt_space_dim, MechSystem.Omega2_space_dim-1)
+        array_shape = (len(MechSystem.registered_solver_classes), MechSystem.dt_space_dim, MechSystem.omega_space_dim-1)
     else:
-        array_shape = (len(MechSystem.registered_solver_classes), MechSystem.dt_space_dim, MechSystem.Omega2_space_dim)        
+        array_shape = (len(MechSystem.registered_solver_classes), MechSystem.dt_space_dim, MechSystem.omega_space_dim)        
     
     time_lapsed = [reshape([x.time_lapsed for x in MSsolvers], array_shape)]
+    
+    1/0
     
 #%% Reduced order solution
     print('Assembling snapshots ...')
@@ -585,8 +491,8 @@ if __name__ == '__main__':
     MechSystem.RB = RB
     MechSystem.nosc_r = nosc_r
 
-    kwds.update({'ham_z_': lambda q, p, omega2, beta: RB.T @ ham_z_(q, p, omega2, beta),\
-                 'ham_zz_': lambda q, p, omega2, beta: RB.T @ ham_zz_(q, p, omega2, beta) @ RB})
+    kwds.update({'ham_z_': lambda q, p, omega, beta: RB.T @ ham_z_(q, p, omega, beta),\
+                 'ham_zz_': lambda q, p, omega, beta: RB.T @ ham_zz_(q, p, omega, beta) @ RB})
         
     print('solving reduced system ...')
     MSsolvers_r = MechSystem.solver(kwds)
@@ -611,13 +517,13 @@ if __name__ == '__main__':
         
     PxU_inv_ = LA.inv(P.T @ RB)
 
-    Pxham_z_ = smp.lambdify((q, p, omega2, beta), P.T @ ham_z_expr.flat(), modules=['scipy'])
+    Pxham_z_ = smp.lambdify((q, p, omega, beta), P.T @ ham_z_expr)
 
-    kwds.update({'ham_z_': lambda q, p, omega2, beta: PxU_inv_ @ Pxham_z_(q, p, omega2, beta)})
+    kwds.update({'ham_z_': lambda q, p, omega, beta: PxU_inv_ @ Pxham_z_(q, p, omega, beta).squeeze()})
             
     if MechSystem.hyperreducer == 'DEIM':
-        Pxham_zz_ = smp.lambdify((q, p, omega2, beta), P.T @ ham_zz_expr @ RB, modules=['scipy'])
-        kwds.update({'ham_zz_': lambda q, p, omega2, beta: PxU_inv_ @ Pxham_zz_(q, p, omega2, beta)})
+        Pxham_zz_ = smp.lambdify((q, p, omega, beta), P.T @ ham_zz_expr @ RB)
+        kwds.update({'ham_zz_': lambda q, p, omega, beta: PxU_inv_ @ Pxham_zz_(q, p, omega, beta)})
         
     elif MechSystem.hyperreducer == 'MDEIM':
         
@@ -630,7 +536,7 @@ if __name__ == '__main__':
         
         F3 = [np.array([IP @ MSsolver.ham_zz(*np.split(y, 2)).flatten() for y in MSsolver.y]) for MSsolver in MSsolvers]
         
-        F3 = np.hstack([F3[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)//2))].T for i in range(len(MSsolvers))])
+        F3 = np.hstack([F3[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)))].T for i in range(len(MSsolvers))])
         print(f'{F3.shape = }')
         
         Uj, sv, mj = POD(F3, np.eye(F3.shape[0]), MSsolvers[0].tol)
@@ -648,66 +554,10 @@ if __name__ == '__main__':
         
         ham_zz_col = Pj.T @ IP @ ham_zz_expr.reshape((2*nosc)**2, 1)
         
-        Pxham_zz_ = smp.lambdify((q, p, omega2, beta), ham_zz_col, modules=['scipy'])
+        Pxham_zz_ = smp.lambdify((q, p, omega, beta), ham_zz_col)
         
-        kwds.update({'ham_zz_': lambda q, p, omega2, beta: RB.T @ np.reshape(_IP_UxPxU_inv @ Pxham_zz_(q, p, omega2, beta), (2*nosc, 2*nosc)) @ RB})
+        kwds.update({'ham_zz_': lambda q, p, omega, beta: RB.T @ np.reshape(_IP_UxPxU_inv @ Pxham_zz_(q, p, omega, beta), (2*nosc, 2*nosc)) @ RB})
                     
-    if MechSystem.constraint_type is not None and MechSystem.constraints_reduce:
-        
-        F5 = [np.array([MSsolver.g(y) +0.5 for y in MSsolver.y]) for MSsolver in MSsolvers]        
-        F5 = np.hstack([F5[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)//2))].T for i in range(len(MSsolvers))])
-        print(f'{F5.shape = }')
-        
-        Uj, sv, mj = POD(F5, np.eye(F5.shape[0]), MechSystem.tol)
-        del F5
-        
-        Pj, _ = DEIM(Uj, plot_deim=False)
-            
-        fig, ax = logplot(sv, xlabel='index of singular values', xlims=(0, len(sv)))
-        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-        filename = MechSystem.keep_time +'osc_mdeim_sv' + '.pdf'
-            
-        _UxPxU_inv = Uj @ LA.inv(Pj.T @ Uj)
-        
-        _g_col = Pj.T @ g_expr
-        
-        _Pxg = smp.lambdify((y,), _g_col, modules=['scipy'])
-        
-        kwds.update({'g': lambda y: (_UxPxU_inv @ _Pxg(y) -0.5).squeeze()})
-        
-        non_zero_indices = np.nonzero(MSsolvers[0].g_prime(MSsolvers[0].y[0]).flatten())[0]
-        
-        g_prime_shape= MSsolvers[0].g_prime(MSsolvers[0].y[0]).shape
-        IP = np.zeros((len(non_zero_indices), np.prod(g_prime_shape)))
-        
-        for i, val in enumerate(non_zero_indices):
-            IP[i, val] = 1
-        
-        F4 = [np.array([IP @ MSsolver.g_prime(y).flatten() for y in MSsolver.y]) for MSsolver in MSsolvers]
-        
-        F4 = np.hstack([F4[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)//2))].T for i in range(len(MSsolvers))])
-        print(f'{F4.shape = }')
-        
-        Uj, sv, mj = POD(F4, np.eye(F4.shape[0]), MechSystem.tol)
-        del F4
-            
-        fig, ax = logplot(sv, xlabel='index of singular values', xlims=(0, len(sv)))
-        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-        filename = MechSystem.keep_time +'osc_mdeim_sv' + '.pdf'
-        # save_figure(fig, filename)
-        
-        Pj, _ = DEIM(Uj, plot_deim=False)
-        # Sj = Pj.T @ RB
-            
-        IP_UxPxU_inv_ = IP.T @ Uj @ LA.inv(Pj.T @ Uj)
-        
-        g_prime_col = Pj.T @ IP @ g_prime_expr.reshape(np.prod(g_prime_shape), 1)
-        
-        Pxg_prime_ = smp.lambdify((y,), g_prime_col, modules=['scipy'])
-        
-        kwds.update({'g_prime': lambda y: np.reshape(IP_UxPxU_inv_ @ Pxg_prime_(y), g_prime_shape), \
-                    })
-                
     gc.collect()
     print('solving hyper-reduced system ...')
     MSsolvers_dr = MechSystem.solver(kwds)

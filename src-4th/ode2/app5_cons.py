@@ -41,26 +41,26 @@ class MechSystem(System):
     assert np.isclose(sum(w_values), 1), 'sum_i w_i must be 1'
 
     "Fixed-point nonliner equations solver properties"
-    tol, M, var, store = 1.0E-12, 100, True, False
+    tol, M, var, store = 1.0E-12, 100, False, False
     
     "System parameters"
-    nosc = 100
+    nosc = 50
         
     # These two properties only have effect during reduction
     reducer = 'psd'
-    predict = True # False = reproduce
+    predict = False # False = reproduce
     hyperreducer = 'MDEIM'
     
     registered_solver_classes = [ODESolver.ConformalImplicitMidpoint, ODESolver.ConformalStormerVerlet]
-    dt_space_dim = 3
-    Omega2_space_dim = 3
-    beta = (max(1e-2, 0*np.random.rand()/10))*1
+    dt_space_dim = 5
+    Omega2_space_dim = 1
+    beta = (max(1e-2, 0*np.random.rand()/10))*0
     JJ = lambda self, d=nosc: r_[c_[zeros((d,d)), eye(d)], c_[-eye(d), zeros((d,d))]]
     
-    Omega2_space = np.sort(2*(1 -np.random.rand(Omega2_space_dim, nosc)))
+    Omega2_space = np.sort(3*(1 -np.random.rand(Omega2_space_dim, nosc)))
         
     dt_space = linspace(0.01, 0.05, num=dt_space_dim)
-    T_final = 5
+    T_final = 2
     
     osc_idx = np.array([0, 1, 2, nosc//2-1, nosc//2, nosc//2+1, nosc-3, nosc-2, nosc-1])
     keep_time = datetime.now().strftime('%Y-%m-%d_%H-%M_')
@@ -69,7 +69,7 @@ class MechSystem(System):
     y_init = r_[np.linspace(1,5,nosc), np.zeros(nosc)]
     
     "Constraints"
-    constraint_type = 'spherical'
+    constraint_type = None
     constraints_reduce = True # Reduce constraint jacobian g_prime
     
     alpha = list(np.linspace(0.1,0.5,num=nosc))
@@ -199,12 +199,13 @@ class MechSystem(System):
             
             MSsolver.time_lapsed.append(tl)
             
-            if MechSystem.dt_space_dim > 1 and MechSystem.Omega2_space_dim == 1:
-                 # compute errors only for fixed Omega2_space of length 1
-                if (not MSsolver.beta) and (MSsolver.constraint_type is None):
-                    "Energy (Hamiltonian) is an invariant for unconstrained conservative system"
-                    MSsolver.eng_error = MSsolver.get_en_err()
-                    errors['energy'].append(sqrt(dt)*LA.norm(MSsolver.eng_error))
+            if (not MSsolver.beta):
+                "Energy (Hamiltonian) is an invariant of undamped system"
+                MSsolver.eng_error = MSsolver.get_en_err()
+                
+                if MechSystem.dt_space_dim > 1 and MechSystem.Omega2_space_dim == 1:
+                     # compute errors only for fixed Omega2_space of length 1
+                     errors['energy'].append(sqrt(dt)*LA.norm(MSsolver.eng_error))
                 
             if MSsolver.var:
                 MSsolver.var_solve()
@@ -229,11 +230,15 @@ class MechSystem(System):
             self.y = np.zeros((self.n+1, 2*self.nosc))
         else:
             self.y = np.zeros((self.n+1, 2*self.nosc_r))
+            self.y_full = np.zeros((self.n+1, 2*self.nosc))
+            
+            y_ = np.array([self.y_init, self.y_init]) @ self.RB.T
             
             if self.constraint_type:
-                X_U = np.array([self.y_init, self.y_init])
-                X_U, _, self.g_arr[0] = fixed_point(self.g, X_U @ self.RB.T, self.g_prime, self.tol, self.M, False)
-                self.y_init = self.RB.T @X_U[1]
+                fixed_point(self.g, y_, self.g_prime, self.tol, self.M, False)
+            
+            self.y_full[0] = y_[1]
+            self.y_init = self.RB.T @y_[1]
             
         self.y[0] = self.y_init
         if self.store: self.info = []
@@ -250,16 +255,15 @@ class MechSystem(System):
                 # enforce constraints
                 if self.constraint_type:
                     
-                    if self.RB is None:
-                        pass
-                    else:
+                    if self.RB is not None:
                         y_ = y_ @ self.RB.T
                     
-                    y_, _, self.g_arr[k+1] = fixed_point(self.g, y_, self.g_prime, self.tol, self.M, False)
+                    fixed_point(self.g, y_, self.g_prime, self.tol, self.M, False)
 
             if self.RB is None or self.constraint_type is None:
                 self.y[k+1] = y_[1]
             else:
+                self.y_full[k+1] = y_[1]
                 self.y[k+1] = self.RB.T @y_[1]
             
         if self.store:
@@ -268,7 +272,7 @@ class MechSystem(System):
 
         if self.RB is not None:
             self.y_red = self.y
-            self.y = self.y @ self.RB.T
+            self.y = self.y_full
 
     def var_solve(self):
         nosc = self.nosc
@@ -416,7 +420,9 @@ ham_z_expr = smp.Matrix([ham_lam(x, u, omega2, beta)]).jacobian(list(x)+list(u))
 ham_z_lam = smp.lambdify((x, u, omega2, beta), ham_z_expr, "sympy")
 # print(ham_z_lam(x, u, omega2, beta))
 
-ham_z_ = smp.lambdify((x, u, omega2, beta), ham_z_expr)
+_ham_z_ = smp.lambdify((x, u, omega2, beta), ham_z_expr)
+
+ham_z_ = lambda x, u, omega2, beta: _ham_z_(x, u, omega2, beta).squeeze()
 # self.ham_z = lambda x, u, omega2=self.omega2, beta=self.beta: ham_z_(x, u, omega2, beta).squeeze()
 # print(ham_z(u_arr, v_arr, Om2_arr, 0.1))
 
@@ -452,7 +458,7 @@ if MechSystem.constraint_type is not None:
 if __name__ == '__main__':
     "Model order reduction of the MechSystem using MechSystem"
         
-#%% Full order solution
+#% Full order solution
     nosc = MechSystem.nosc
     
     # ham_, ham_z_, ham_zz_ = get_symbols(nosc)
@@ -520,6 +526,9 @@ if __name__ == '__main__':
     
     MechSystem.RB = RB
     MechSystem.nosc_r = nosc_r
+
+    kwds.update({'ham_z_': lambda q, p, omega2, beta: RB.T @ ham_z_(q, p, omega2, beta),\
+                 'ham_zz_': lambda q, p, omega2, beta: RB.T @ ham_zz_(q, p, omega2, beta) @ RB})
         
     print('solving reduced system ...')
     MSsolvers_r = MechSystem.solver(kwds)
@@ -534,6 +543,7 @@ if __name__ == '__main__':
         time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
                                     time_lapsed[0].shape[:2]))
             
+    1/0
 
 #%% Hyper-reduced model
         

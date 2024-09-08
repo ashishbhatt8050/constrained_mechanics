@@ -16,6 +16,8 @@ import sympy as smp
 from numpy import linalg as LA
 from pylab import  log, r_, c_, zeros, eye, sqrt, reshape, linspace, roll, figure, zeros_like
 
+from pathos.pools import _ProcessPool as Pool
+
 import dill as pickle
 import os
 import gc
@@ -33,6 +35,7 @@ from System import System
 from podDEIM import POD, DEIM
 from PlotScript import plot_data, tex_table, logplot, save_figure, timing
 
+
 class MechSystem(System):
     """ Class of MechSystem methods """
         
@@ -49,7 +52,7 @@ class MechSystem(System):
     tol, M, var, store = 1.0E-12, 100, True, False
     
     "System parameters"
-    nosc = 50*3
+    nosc = 10*3
     assert nosc//3 % 2 == 0, 'nosc//3 must be even'
         
     # These two properties only have effect during reduction
@@ -58,13 +61,14 @@ class MechSystem(System):
     hyperreducer = 'MDEIM'
     
     registered_solver_classes = [ODESolver.ConformalImplicitMidpoint, ODESolver.ConformalStormerVerlet]
-    dt_space_dim = 3
-    Omega2_space_dim = 3
+    dt_space_dim = 1
+    Omega2_space_dim = 6
     beta = (max(1e-2, 0*np.random.rand()/10))*0
     JJ = lambda self, d=nosc: r_[c_[zeros((d,d)), eye(d)], c_[-eye(d), zeros((d,d))]]
     
     Omega2_space = np.sort(2*(1 -np.random.rand(Omega2_space_dim, nosc//3-2)))
-        
+                    # np.tile(3*(1 -np.random.rand(1, nosc//3 -nosc//3//20 -2)), (Omega2_space_dim,1))])
+                    
     dt_space = linspace(0.01, 0.05, num=dt_space_dim)
     T_final = 5
     
@@ -81,7 +85,7 @@ class MechSystem(System):
     positions = positions.flatten().reshape(-1, 1)
     
     momenta = np.zeros((nosc//3, 3))
-    momenta[::2] = np.random.uniform(-0.1, 0.1, momenta[::2].shape)
+    momenta[::2] = np.random.uniform(-0.01, 0.01, momenta[::2].shape)
     momenta[1::2] = momenta[::2]
     assert np.allclose(momenta[1::2] - momenta[::2], 0), 'position and momenta are not orthogonal'
     momenta = momenta.flatten().reshape(-1, 1)
@@ -135,6 +139,45 @@ class MechSystem(System):
         self.y_init = value
         
     @staticmethod
+    def solve_mech_system(solver_class, dt, Omega2, kwds):
+        kwds['pool'] = {'solver_class': solver_class, 'dt': dt, 'Omega2': Omega2, 'n': int(round(MechSystem.T_final/dt))}
+        kwds['pool'].update({'t_points': linspace(0, MechSystem.T_final, kwds['pool']['n']+1)})
+        
+        MSsolver = MechSystem(kwds)
+        tl = MSsolver.solve()
+        MSsolver.time_lapsed.append(tl)
+        
+        if MechSystem.dt_space_dim > 1 and MechSystem.Omega2_space_dim == 1:
+            if (not MSsolver.beta) and (MSsolver.constraint_type is None):
+                MSsolver.eng_error = MSsolver.get_en_err()
+                en_error = sqrt(dt)*LA.norm(MSsolver.eng_error)
+        else:
+            en_error = None
+        
+        if MSsolver.var:
+            MSsolver.var_solve()
+            # errors['spl'].append(sqrt(dt)*LA.norm(MSsolver.sym_error))
+            
+        return MSsolver, en_error
+    
+    @staticmethod
+    def parallel_solve_mech_system(kwds, Omega2_space, MSsolvers, errors):
+        
+        with Pool() as pool:
+            results = pool.starmap(MechSystem.solve_mech_system, \
+                                   [(x, y, z, kwds) for x in MechSystem.registered_solver_classes for y in MechSystem.dt_space for z in Omega2_space])
+            
+        if 'pool' in kwds:
+            del kwds['pool']
+            print("kwds['pool'] deleted")
+    
+        for MSsolver, error in results:
+            MSsolvers.append(MSsolver)
+            if error is not None:
+                errors['energy'].append(error)
+
+        
+    @staticmethod
     def solver(kwds):
     
         MSsolvers = []
@@ -154,11 +197,13 @@ class MechSystem(System):
                 
         else: # reproduction
             Omega2_space = MechSystem.Omega2_space
-            Omega2_space_dim = len(Omega2_space)
-            
+            Omega2_space_dim = len(Omega2_space)            
             
         errors.update({'Omega2_space_dim': Omega2_space_dim})
+                    
+        MechSystem.parallel_solve_mech_system(kwds, Omega2_space, MSsolvers, errors)
         
+        '''
         for solver_class, dt, Omega2 in [(x, y, z) for x in MechSystem.registered_solver_classes for y in MechSystem.dt_space for z in Omega2_space]:
         
             kwds.update({'solver_class': solver_class, \
@@ -187,6 +232,7 @@ class MechSystem(System):
                 # errors['spl'].append(sqrt(dt)*LA.norm(MSsolver.sym_error))
                 
             MSsolvers.append(MSsolver)
+        '''
             
         MechSystem.measures(MSsolvers, errors)
     
@@ -266,30 +312,33 @@ class MechSystem(System):
         "plot the results"
         
         fig = figure()
-        
-        gs = fig.add_gridspec(3, 2, hspace=1)
+        fig.tight_layout(pad=0)
+                
+        gs = fig.add_gridspec(6, 2, hspace=1)
         # ax = gs.subplots()
         
         ax0 = fig.add_subplot(gs[0,0])
         ax1 = fig.add_subplot(gs[1,0])
-        ax2 = fig.add_subplot(gs[2,0])
-        ax3 = fig.add_subplot(gs[2,-1])
-        ax4 = fig.add_subplot(gs[:2,-1], projection='3d')
+        ax5 = fig.add_subplot(gs[2,0])
+        ax6 = fig.add_subplot(gs[5,0])
+        ax2 = fig.add_subplot(gs[3,0])
+        ax3 = fig.add_subplot(gs[4,0])
+        ax4 = fig.add_subplot(gs[:5,-1], projection='3d')
         
         if hasattr(self, 'sym_error'):
             plot_data(ax0, self.t_points, self.sym_error)
             
-            ax0.margins(y=0.5)
+            # ax0.margins(y=0.5)
             
             ax0.set_xlim((0, self.T_final))
             ax0.set_ylabel(r'$\Delta Sp$')
             
         if hasattr(self, 'eng_error'):
-            plot_data(ax1, self.t_points, self.eng_error)
+            plot_data(ax5, self.t_points, self.eng_error)
             # ax1.set_ylim((-max(self.eng_error)*1e1, max(self.eng_error)*1e1))
-            ax1.margins(y=0.5)
-            ax1.set_xlim((0, self.T_final))
-            ax1.set_ylabel(r'$\Delta H$')
+            ax5.margins(y=1)
+            ax5.set_xlim((0, self.T_final))
+            ax5.set_ylabel(r'$\Delta H$')
             
         if hasattr(self, 'g'):
             temp = np.vstack([self.g(y) for y in self.y])
@@ -299,7 +348,7 @@ class MechSystem(System):
             # temp = r_[0, temp[1:]]
             plot_data(ax1, self.t_points, g_norm)
             # ax1.set_ylim((-max(temp)*1e1, max(temp)*1e1))
-            ax1.margins(y=0.5)
+            ax1.margins(y=1)
             ax1.set_xlim((0, self.T_final))
             # plot_data(ax2, self.t_points, temp[1])
             # ax2.set_ylim((min(temp[1])*1e-1, max(temp[1])*1e1))
@@ -321,18 +370,16 @@ class MechSystem(System):
         # ax2.set_ylim((min(temp[1])*1e-1, max(temp[1])*1e1))
         ax2.set_ylabel(r'$\Delta L$')
             
-        ax2.set_xlabel('time')
+        # ax2.set_xlabel('time')
                 
         
         plot_data(ax3, self.t_points, angular_momentum_err)
         # ax1.set_ylim((-max(temp)*1e1, max(temp)*1e1))
-        ax3.margins(y=0.5)
+        ax3.margins(y=1)
         ax3.set_xlim((0, self.T_final))
         # plot_data(ax2, self.t_points, temp[1])
         # ax2.set_ylim((min(temp[1])*1e-1, max(temp[1])*1e1))
         ax3.set_ylabel(r'$\Delta J$')
-            
-        ax3.set_xlabel('time')
         
         # Plot the particle positions over time
         coords = self.y[:, :nosc].reshape(-1, nosc//3, 3)
@@ -340,7 +387,29 @@ class MechSystem(System):
             ax4.plot(coords[:, i, 0], coords[:, i, 1], coords[:, i, 2], 'k-')  # plot the trajectory of each particle
             ax4.scatter(coords[-1, i, 0], coords[-1, i, 1], coords[-1, i, 2], s=20)  # plot the final position of each particle
         
-        # Set the ax4is labels and title
+        
+        # Plot matrix condition number
+        if self.RB is not None:
+            temp = lambda t: self.g_prime(self.y[t])[:,:nosc] @ self.RB[:nosc,:self.nosc_r]
+            mat = lambda t: temp(t) @ self.ham_zz(*np.split(self.y[t],2))[self.nosc_r:,self.nosc_r:] @ temp(t).T
+        else:
+            temp = lambda t: self.g_prime(self.y[t])[:,:nosc]
+            mat = lambda t: temp(t) @ self.ham_zz(*np.split(self.y[t],2))[nosc:,nosc:] @ temp(t).T
+            
+        self.mat_cond = [LA.cond(mat(t), 2) for t in range(self.n)]
+        
+        plot_data(ax6, self.t_points[2:], self.mat_cond[1:])
+        # ax1.set_ylim((-max(temp)*1e1, max(temp)*1e1))
+        ax6.margins(y=0.5)
+        ax6.set_xlim((0, self.T_final))
+        # plot_data(ax2, self.t_points, temp[1])
+        # ax2.set_ylim((min(temp[1])*1e-1, max(temp[1])*1e1))
+        ax6.set_ylabel(r'$\kappa$')
+            
+        ax6.set_xlabel('time')
+        
+        
+        # Set the axes' labels and title
         ax4.set_xlabel('x')
         ax4.set_ylabel('y')
         ax4.set_zlabel('z')
@@ -350,7 +419,7 @@ class MechSystem(System):
         # ax4.set_aspect(1.0/ax4.get_data_ratio(), adjustable='box')
         # ax4.grid(axis='x', color="0.9", linestyle='-', linewidth=1)
         
-        for ax in [ax0, ax1, ax2]:
+        for ax in [ax0, ax1, ax2, ax3, ax5, ax6]:
             ax.label_outer()
                 
         if self.RB is not None:
@@ -416,6 +485,7 @@ try:
     ham_expr = loaded_expressions['ham_expr']
     ham_z_expr = loaded_expressions['ham_z_expr']
     ham_zz_expr = loaded_expressions['ham_zz_expr']
+    _ham_z_ = loaded_expressions['_ham_z_']
     ham_ = loaded_expressions['ham_']
     ham_z_ = loaded_expressions['ham_z_']
     ham_zz_ = loaded_expressions['ham_zz_']
@@ -423,6 +493,7 @@ try:
     p = loaded_expressions['p']
     omega2 = loaded_expressions['omega2']
     beta = loaded_expressions['beta']
+    y = loaded_expressions['y']
     
 except FileNotFoundError:
     print("Hamiltonian expressions not found on disk. Computing and saving them...")
@@ -435,7 +506,7 @@ except FileNotFoundError:
     kin_expr = 0.5 * p.dot(p)
     
     pi = smp.Matrix([(q.row(i+2) - q.row(i)).norm(2)**2 for i in range(nosc//3-2)])
-    pot_expr = 0.5 * omega2.dot((pi -smp.ones(nosc//3-2,1)))
+    pot_expr = 0.5 * omega2.dot((pi -smp.ones(nosc//3-2,1)).applyfunc(lambda x: x**2))
     
     q = q.reshape(nosc,1)
     y = list(q)+list(p)
@@ -444,9 +515,9 @@ except FileNotFoundError:
     ham_z_expr = smp.Matrix([ham_expr]).jacobian(y).T
     ham_zz_expr = ham_z_expr.jacobian(y)
     
-    ham_ = smp.lambdify((q, p, omega2, beta), ham_expr, modules=['numexpr'])
-    _ham_z_ = smp.lambdify((q, p, omega2, beta), ham_z_expr, modules=['scipy'])
-    ham_zz_ = smp.lambdify((q, p, omega2, beta), ham_zz_expr, modules=['scipy'])
+    ham_ = smp.lambdify((q, p, omega2, beta), ham_expr, 'numpy')
+    _ham_z_ = smp.lambdify((q, p, omega2, beta), ham_z_expr, 'numpy')
+    ham_zz_ = smp.lambdify((q, p, omega2, beta), ham_zz_expr, 'numpy')
     
     ham_z_ = lambda q, p, omega2, beta: _ham_z_(q, p, omega2, beta).squeeze()
 
@@ -454,10 +525,11 @@ except FileNotFoundError:
         "ham_expr": ham_expr,
         "ham_z_expr": ham_z_expr,
         "ham_zz_expr": ham_zz_expr,
+        "_ham_z_": _ham_z_,
         "ham_": ham_,
         "ham_z_": ham_z_,
         "ham_zz_": ham_zz_,
-        "q": q, "p": p, "omega2": omega2, "beta": beta
+        "q": q, "p": p, "omega2": omega2, "beta": beta, "y": y,
     }       
     
     # save the expressions to disk
@@ -477,6 +549,7 @@ if MechSystem.constraint_type is not None:
         
         g_expr = loaded_expressions['g_expr']
         g_prime_expr = loaded_expressions['g_prime_expr']
+        _g_lam = loaded_expressions['_g_lam']
         g_lam = loaded_expressions['g_lam']
         g_prime_lam = loaded_expressions['g_prime_lam']
         
@@ -496,14 +569,15 @@ if MechSystem.constraint_type is not None:
         g_expr = smp.Matrix(row_norms+ ddt_row_norms)
         g_prime_expr = g_expr.jacobian(y)
         
-        _g_lam = smp.lambdify((y,), g_expr, modules=['scipy'])
-        g_prime_lam = smp.lambdify((y,), g_prime_expr, modules=['scipy'])
+        _g_lam = smp.lambdify((y,), g_expr, modules=['numpy'])
+        g_prime_lam = smp.lambdify((y,), g_prime_expr, modules=['numpy'])
         
         g_lam = lambda x: _g_lam(x).squeeze()
 
         expressions = {
             "g_expr": g_expr,
             "g_prime_expr": g_prime_expr,
+            "_g_lam": _g_lam,
             "g_lam": g_lam,
             "g_prime_lam": g_prime_lam
         }       
@@ -521,8 +595,10 @@ if __name__ == '__main__':
     print('Computing full solution ...')
 
     kwds = {'ham_': ham_, \
+            '_ham_z_': _ham_z_, \
             'ham_z_': ham_z_, \
             'ham_zz_': ham_zz_, \
+            '_g_lam': _g_lam, \
             'g': g_lam, \
             'g_prime': g_prime_lam, \
             }
@@ -536,6 +612,11 @@ if __name__ == '__main__':
         array_shape = (len(MechSystem.registered_solver_classes), MechSystem.dt_space_dim, MechSystem.Omega2_space_dim-1)
     else:
         array_shape = (len(MechSystem.registered_solver_classes), MechSystem.dt_space_dim, MechSystem.Omega2_space_dim)        
+    
+    # time_lapsed = []
+    # for x in MSsolvers:
+    #     time_lapsed.append(x.time_lapsed)
+    # reshape(time_lapsed, array_shape)
     
     time_lapsed = [reshape([x.time_lapsed for x in MSsolvers], array_shape)]
     
@@ -600,7 +681,6 @@ if __name__ == '__main__':
     else:
         time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
                                     time_lapsed[0].shape[:2]))
-            
 
 #%% Hyper-reduced model
         
@@ -730,7 +810,7 @@ if __name__ == '__main__':
     Observations:
         - hyperreduced model is efficient
             - and symplecitc with sparse MDEIM
-            - and not demonstrable symplectic with DEIM
+            - and not demonstrably symplectic with DEIM
             - order of numerical methods is not verified.
         - The Jacobian calculation in the hyperreduced model
             - is also reduced with DEIM
@@ -740,4 +820,6 @@ if __name__ == '__main__':
         
     # Next steps:
         # Implement elastic beam deformation
+        # Second-order of methods not observable under spherical constraints
+        # Combine the System definitions for RB and RB=None
     '''

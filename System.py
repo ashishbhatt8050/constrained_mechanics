@@ -19,6 +19,9 @@ class System(object):
     def __init__(self, kwds):
         
         self.__dict__.update(kwds)
+        
+        if 'pool' in kwds:
+            self.__dict__.update(kwds['pool'])
 
         "MechSystem constituents"
         # TODO: Pre-squeeze ham_z_ before initializing this object
@@ -152,7 +155,7 @@ class System(object):
                         /(self.non_quad(x[0:1, :], u[None, 0, :]) +1/2 *self.y @ self.Q_spd() @self.y.T)\
                         )
         else:
-            return log(self.ham(x, u)/self.ham(x[:, 0], u[:, 0]))
+            return self.ham(x, u) - self.ham(x[:, 0], u[:, 0])
 
             
 if __name__ == '__main__':

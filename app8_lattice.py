@@ -57,12 +57,12 @@ class MechSystem(System):
         
     # These two properties only have effect during reduction
     reducer = 'psd'
-    predict = True # False = reproduce
+    predict = False # False = reproduce
     hyperreducer = 'MDEIM'
     
     registered_solver_classes = [ODESolver.ConformalImplicitMidpoint, ODESolver.ConformalStormerVerlet]
-    dt_space_dim = 1
-    Omega2_space_dim = 6
+    dt_space_dim = 3
+    Omega2_space_dim = 3
     beta = (max(1e-2, 0*np.random.rand()/10))*0
     JJ = lambda self, d=nosc: r_[c_[zeros((d,d)), eye(d)], c_[-eye(d), zeros((d,d))]]
     
@@ -147,10 +147,9 @@ class MechSystem(System):
         tl = MSsolver.solve()
         MSsolver.time_lapsed.append(tl)
         
-        if MechSystem.dt_space_dim > 1 and MechSystem.Omega2_space_dim == 1:
-            if (not MSsolver.beta) and (MSsolver.constraint_type is None):
-                MSsolver.eng_error = MSsolver.get_en_err()
-                en_error = sqrt(dt)*LA.norm(MSsolver.eng_error)
+        if not MSsolver.beta:
+            MSsolver.eng_error = MSsolver.get_en_err()
+            en_error = sqrt(dt)*LA.norm(MSsolver.eng_error)
         else:
             en_error = None
         
@@ -170,11 +169,20 @@ class MechSystem(System):
         if 'pool' in kwds:
             del kwds['pool']
             print("kwds['pool'] deleted")
+            
+        # rearrange results in the order of submitted jobs
+        for x, y, z in [(x, y, z) for x in MechSystem.registered_solver_classes for y in MechSystem.dt_space for z in Omega2_space]:
+            for MSsolver, error in results:
+                if MSsolver.solver_class == x and MSsolver.dt == y and (MSsolver.Omega2 == z).all():
+                    MSsolvers.append(MSsolver)
+                    if error is not None:
+                        errors['energy'].append(error)
+                    break
     
-        for MSsolver, error in results:
-            MSsolvers.append(MSsolver)
-            if error is not None:
-                errors['energy'].append(error)
+        # for MSsolver, error in results:
+        #     MSsolvers.append(MSsolver)
+        #     if error is not None:
+        #         errors['energy'].append(error)
 
         
     @staticmethod
@@ -439,21 +447,21 @@ class MechSystem(System):
         C_form = lambda numer, denom, r: numer[:-1]/(denom[:-1]**r)
             
         for i in np.arange(0, len(MSsolvers), MechSystem.dt_space_dim * errors['Omega2_space_dim']):
-            MSsolver = MSsolvers[i]
+            MSsolver = MSsolvers[i//(MechSystem.dt_space_dim * errors['Omega2_space_dim'])]
             
             r_values = []
             C_values = []
             
-            if errors['energy']:
+            if len(errors['energy']) > 1:
                 "Compute convergence rates from the error in Energy"
-                r_values.append(r_form(errors['energy'][i:i+MechSystem.dt_space_dim], MechSystem.dt_space))
-                C_values.append(C_form(errors['energy'][i:i+MechSystem.dt_space_dim], MechSystem.dt_space,r_values[-1]))
+                r_values.append(r_form(errors['energy'][i:i+MechSystem.dt_space_dim*errors['Omega2_space_dim']:errors['Omega2_space_dim']], MechSystem.dt_space))
+                C_values.append(C_form(errors['energy'][i:i+MechSystem.dt_space_dim*errors['Omega2_space_dim']:errors['Omega2_space_dim']], MechSystem.dt_space, r_values[-1]))
                 
             if False:
                 '''Compute convergence rate from the error in symplecticness
                 Only applicable if the error is non-zero'''
-                r_values.append(r_form(errors['spl'][i:i+MechSystem.dt_space_dim],MechSystem.dt_space))
-                C_values.append(C_form(errors['spl'][i:i+MechSystem.dt_space_dim],MechSystem.dt_space,r_values[-1]))
+                r_values.append(r_form(errors['spl'][i:i+MechSystem.dt_space_dim], MechSystem.dt_space))
+                C_values.append(C_form(errors['spl'][i:i+MechSystem.dt_space_dim], MechSystem.dt_space, r_values[-1]))
                 
             # Display convergence rates if available
             if r_values:
@@ -814,12 +822,8 @@ if __name__ == '__main__':
             - order of numerical methods is not verified.
         - The Jacobian calculation in the hyperreduced model
             - is also reduced with DEIM
-        - Weighted psd basis gives wrong eigenvalues of the snapshot matrix
-            - sort eigenvalues in increasing order
-            - multiply Chi by Xh_half
         
     # Next steps:
         # Implement elastic beam deformation
         # Second-order of methods not observable under spherical constraints
-        # Combine the System definitions for RB and RB=None
     '''

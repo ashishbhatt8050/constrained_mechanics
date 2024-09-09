@@ -7,13 +7,11 @@ Created on Tue Aug  2 12:40:39 2022
 """
 
 import numpy as np
-from pylab import log, r_, c_, cos, sin, zeros, eye, sqrt, diag, sum
+from pylab import log, r_, c_
 import ODESolver
 
 #%% define the system
 
-# TODO: assimilate into app5
-#       redefine deim ham_z and ham_zz
 class System(object):
     
     def __init__(self, kwds):
@@ -24,7 +22,6 @@ class System(object):
             self.__dict__.update(kwds['pool'])
 
         "MechSystem constituents"
-        # TODO: Pre-squeeze ham_z_ before initializing this object
         self.ham = lambda x, u, Omega2=self.Omega2, beta=self.beta: self.ham_(x, u, Omega2, beta)
         self.ham_z = lambda x, u, Omega2=self.Omega2, beta=self.beta: self.ham_z_(x, u, Omega2, beta)
         self.ham_zz = lambda x, u, Omega2=self.Omega2, beta=self.beta: self.ham_zz_(x, u, Omega2, beta)
@@ -38,75 +35,47 @@ class System(object):
     def __call__(self, y, t, *args, **kwargs):
         
         solver_class = self.solver_class
-        P, RB = self.P, self.RB
         
-        func = kwargs['func']
-        jac = kwargs['jac']
-        
-        if RB is None:
+        if self.RB is None:
             x, u = np.split(y, 2)
-            
-            if func:
-                if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
-                    f = self.JJ() @ self.ham_z(x, u) - self.drag(x, u)
-            
-                elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
-                    f = self.JJ() @ self.ham_z(x, u)
-                    
-                elif solver_class in [ODESolver.ConformalStormerVerlet]:
-                    f = self.JJ() @ self.ham_z(x, u, self.Omega2, 0)
-                    
-                return f
-                        
-            if jac:
-                if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
-                    dfdy = self.JJ() @ self.ham_zz(x, u) - self.drag_z(x, u)
-            
-                elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
-                    dfdy = self.JJ() @ self.ham_zz(x, u)
-                    
-                elif solver_class in [ODESolver.ConformalStormerVerlet]:
-                    dfdy = self.JJ() @ self.ham_zz(x, u, self.Omega2, 0)
-                    
-                return dfdy
-                
+            JJ = self.JJ()
         else:
-            y_ = RB @ y
+            y_ = self.RB @ y
             x, u = np.split(y_, 2)
+            JJ = self.JJ_r
             
-            if func:
-                if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
-                    f = self.JJ_r @ self.ham_z(x, u) -self.drag(*np.split(y, 2))
-            
-                elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
-                    f = self.JJ_r @ self.ham_z(x, u)
+        if kwargs['func']:
+            if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
+                f = JJ @ self.ham_z(x, u) - self.drag(*np.split(y, 2))
+        
+            elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
+                f = JJ @ self.ham_z(x, u)
+                
+            elif solver_class in [ODESolver.ConformalStormerVerlet]:
+                f = JJ @ self.ham_z(x, u, self.Omega2, 0)
+                
+            return f
                     
-                elif solver_class in [ODESolver.ConformalStormerVerlet]:
-                    f = self.JJ_r @ self.ham_z(x, u, self.Omega2, 0)
-                    
-                return f
-                        
-            if jac:
-                if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
-                    dfdy = self.JJ_r @ self.ham_zz(x, u) - self.drag_z(*np.split(y, 2))
-            
-                elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
-                    dfdy = self.JJ_r @ self.ham_zz(x, u)
-                    
-                elif solver_class in [ODESolver.ConformalStormerVerlet]:
-                    dfdy = self.JJ_r @ self.ham_zz(x, u, self.Omega2, 0)
-                    
-                return dfdy
+        if kwargs['jac']:
+            if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
+                dfdy = JJ @ self.ham_zz(x, u) - self.drag_z(*np.split(y, 2))
+        
+            elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
+                dfdy = JJ @ self.ham_zz(x, u)
+                
+            elif solver_class in [ODESolver.ConformalStormerVerlet]:
+                dfdy = JJ @ self.ham_zz(x, u, self.Omega2, 0)
+                
+            return dfdy
                 
         # else:
         #     y_ = RB @ y
         #     x, u = np.split(y_, 2)
-                
-        #     if func:
             
-        #         if solver_class in [ODESolver.ImplicitMidpoint]:
-        #             f = self.JJ_r @ self.ham_z(x, u) - self.drag(*np.split(y, 2))
-                    
+        #     if func:
+        #         if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
+        #             f = self.JJ_r @ self.ham_z(x, u) -self.drag(*np.split(y, 2))
+            
         #         elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
         #             f = self.JJ_r @ self.ham_z(x, u)
                     
@@ -114,32 +83,18 @@ class System(object):
         #             f = self.JJ_r @ self.ham_z(x, u, self.Omega2, 0)
                     
         #         return f
-            
-        #     elif jac:
-                
-        #         # if self.hyperreducer == 'DEIM':
-        
-        #         if solver_class in [ODESolver.ImplicitMidpoint]:
+                        
+        #     if jac:
+        #         if solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
         #             dfdy = self.JJ_r @ self.ham_zz(x, u) - self.drag_z(*np.split(y, 2))
-                    
+            
         #         elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
         #             dfdy = self.JJ_r @ self.ham_zz(x, u)
                     
         #         elif solver_class in [ODESolver.ConformalStormerVerlet]:
         #             dfdy = self.JJ_r @ self.ham_zz(x, u, self.Omega2, 0)
-                            
-                # elif self.hyperreducer == 'MDEIM':
                     
-                #     if solver_class in [ODESolver.ImplicitMidpoint]:
-                #         dfdy = self.JJ_rxRB @ self.ham_zz(x, u) @ RB - self.drag_z(*np.split(y, 2))
-                
-                #     elif solver_class in [ODESolver.ConformalImplicitMidpoint]:
-                #         dfdy = self.JJ_rxRB @ self.ham_zz(x, u) @ RB
-                        
-                #     elif solver_class in [ODESolver.ConformalStormerVerlet]:
-                #         dfdy = self.JJ_rxRB @ self.ham_zz(x, u, self.Omega2, 0) @ RB
-                    
-                return dfdy
+        #         return dfdy
         
     def get_en_err(self):
         

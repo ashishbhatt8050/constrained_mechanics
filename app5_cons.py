@@ -41,12 +41,12 @@ class MechSystem(System):
     assert np.isclose(sum(w_values), 1), 'sum_i w_i must be 1'
 
     "Fixed-point nonliner equations solver properties"
-    tol, M, var, store = 1.0E-12, 100, False, False
+    tol, M, var, store = 1.0E-12, 100, True, False
     
     "System parameters"
     nosc = 50
         
-    # These two properties only have effect during reduction
+    # These two properties only affect reduction
     reducer = 'psd'
     predict = False # False = reproduce
     hyperreducer = 'MDEIM'
@@ -466,9 +466,10 @@ if __name__ == '__main__':
     kwds = {'ham_': ham_, \
             'ham_z_': ham_z_, \
             'ham_zz_': ham_zz_, \
-            'g': g_lam, \
-            'g_prime': g_prime_lam, \
             }
+    
+    if MechSystem.constraint_type is not None:
+        kwds.update({'g': g_lam, 'g_prime': g_prime_lam})
 
     MSsolvers = MechSystem.solver(kwds)
     
@@ -558,9 +559,10 @@ if __name__ == '__main__':
     kwds = {'ham_': ham_, \
             'ham_z_': Pxham_z_, \
             'ham_zz_': Pxham_zz_, \
-            'g': g_lam, \
-            'g_prime': g_prime_lam, \
             }
+    
+    if MechSystem.constraint_type is not None:
+        kwds.update({'g': g_lam, 'g_prime': g_prime_lam})
             
     if MechSystem.hyperreducer == 'MDEIM':
         non_zero_indices = np.nonzero(MSsolvers[0].ham_zz(*np.split(MSsolvers[0].y[0], 2)).flatten())[0]

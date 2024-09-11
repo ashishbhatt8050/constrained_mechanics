@@ -46,7 +46,16 @@ def timing(f):
         return te-ts
     return wrap
 
-def plot_data(ax, x_data, y_data, use_y_labels=True, use_legend=False):
+def compose_solver_solves(func):
+    @wraps(func)
+    def wrapper(self, y_, k):
+        for w_val in self.w_values:
+            y_ = func(self, w_val, y_, k)
+        return y_
+    return wrapper
+
+
+def plot_data(ax, x_data, y_data, xlims=None, ylabel=None, margins=None):
     # now all plot function should be applied to ax
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
@@ -66,15 +75,11 @@ def plot_data(ax, x_data, y_data, use_y_labels=True, use_legend=False):
 
     ax.plot(x_data, y_data, linewidth=2)
 
-    if not use_y_labels:
-        ax.set_yticklabels([])
+    if xlims is not None: ax.set_xlim(xlims)
+    if ylabel is not None: ax.set_ylabel(ylabel)
+    if margins is not None: ax.margins(y=margins)
 
-    if use_legend:
-        frame = ax.legend().get_frame()
-        frame.set_facecolor('1.0')
-        frame.set_edgecolor('1.0')
-
-def logplot(y_data, xlabel=None, xlims=None, use_y_labels=True, use_legend=False):
+def logplot(y_data, xlabel=None, xlims=None):
     
     fig = figure()
     ax = fig.add_subplot(111)
@@ -98,17 +103,9 @@ def logplot(y_data, xlabel=None, xlims=None, use_y_labels=True, use_legend=False
     ax.semilogy(y_data, linewidth=2)
     
     # ax.legend((r'$\mathbb{S}$ (PCIMP)',r'$\mathbb{S}$ (PCSV)'), loc='upper right')
-    if xlabel: ax.set_xlabel(xlabel)
-    ax.margins(y=0.5)
-    if xlims: ax.set_xlim(xlims)
-    
-    if not use_y_labels:
-        ax.set_yticklabels([])
-
-    if use_legend:
-        frame = ax.legend().get_frame()
-        frame.set_facecolor('1.0')
-        frame.set_edgecolor('1.0')
+    if xlabel is not None: ax.set_xlabel(xlabel)
+    ax.margins(y=0.1)
+    if xlims is not None: ax.set_xlim(xlims)
         
     return fig, ax
 

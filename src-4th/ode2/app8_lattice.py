@@ -24,6 +24,7 @@ from pathos.pools import _ProcessPool as Pool
 import multiprocessing
 
 import dill as pickle
+from functools import wraps
 
 import matplotlib.pyplot as plt
 from matplotlib import rc
@@ -38,8 +39,17 @@ import ODESolver
 from Newton import fixed_point
 from System import System
 from podDEIM import POD, DEIM
-from PlotScript import plot_data, tex_table, logplot, save_figure, timing, compose_solver_solves
+from PlotScript import plot_data, tex_table, logplot, save_figure, timing
 
+
+def compose_solver_solves(func):
+    @wraps(func)
+    def wrapper(self, y_, k):
+        for w_val in self.w_values:
+            y_, y_full_ = func(self, w_val, y_, k)
+                
+        return y_, y_full_
+    return wrapper
 
 class MechSystem(System):
     """ Class of MechSystem methods """
@@ -49,7 +59,7 @@ class MechSystem(System):
     w_values.append(1.0 -2.0*(sum(w_values)))
     w_values.append(w_values[1])
     w_values.append(w_values[0])
-    w_values = [1]
+    # w_values = [1]
     assert np.isclose(sum(w_values), 1), 'sum_i w_i must be 1'
 
     "Fixed-point nonliner equations solver properties"
@@ -65,7 +75,7 @@ class MechSystem(System):
     hyperreducer = 'MDEIM'
 
     registered_solver_classes = [ODESolver.ConformalImplicitMidpoint, ODESolver.ConformalStormerVerlet]
-    dt_space_dim = 4
+    dt_space_dim = 3
     Omega2_space_dim = 1
     beta = (max(1e-2, 0*np.random.rand()/10))*0
     JJ = lambda self, d=nosc: r_[c_[zeros((d,d)), eye(d)], c_[-eye(d), zeros((d,d))]]
@@ -74,7 +84,7 @@ class MechSystem(System):
                     # np.tile(3*(1 -np.random.rand(1, nosc//3 -nosc//3//20 -2)), (Omega2_space_dim,1))])
 
     dt_space = linspace(0.01, 0.05, num=dt_space_dim)
-    T_final = 5
+    T_final = 0.5
 
     keep_time = datetime.now().strftime('%Y-%m-%d_%H-%M_')
 
@@ -122,8 +132,7 @@ class MechSystem(System):
             self.P = None
             self.U = None
 
-        if self.solver_class in [ODESolver.ConformalImplicitMidpoint, \
-                                 ODESolver.ConformalStormerVerlet, ODESolver.ImplicitMidpoint]:
+        if self.solver_class in MechSystem.registered_solver_classes:
             self.solver = self.solver_class(self)
         else:
             NameError(f'Unknown {self.solver_class.__name__ = }')
@@ -152,20 +161,20 @@ class MechSystem(System):
 
         if not MSsolver.beta:
             MSsolver.eng_error = MSsolver.get_en_err()
-            en_error = sqrt(dt)*LA.norm(MSsolver.eng_error)
+            MSsolver.en_error = sqrt(dt)*LA.norm(MSsolver.eng_error)
         else:
-            en_error = None
+            MSsolver.en_error = None
 
         if MSsolver.var:
             MSsolver.var_solve()
     
-        print("Number of CPUs:", multiprocessing.cpu_count())
-        print("Number of threads:", multiprocessing.active_children())
+        # print("Number of CPUs:", multiprocessing.cpu_count())
+        # print("Number of threads:", multiprocessing.active_children())
 
-        return MSsolver, en_error
+        return MSsolver
 
     @staticmethod
-    def parallel_solve_mech_system(kwds, Omega2_space, MSsolvers, errors):
+    def parallel_solve_mech_system(kwds, Omega2_space, MSsolvers):
 
         with Pool() as pool:
 
@@ -180,11 +189,9 @@ class MechSystem(System):
         # rearrange results in the order of submitted jobs
         for x, y, z in [(x, y, z) for x in MechSystem.registered_solver_classes \
                         for y in MechSystem.dt_space for z in Omega2_space]:
-            for MSsolver, error in results:
+            for MSsolver in results:
                 if MSsolver.solver_class == x and MSsolver.dt == y and (MSsolver.Omega2 == z).all():
                     MSsolvers.append(MSsolver)
-                    if error is not None:
-                        errors['energy'].append(error)
                     break
 
 
@@ -192,7 +199,6 @@ class MechSystem(System):
     def solver(kwds):
 
         MSsolvers = []
-        errors = {'energy': [], 'spl': []}
 
         if MechSystem.predict: # prediction experiment
 
@@ -210,14 +216,11 @@ class MechSystem(System):
             Omega2_space = MechSystem.Omega2_space
             Omega2_space_dim = len(Omega2_space)
 
-        errors.update({'Omega2_space_dim': Omega2_space_dim})
+        MechSystem.parallel_solve_mech_system(kwds, Omega2_space, MSsolvers)
 
-        MechSystem.parallel_solve_mech_system(kwds, Omega2_space, MSsolvers, errors)
-
-        MechSystem.measures(MSsolvers, errors)
+        MechSystem.measures(MSsolvers, Omega2_space_dim)
 
         return MSsolvers
-
 
     @compose_solver_solves
     def solve_for_w(self, w_val, y_, k):
@@ -227,13 +230,18 @@ class MechSystem(System):
 
         # enforce constraints
         if self.constraint_type:
-
+    
             if self.RB is not None:
-                y_ = y_ @ self.RB.T
+                y_full_ = y_ @ self.RB.T
+            else:
+                y_full_ = y_
+    
+            fixed_point(self.g, y_full_, self.g_prime, self.tol, self.M, False)
+            
+            if self.RB is not None:
+                y_ = y_full_ @ self.RB
 
-            fixed_point(self.g, y_, self.g_prime, self.tol, self.M, False)
-
-        return y_
+        return y_, y_full_
 
 
     @timing
@@ -245,13 +253,13 @@ class MechSystem(System):
             self.y = np.zeros((self.n+1, 2*self.nosc_r))
             self.y_full = np.zeros((self.n+1, 2*self.nosc))
 
-            y_ = np.array([self.y_init, self.y_init]) @ self.RB.T
+            # y_ = np.array([self.y_init, self.y_init]) @ self.RB.T
 
-            if self.constraint_type:
-                fixed_point(self.g, y_, self.g_prime, self.tol, self.M, False)
+            # if self.constraint_type:
+            #     fixed_point(self.g, y_, self.g_prime, self.tol, self.M, False)
 
-            self.y_full[0] = y_[1]
-            self.y_init = self.RB.T @y_[1]
+            self.y_full[0] = MechSystem.y_init
+            # self.y_init = self.RB.T @y_[1]
 
         self.y[0] = self.y_init
         if self.store: self.info = []
@@ -259,14 +267,22 @@ class MechSystem(System):
         for k in range(self.n):
             if self.store: self.info.append(self.y[k])
             y_ = np.array([self.y[k], self.y[k]])
+            
+            # if self.RB is not None:
+            #     y_full_ = np.array([self.y_full[k], self.y_full[k]])
+            # else:
+            #     y_full_ = y_
 
-            y_ = self.solve_for_w(y_, k)
+            y_, y_full_ = self.solve_for_w(y_, k)
+            
+            self.y[k+1] = y_[-1]
 
-            if self.RB is None or self.constraint_type is None:
-                self.y[k+1] = y_[-1]
-            else:
-                self.y_full[k+1] = y_[-1]
-                self.y[k+1] = self.RB.T @y_[-1]
+            # if self.RB is None:
+            #     self.y[k+1] = y_[-1]
+            # else:
+            #     self.y[k+1] = y_[-1]
+            if self.RB is not None:
+                self.y_full[k+1] = y_full_[-1]
 
         '''
         for k in range(self.n):
@@ -324,6 +340,7 @@ class MechSystem(System):
 
         fig = figure()
         fig.tight_layout(pad=0)
+        fig.suptitle(f'integrator = {self.solver_class.__name__}, dt = {self.dt}')
 
         gs = fig.add_gridspec(6, 2, hspace=1)
         ax0, ax1, ax2, ax3, ax4, ax5 = [fig.add_subplot(gs[i, 0]) for i in [0, 1, 2, 3, 4, 5]]
@@ -401,38 +418,27 @@ class MechSystem(System):
         # save_figure(fig, filename)
 
     @staticmethod
-    def measures(MSsolvers, errors):
+    def measures(MSsolvers, Omega2_space_dim):
         "Various measurements based on the solution"
 
-        r_form = lambda numer, denom: (log(roll(numer, -1)/numer)/log(roll(denom, -1)/denom))[:-1]
-        C_form = lambda numer, denom, r: numer[:-1]/(denom[:-1]**r)
+        r_form = lambda numer, denom: r_[float('nan'), (log(roll(numer, -1)/numer)/log(roll(denom, -1)/denom))[:-1]]
+        # C_form = lambda numer, denom, r: numer[:-1]/(denom[:-1]**r)
+        en_error = [MSsolvers[i].en_error for i in range(len(MSsolvers))]
 
-        for i in np.arange(0, len(MSsolvers), MechSystem.dt_space_dim * errors['Omega2_space_dim']):
-            MSsolver = MSsolvers[i//(MechSystem.dt_space_dim * errors['Omega2_space_dim'])]
-
-            r_values = []
-            C_values = []
-
-            if len(errors['energy']) > 1 and MechSystem.dt_space_dim > 1:
+        for i in np.arange(0, len(MSsolvers), MechSystem.dt_space_dim * Omega2_space_dim):
+            
+            if len(en_error) > 1 and en_error[0] is not None and MechSystem.dt_space_dim > 1:
                 "Compute convergence rates from the error in Energy"
-                r_values.append(r_form(errors['energy'][i:i+MechSystem.dt_space_dim*errors['Omega2_space_dim']:errors['Omega2_space_dim']], MechSystem.dt_space))
-                C_values.append(C_form(errors['energy'][i:i+MechSystem.dt_space_dim*errors['Omega2_space_dim']:errors['Omega2_space_dim']], MechSystem.dt_space, r_values[-1]))
+                r_values = r_form(en_error[i:i+MechSystem.dt_space_dim*Omega2_space_dim:Omega2_space_dim], MechSystem.dt_space)
+                # C_values.append(C_form(en_error[i:i+MechSystem.dt_space_dim*Omega2_space_dim:Omega2_space_dim], MechSystem.dt_space, r_values[-1]))
 
-            if False:
-                '''Compute convergence rate from the error in symplecticness
-                Only applicable if the error is non-zero'''
-                r_values.append(r_form(errors['spl'][i:i+MechSystem.dt_space_dim], MechSystem.dt_space))
-                C_values.append(C_form(errors['spl'][i:i+MechSystem.dt_space_dim], MechSystem.dt_space, r_values[-1]))
-
-            # Display convergence rates if available
-            if r_values:
-                temp = r_[ reshape(MechSystem.dt_space, (1,-1)), \
-                          c_[np.reshape([float('nan')]*len(r_values), (len(r_values),1)), r_values]].T
-
-                tex_table(MSsolver.solver_class.__name__, temp.T)
+                # print(f'{r_values =}')
+                # Display convergence rates if available
+                temp = c_[MechSystem.dt_space, r_values].T
+                tex_table(MSsolvers[i].solver_class.__name__, temp)
 
             # Plot the measures
-            MSsolver.plot()
+            MSsolvers[i].plot()
 
 
 #%% Find symbolic quantities
@@ -590,10 +596,10 @@ if __name__ == '__main__':
 
 #%% Reduced order solution
     print('Assembling snapshots ...')
-    y_list = np.hstack([MSsolver.y[np.unique(np.random.randint(0,MSsolver.n,int(MSsolver.n//5)//2))].T for MSsolver in MSsolvers])
+    y_list = np.hstack([MSsolver.y[np.unique(np.random.randint(0,MSsolver.n,int(MSsolver.n)//1))].T for MSsolver in MSsolvers])
     print(f'{y_list.shape = }')
     F2 = [np.array([MSsolver.ham_z(*np.split(y, 2)) for y in MSsolver.y]) for MSsolver in MSsolvers]
-    F2 = np.hstack([F2[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n//5)//2))].T for i in range(len(MSsolvers))])
+    F2 = np.hstack([F2[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)//1))].T for i in range(len(MSsolvers))])
     print(f'{F2.shape = }')
 
     X = {#'Q_half': MSsolvers[-1].Q_spd()[:nosc, :nosc], \
@@ -678,7 +684,7 @@ if __name__ == '__main__':
 
         F3 = [np.array([IP @ MSsolver.ham_zz(*np.split(y, 2)).flatten() for y in MSsolver.y]) for MSsolver in MSsolvers]
 
-        F3 = np.hstack([F3[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)//2))].T for i in range(len(MSsolvers))])
+        F3 = np.hstack([F3[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)//1))].T for i in range(len(MSsolvers))])
         print(f'{F3.shape = }')
 
         Uj, sv, mj = POD(F3, np.eye(F3.shape[0]), MSsolvers[0].tol)
@@ -703,7 +709,7 @@ if __name__ == '__main__':
     if MechSystem.constraint_type is not None and MechSystem.constraints_reduce:
 
         F5 = [np.array([MSsolver.g(y) +0.5 for y in MSsolver.y]) for MSsolver in MSsolvers]
-        F5 = np.hstack([F5[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)//2))].T for i in range(len(MSsolvers))])
+        F5 = np.hstack([F5[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)//1))].T for i in range(len(MSsolvers))])
         print(f'{F5.shape = }')
 
         Uj, sv, mj = POD(F5, np.eye(F5.shape[0]), MechSystem.tol)
@@ -733,14 +739,14 @@ if __name__ == '__main__':
 
         F4 = [np.array([IP @ MSsolver.g_prime(y).flatten() for y in MSsolver.y]) for MSsolver in MSsolvers]
 
-        F4 = np.hstack([F4[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)//2))].T for i in range(len(MSsolvers))])
+        F4 = np.hstack([F4[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)//1))].T for i in range(len(MSsolvers))])
         print(f'{F4.shape = }')
 
         Uj, sv, mj = POD(F4, np.eye(F4.shape[0]), MechSystem.tol)
         del F4
 
         fig, ax = logplot(sv, xlabel='index of singular values', xlims=(1, len(sv)))
-        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        # ax.xaxis.set_major_locator(MaxNLocator(integer=True))
         filename = MechSystem.keep_time +'osc_mdeim_sv' + '.pdf'
         # save_figure(fig, filename)
 
@@ -782,6 +788,7 @@ if __name__ == '__main__':
             - order of numerical methods is not verified.
         - The Jacobian calculation in the hyperreduced model
             - is also reduced with DEIM
+        - higher order integrators are not verified
 
     # Next steps:
         # Implement elastic beam deformation

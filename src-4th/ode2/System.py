@@ -40,8 +40,8 @@ class System(object):
             x, u = np.split(y, 2)
             JJ = self.JJ()
         else:
-            y_ = self.RB @ y
-            x, u = np.split(y_, 2)
+            # y_ = self.RB @ y
+            x, u = np.split(self.RB @ y, 2)
             JJ = self.JJ_r
             
         if kwargs['func']:

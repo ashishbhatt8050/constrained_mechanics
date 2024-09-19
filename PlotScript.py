@@ -46,14 +46,6 @@ def timing(f):
         return te-ts
     return wrap
 
-def compose_solver_solves(func):
-    @wraps(func)
-    def wrapper(self, y_, k):
-        for w_val in self.w_values:
-            y_ = func(self, w_val, y_, k)
-        return y_
-    return wrapper
-
 
 def plot_data(ax, x_data, y_data, xlims=None, ylabel=None, margins=None):
     # now all plot function should be applied to ax

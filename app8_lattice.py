@@ -59,42 +59,47 @@ class MechSystem(System):
     w_values.append(1.0 -2.0*(sum(w_values)))
     w_values.append(w_values[1])
     w_values.append(w_values[0])
-    # w_values = [1]
+    w_values = [1]
     assert np.isclose(sum(w_values), 1), 'sum_i w_i must be 1'
 
     "Fixed-point nonliner equations solver properties"
     tol, M, var, store = 1.0E-12, 100, True, False
 
     "System parameters"
-    nosc = 100*3
+    nosc = 50*3
     assert nosc//3 % 2 == 0, 'nosc//3 must be even'
 
     # These two properties only have effect during reduction
     reducer = 'psd'
-    predict = False # False = reproduce
+    predict = True # False = reproduce
     hyperreducer = 'MDEIM'
 
-    registered_solver_classes = [ODESolver.ConformalImplicitMidpoint, ODESolver.ConformalStormerVerlet]
-    dt_space_dim = 3
-    Omega2_space_dim = 1
+    registered_solver_classes = [ODESolver.ConformalStormerVerlet]
+    dt_space_dim = 1
+    Omega2_space_dim = 10
     beta = (max(1e-2, 0*np.random.rand()/10))*0
     JJ = lambda self, d=nosc: r_[c_[zeros((d,d)), eye(d)], c_[-eye(d), zeros((d,d))]]
 
-    Omega2_space = np.sort(2*(1 -np.random.rand(Omega2_space_dim, nosc//3-2)))
-                    # np.tile(3*(1 -np.random.rand(1, nosc//3 -nosc//3//20 -2)), (Omega2_space_dim,1))])
+    Omega2_space = np.sort(10*(1 -np.random.rand(Omega2_space_dim, nosc//3-2)))
+    # Omega2_space[1:] = Omega2_space[0]
+    # Omega2_space[:,:3] = np.sort(np.random.uniform(Omega2_space[:,0], Omega2_space[:,2], (3, Omega2_space_dim)), axis=0).T
 
     dt_space = linspace(0.01, 0.05, num=dt_space_dim)
-    T_final = 0.5
+    T_final = 2
 
     keep_time = datetime.now().strftime('%Y-%m-%d_%H-%M_')
 
     "Initial conditions satisfying the constraints"
-    positions = np.zeros((nosc//3, 3))
+    # positions = np.zeros((nosc//3, 3))
 
-    for i in range(nosc//3):
-        positions[i, 0] = i % 2 + 0*(i // 2 % 2) * 1e-1
-        positions[i, 1] = i // 2 + 0*(-1)**(i // 2) * 1e-1
-        positions[i, 2] = 0
+    # for i in range(nosc//3):
+    #     positions[i, 0] = i % 2 + 0*(i // 2 % 2) * 1e-1
+    #     positions[i, 1] = i // 2 + 0*(-1)**(i // 2) * 1e-1
+    #     positions[i, 2] = 0
+        
+    # Create a tensor to store the positions
+    i = np.arange(nosc//3)
+    positions = np.stack((i % 2 + 0*(i // 2 % 2) * 1e-1, i // 2 + 0*(-1)**(i // 2) * 1e-1, np.zeros_like(i)), axis=1)
 
     positions = positions.flatten().reshape(-1, 1)
 
@@ -316,23 +321,24 @@ class MechSystem(System):
         if self.RB is not None:
             self.y_red = self.y
             self.y = self.y_full
-
+            
     def var_solve(self):
-        nosc = self.nosc
+    
         if hasattr(self, 'y_red'):
+            y = self.y_red
             nosc = self.y_red.shape[1]//2
+        else:
+            y = self.y
+            nosc = self.nosc
 
-        self.dpsi = np.zeros((2, 2*nosc, 2*nosc))
-        self.dpsi[0] = np.eye(2*nosc)
+        dpsi = np.zeros((2, 2*nosc, 2*nosc))
+        dpsi[0] = np.eye(2*nosc)
         self.sym_error = np.zeros(self.n+1)
 
         for k in range(self.n):
-            if hasattr(self, 'y_red'):
-                dpsi_, _ = self.solver.var_solve(self.y_red[k:k+2], self.t_points[k:k+2])
-            else:
-                dpsi_, _ = self.solver.var_solve(self.y[k:k+2], self.t_points[k:k+2])
-            self.dpsi[1] = dpsi_[-1]
-            sym_error_ =self.solver.symplectic_error(self.dpsi, self.t_points[k:k+2])
+            dpsi_, _ = self.solver.var_solve(y[k:k+2], self.t_points[k:k+2])
+            dpsi[1] = dpsi_[-1]
+            sym_error_ =self.solver.symplectic_error(dpsi, self.t_points[k:k+2])
             self.sym_error[k+1] = sym_error_[-1]
 
     def plot(self):
@@ -348,7 +354,10 @@ class MechSystem(System):
 
         if hasattr(self, 'sym_error'):
             plot_data(ax0, self.t_points, self.sym_error, xlims=(0, self.T_final), \
-                      ylabel=r'$\Delta Sp$', margins=None)
+                      ylabel=r'$\Delta Sp$', margins=1)
+                
+            if max(abs(self.sym_error)) < 1e-15:
+                ax0.set_ylim([-1e-15, 1e-15])
 
         if hasattr(self, 'g'):
             temp = np.vstack([self.g(y) for y in self.y])
@@ -360,7 +369,6 @@ class MechSystem(System):
         if hasattr(self, 'eng_error'):
             plot_data(ax2, self.t_points, self.eng_error, xlims=(0, self.T_final), \
                       ylabel=r'$\Delta H$', margins=1)
-
 
         lin_momentum = np.sum(self.y[:, nosc:].reshape(-1, nosc//3, 3), axis=1)
         lim_momentum_err = r_[0, LA.norm(lin_momentum[1:] - lin_momentum[0], axis=1)]
@@ -374,7 +382,6 @@ class MechSystem(System):
         plot_data(ax3, self.t_points, lim_momentum_err, xlims=(0, self.T_final), \
                   ylabel=r'$\Delta L$', margins=0.5)
 
-
         plot_data(ax4, self.t_points, angular_momentum_err, xlims=(0, self.T_final), \
                   ylabel=r'$\Delta J$', margins=1)
 
@@ -386,7 +393,8 @@ class MechSystem(System):
             temp = lambda t: self.g_prime(self.y[t])[:,:nosc]
             mat = lambda t: temp(t) @ self.ham_zz(*np.split(self.y[t],2))[nosc:,nosc:] @ temp(t).T
 
-        self.mat_cond = [LA.cond(mat(t), 2) for t in range(self.n)]
+        # self.mat_cond = [LA.cond(mat(t), 2) for t in range(self.n)]
+        self.mat_cond = LA.cond(np.array([mat(t) for t in range(self.n)]), 2)
 
         plot_data(ax5, self.t_points[2:], self.mat_cond[1:], xlims=(0, self.T_final), \
                   ylabel=r'$\kappa$', margins=0.5)
@@ -423,9 +431,10 @@ class MechSystem(System):
 
         r_form = lambda numer, denom: r_[float('nan'), (log(roll(numer, -1)/numer)/log(roll(denom, -1)/denom))[:-1]]
         # C_form = lambda numer, denom, r: numer[:-1]/(denom[:-1]**r)
-        en_error = [MSsolvers[i].en_error for i in range(len(MSsolvers))]
+        # en_error = [MSsolvers[i].en_error for i in range(len(MSsolvers))]
+        en_error = [solver.en_error for solver in MSsolvers]
 
-        for i in np.arange(0, len(MSsolvers), MechSystem.dt_space_dim * Omega2_space_dim):
+        for i in range(0, len(MSsolvers), MechSystem.dt_space_dim * Omega2_space_dim):
             
             if len(en_error) > 1 and en_error[0] is not None and MechSystem.dt_space_dim > 1:
                 "Compute convergence rates from the error in Energy"
@@ -595,11 +604,20 @@ if __name__ == '__main__':
     time_lapsed = [reshape([x.time_lapsed for x in MSsolvers], array_shape)]
 
 #%% Reduced order solution
+    # print('Assembling snapshots ...')
+    # y_list = np.hstack([MSsolver.y[np.unique(np.random.randint(0,MSsolver.n,int(MSsolver.n)//1))].T for MSsolver in MSsolvers])
+    # print(f'{y_list.shape = }')
+    # F2 = [np.array([MSsolver.ham_z(*np.split(y, 2)) for y in MSsolver.y]) for MSsolver in MSsolvers]
+    # F2 = np.hstack([F2[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)//1))].T for i in range(len(MSsolvers))])
+    # print(f'{F2.shape = }')
+    
     print('Assembling snapshots ...')
-    y_list = np.hstack([MSsolver.y[np.unique(np.random.randint(0,MSsolver.n,int(MSsolver.n)//1))].T for MSsolver in MSsolvers])
+    n_samples_list = [int(MSsolver.n // 1) for MSsolver in MSsolvers]
+    indices_list = [np.random.choice(MSsolver.n, n_samples, replace=False) for MSsolver, n_samples in zip(MSsolvers, n_samples_list)]
+    y_list = np.hstack([MSsolver.y[indices].T for MSsolver, indices in zip(MSsolvers, indices_list)])
     print(f'{y_list.shape = }')
-    F2 = [np.array([MSsolver.ham_z(*np.split(y, 2)) for y in MSsolver.y]) for MSsolver in MSsolvers]
-    F2 = np.hstack([F2[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)//1))].T for i in range(len(MSsolvers))])
+    
+    F2 = np.hstack([np.array([MSsolver.ham_z(*np.split(y, 2)) for y in MSsolver.y[indices]]).T for MSsolver, indices in zip(MSsolvers, indices_list)])
     print(f'{F2.shape = }')
 
     X = {#'Q_half': MSsolvers[-1].Q_spd()[:nosc, :nosc], \
@@ -646,15 +664,26 @@ if __name__ == '__main__':
     print('solving reduced system ...')
     MSsolvers_r = MechSystem.solver(kwds)
 
+    # if len(MSsolvers) == len(MSsolvers_r):
+    #     print('solution errors')
+    #     print(reshape([np.amax(abs(MSsolvers[i].y -MSsolvers_r[i].y)) for i in range(len(MSsolvers))], array_shape))
+
+    #     time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
+    #                                 time_lapsed[0].shape)/time_lapsed[0]*100)
+    # else:
+    #     time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
+    #                                 time_lapsed[0].shape[:2]))
+            
     if len(MSsolvers) == len(MSsolvers_r):
         print('solution errors')
-        print(reshape([np.amax(abs(MSsolvers[i].y -MSsolvers_r[i].y)) for i in range(len(MSsolvers))], array_shape))
-
-        time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
-                                    time_lapsed[0].shape)/time_lapsed[0]*100)
+        print(reshape([np.amax(abs(y1 - y2)) for y1, y2 in zip(MSsolvers, MSsolvers_r)], array_shape))
+    
+        time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r], time_lapsed[0].shape) / time_lapsed[0] * 100)
     else:
-        time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
-                                    time_lapsed[0].shape[:2]))
+        time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r], time_lapsed[0].shape[:2]))
+
+            
+    1/0
 
 #%% Hyper-reduced model
 
@@ -679,12 +708,20 @@ if __name__ == '__main__':
 
         IP = np.zeros((len(non_zero_indices), (2*nosc)**2))
 
-        for i, val in enumerate(non_zero_indices):
-            IP[i, val] = 1
+        # for i, val in enumerate(non_zero_indices):
+        #     IP[i, val] = 1
+            
+        IP[np.arange(len(non_zero_indices)), non_zero_indices] = 1
 
-        F3 = [np.array([IP @ MSsolver.ham_zz(*np.split(y, 2)).flatten() for y in MSsolver.y]) for MSsolver in MSsolvers]
+        # F3 = [np.array([IP @ MSsolver.ham_zz(*np.split(y, 2)).flatten() for y in MSsolver.y]) for MSsolver in MSsolvers]
 
-        F3 = np.hstack([F3[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)//1))].T for i in range(len(MSsolvers))])
+        # F3 = np.hstack([F3[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)//1))].T for i in range(len(MSsolvers))])
+        # print(f'{F3.shape = }')
+        
+        # n_samples_list = [int(MSsolver.n // 1) for MSsolver in MSsolvers]
+        # indices_list = [np.random.choice(MSsolver.n, n_samples, replace=False) for MSsolver, n_samples in zip(MSsolvers, n_samples_list)]
+        
+        F3 = np.hstack([np.array([IP @ MSsolver.ham_zz(*np.split(y, 2)).flatten() for y in MSsolver.y[indices]]).T for MSsolver, indices in zip(MSsolvers, indices_list)])
         print(f'{F3.shape = }')
 
         Uj, sv, mj = POD(F3, np.eye(F3.shape[0]), MSsolvers[0].tol)
@@ -708,8 +745,15 @@ if __name__ == '__main__':
 
     if MechSystem.constraint_type is not None and MechSystem.constraints_reduce:
 
-        F5 = [np.array([MSsolver.g(y) +0.5 for y in MSsolver.y]) for MSsolver in MSsolvers]
-        F5 = np.hstack([F5[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)//1))].T for i in range(len(MSsolvers))])
+        # F5 = [np.array([MSsolver.g(y) +0.5 for y in MSsolver.y]) for MSsolver in MSsolvers]
+        # F5 = np.hstack([F5[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)//1))].T for i in range(len(MSsolvers))])
+        # print(f'{F5.shape = }')
+        
+        # n_samples_list = [int(MSsolver.n // 1) for MSsolver in MSsolvers]
+        # indices_list = [np.random.choice(MSsolver.n, n_samples, replace=False) for MSsolver, n_samples in zip(MSsolvers, n_samples_list)]
+        
+        # g_vec = np.vectorize(lambda MSsolver, y: MSsolver.g(y) + 0.5)
+        F5 = np.hstack([np.array([MSsolver.g(y) + 0 for y in MSsolver.y[indices]]).T for MSsolver, indices in zip(MSsolvers, indices_list)])
         print(f'{F5.shape = }')
 
         Uj, sv, mj = POD(F5, np.eye(F5.shape[0]), MechSystem.tol)
@@ -727,19 +771,27 @@ if __name__ == '__main__':
 
         _Pxg = smp.lambdify((y,), _g_col, modules=['scipy'])
 
-        kwds.update({'g': lambda y: (_UxPxU_inv @ _Pxg(y) -0.5).squeeze()})
+        kwds.update({'g': lambda y: (_UxPxU_inv @ _Pxg(y) -0).squeeze()})
 
         non_zero_indices = np.nonzero(MSsolvers[0].g_prime(MSsolvers[0].y[0]).flatten())[0]
 
         g_prime_shape= MSsolvers[0].g_prime(MSsolvers[0].y[0]).shape
         IP = np.zeros((len(non_zero_indices), np.prod(g_prime_shape)))
 
-        for i, val in enumerate(non_zero_indices):
-            IP[i, val] = 1
+        # for i, val in enumerate(non_zero_indices):
+        #     IP[i, val] = 1
+            
+        IP[np.arange(len(non_zero_indices)), non_zero_indices] = 1
 
-        F4 = [np.array([IP @ MSsolver.g_prime(y).flatten() for y in MSsolver.y]) for MSsolver in MSsolvers]
+        # F4 = [np.array([IP @ MSsolver.g_prime(y).flatten() for y in MSsolver.y]) for MSsolver in MSsolvers]
 
-        F4 = np.hstack([F4[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)//1))].T for i in range(len(MSsolvers))])
+        # F4 = np.hstack([F4[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)//1))].T for i in range(len(MSsolvers))])
+        # print(f'{F4.shape = }')
+        
+        # n_samples_list = [int(MSsolver.n // 1) for MSsolver in MSsolvers]
+        # indices_list = [np.random.choice(MSsolver.n, n_samples, replace=False) for MSsolver, n_samples in zip(MSsolvers, n_samples_list)]
+        
+        F4 = np.hstack([np.array([IP @ MSsolver.g_prime(y).flatten() for y in MSsolver.y[indices]]).T for MSsolver, indices in zip(MSsolvers, indices_list)])
         print(f'{F4.shape = }')
 
         Uj, sv, mj = POD(F4, np.eye(F4.shape[0]), MechSystem.tol)
@@ -766,15 +818,23 @@ if __name__ == '__main__':
     print('solving hyper-reduced system ...')
     MSsolvers_dr = MechSystem.solver(kwds)
 
+    # if len(MSsolvers) == len(MSsolvers_dr):
+    #     print('solution errors')
+    #     print(reshape([np.amax(abs(MSsolvers[i].y -MSsolvers_dr[i].y)) for i in range(len(MSsolvers))], array_shape))
+
+    #     time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_dr],\
+    #                                 time_lapsed[0].shape)/time_lapsed[0]*100)
+    # else:
+    #     time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_dr],\
+    #                                 time_lapsed[0].shape[:2]))
+            
     if len(MSsolvers) == len(MSsolvers_dr):
         print('solution errors')
-        print(reshape([np.amax(abs(MSsolvers[i].y -MSsolvers_dr[i].y)) for i in range(len(MSsolvers))], array_shape))
-
-        time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_dr],\
-                                    time_lapsed[0].shape)/time_lapsed[0]*100)
+        print(reshape([np.amax(abs(y1 - y2)) for y1, y2 in zip(MSsolvers, MSsolvers_dr)], array_shape))
+    
+        time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_dr], time_lapsed[0].shape) / time_lapsed[0] * 100)
     else:
-        time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_dr],\
-                                    time_lapsed[0].shape[:2]))
+        time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_dr], time_lapsed[0].shape[:2]))
 
     print(f'{time_lapsed = }')
 
@@ -789,6 +849,7 @@ if __name__ == '__main__':
         - The Jacobian calculation in the hyperreduced model
             - is also reduced with DEIM
         - higher order integrators are not verified
+        - constrained Hamiltonian system should also show order of the integrator
 
     # Next steps:
         # Implement elastic beam deformation

@@ -118,18 +118,22 @@ def save_figure(fig, filename):
     pickle.dump(fig, open(fig_path+'.fig.pickle', 'wb'))
     
     
-    # edit the figure later
-    # import pickle
-    
-    # with open('data/2024-04-08_10-10_osc_ConformalStormerVerlet_reduced.fig.pickle', 'rb') as file: figx = pickle.load(file)
-    
-    # figx.show() # Show the figure, edit it, etc.!
-    # ax = figx.axes
-    # ax[0].set_xlabel('time')
-    # ax[0].set_ylim([-2e-16, 2e-16])
-    # ax[2].set_xlim([1,6])
+#%% # edit the figure later
+# import pickle
 
+# with open('data/2024-10-04_13-39_osc_ConformalStormerVerlet_full.fig.pickle', 'rb') as file:
+    
+#     figx = pickle.load(file)
 
+#     figx.show() # Show the figure, edit it, etc.!
+#     ax = figx.axes
+#     # ax[0].set_xlabel('time')
+#     ax[0].set_ylim([-1e-15, 1e-15])
+#     # ax[2].set_xlim([1,6])
+#     figx.savefig('data/2024-10-04_13-39_osc_ConformalStormerVerlet_full_2.pdf')
+#     figx.savefig('data/2024-10-04_13-39_osc_ConformalStormerVerlet_full_2.eps')
+
+#%%
 def tex_table(solver_name, array2print):
     print(solver_name, "\n", " \\\\\n".join([" & ".join(map('{0:.3f}'.format, line)) for line in array2print]))
     # print(solver_name, "\n \\num{", " \\\\\n \\num{".join(["} & \\num{".join(map('{0:.6f}'.format, line)) for line in array2print]))

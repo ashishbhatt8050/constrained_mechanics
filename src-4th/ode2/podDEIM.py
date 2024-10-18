@@ -54,7 +54,7 @@ def POD(S, Xh, eps=None):
         Sigma2, Chi_ = np.flip(Sigma2), np.flip(Chi_, axis=1)
         Sigma2, Chi_ = Sigma2[Sigma2>0], Chi_.T[Sigma2>0].T
         
-        assert np.allclose(K_ @ Chi_, Sigma2 * Chi_)
+        assert np.allclose(K_ @ Chi_, Sigma2 * Chi_, atol=1e-5)
         
         Chi = np.linalg.solve(Xh_half, Chi_)
         

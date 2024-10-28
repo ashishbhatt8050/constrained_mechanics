@@ -3,6 +3,13 @@ from pylab import r_, c_, eye
 from numpy import linalg as LA
 import os
 
+import torch
+import torch.linalg as torchLA
+torch.set_grad_enabled(False)
+# torch.cuda.empty_cache()
+
+from PlotScript import timing
+
 class ODESolver(object):
     """
     Superclass for numerical methods solving scalar and vector ODEs
@@ -104,35 +111,36 @@ class ODESolver(object):
 
         self.u = u
         self.t = np.asarray(time_points)
-        n = self.t.size
+        n = self.t.size - 1
         if self.U0.shape != self.u[0].shape:
             self.neq = self.u[0].size
             
         if self.neq%2 == 1:  # odd number of equations
             raise ValueError('ODESolver.var_solve requires even number of equations')
         else:              # systems of ODEs
-            self.du = np.zeros((n, self.neq, self.neq))
+            self.du = np.zeros((n+1, self.neq, self.neq))
             self.I_mat = np.eye(self.neq)
 
         # Initialize du[0] with identity matrix
         self.du[0] = self.I_mat
 
         # Time loop
-        for k in range(n-1):
+        self.dt = self.t[1] -self.t[0]
+        for k in range(n):
             self.k = k
-            self.dt = self.t[k+1] -self.t[k]
             self.du[k+1] = self.var_advance()
             if terminate(self.u, self.t, self.k+1):
                 break  # terminate loop over k
-        return self.du[:k+2], self.t[:k+2]
+        return self.du, self.t
 
+    # @timing
     def symplectic_error(self, du, t):
         '''
         Compute Symplectic error for the method
         '''
-        n = t.size
+        # n = t.size
         #du = self.du
-        Ecoeff = self.Ecoeff
+        Ecoeff_dt = self.Ecoeff(-(t[1] - t[0]))**4
 
         if hasattr(self, 'JJ_r'):
             J_mat = self.JJ_r
@@ -141,14 +149,63 @@ class ODESolver(object):
         else:
             raise ValueError
             
-        symp_error = np.zeros(n)
+        # symp_error = np.zeros(n+1)
 
-        for k in range(n-1):
-            dt = t[k+1] -t[k]
-            symp_error[k+1] = np.log(LA.norm((du[k+1].T).dot(LA.solve(J_mat, du[k+1])))/LA.norm(Ecoeff(-dt)**4*LA.solve(J_mat, eye(J_mat.shape[0]))))
+        # for k in range(n-1):
+        #     dt = t[k+1] -t[k]
+        #     symp_error[k+1] = np.log(LA.norm((du[k+1].T).dot(LA.solve(J_mat, du[k+1])))/LA.norm(Ecoeff_dt*LA.solve(J_mat, eye(J_mat.shape[0]))))
                 #LA.norm((du[k+1].T).dot(LA.solve(J_mat, du[k+1])) -Ecoeff(-dt)**4*LA.solve(J_mat, eye(J_mat.shape[0])))
             
+        # symp_error = np.log(LA.norm(np.dot(du.T, LA.solve(J_mat, du)), axis=1) / LA.norm(Ecoeff_dt * LA.solve(J_mat, np.eye(J_mat.shape[0]))))
             
+        # symp_error = np.log(LA.norm(du.transpose((0,2,1)) @ LA.solve(J_mat, du), axis=(1,2)) / LA.norm(Ecoeff_dt * LA.solve(J_mat, np.eye(J_mat.shape[0]))))
+        
+        
+        # Convert the numpy arrays to PyTorch tensors
+        du = torch.from_numpy(du)
+        J_mat = torch.from_numpy(J_mat)
+        
+        
+        # # Check if CUDA is available and has enough memory
+        # if torch.cuda.is_available():
+        #     device = torch.device('cuda')
+        #     available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0)
+        #     required_memory = du.element_size() * du.nelement() + J_mat.element_size() * J_mat.nelement() #+ Ecoeff_dt.element_size() * Ecoeff_dt.nelement()
+        #     if available_memory < 3 * required_memory:
+        #         print("CUDA out of memory, switching to CPU")
+        #         device = torch.device('cpu')
+        # else:
+        #     device = torch.device('cpu')
+        
+        # Move the tensors to the desired device (e.g. CUDA or CPU)
+        device = torch.device('cpu') # if torch.cuda.is_available() else 'cpu')
+        # print(f'{device = }')
+        du = du.to(device)
+        J_mat = J_mat.to(device)
+        Ecoeff_dt = torch.tensor(Ecoeff_dt, device=device)
+        
+        # Perform the operation
+        du_transpose = du.transpose(1, 2)
+        du_solve = torchLA.solve(J_mat, du)
+        du_solve_transpose = torchLA.solve(J_mat, torch.eye(J_mat.shape[0], device=device, dtype=J_mat.dtype))
+        symp_error = torch.log(torchLA.norm(du_transpose @ du_solve, dim=(1, 2)) / torchLA.norm(Ecoeff_dt * du_solve_transpose))
+        
+        # del du, J_mat
+        
+        # Move the result back to CPU
+        symp_error = symp_error.cpu().numpy()
+        
+        
+        # # Release cached memory
+        # torch.cuda.empty_cache()
+        
+        # # Reset maximum memory allocated and reserved
+        # torch.cuda.reset_max_memory_allocated()
+        # torch.cuda.reset_max_memory_reserved()
+        
+        # Synchronize CUDA streams
+        # torch.cuda.synchronize()
+        
         return symp_error
 
 class ForwardEuler(ODESolver):
@@ -229,17 +286,32 @@ class ConformalStormerVerlet(ODESolver):
         self.Gamma_p, self.Gamma_m = lambda dt: 1 + self.beta*dt/2, lambda dt: 1 - self.beta*dt/2
 
     def advance(self):
-        u, f, k, t, Ecoeff, neq = self.u, self.f, self.k, self.t, self.Ecoeff, \
-                                    self.neq
+        u, f, k, t, neq = self.u, self.f, self.k, self.t, self.neq
         
         dt = self.dt
         Gamma_p, Gamma_m = self.Gamma_p(dt), self.Gamma_m(dt)
         
+        # Split u into two parts for easier manipulation
+        u_upper = u[k, :neq // 2]
+        u_lower = u[k, neq // 2:]
+
+        # Calculate intermediate values
+        Ecoeff_dt = self.Ecoeff(-dt)
+        f_lower = f(u[k], t[k])[neq // 2:]
+        
+        # u_new = np.zeros(neq)
+        # u_new[neq//2:] = (Ecoeff_dt * u[k,neq//2:] +dt/2*f(u[k], t[k])[neq//2:])/Gamma_p
+        # u_new[:neq//2] = (Gamma_p*Ecoeff_dt*u[k,:neq//2] +dt*f(np.reshape([u[k,:neq//2], u_new[neq//2:]],neq), t[k])[:neq//2]) \
+        #     * Ecoeff_dt/Gamma_m
+        # u_new[neq//2:] = Ecoeff_dt*(Gamma_m*u_new[neq//2:] +dt/2*f(np.reshape([u_new[:neq//2], u_new[neq//2:]],neq), t[k])[neq//2:])
+        
         u_new = np.zeros(neq)
-        u_new[neq//2:] = (Ecoeff(-dt)*u[k,neq//2:] +dt/2*f(u[k], t[k])[neq//2:])/Gamma_p
-        u_new[:neq//2] = (Gamma_p*Ecoeff(-dt)*u[k,:neq//2] +dt*f(np.reshape([u[k,:neq//2], u_new[neq//2:]],neq), t[k])[:neq//2]) \
-            * Ecoeff(-dt)/Gamma_m
-        u_new[neq//2:] = Ecoeff(-dt)*(Gamma_m*u_new[neq//2:] +dt/2*f(np.reshape([u_new[:neq//2], u_new[neq//2:]],neq), t[k])[neq//2:])
+        u_new_lower = (Ecoeff_dt * u_lower + dt/2 * f_lower)/Gamma_p
+        u_new_upper = (Gamma_p * Ecoeff_dt * u_upper + dt * f(np.concatenate([u_upper, u_new_lower]), t[k])[:neq//2]) * Ecoeff_dt / Gamma_m
+        u_new_lower = Ecoeff_dt * (Gamma_m * u_new_lower + dt/2 * f(np.concatenate([u_new_upper, u_new_lower]), t[k])[neq//2:])
+        
+        # Combine u_new_lower and u_new_upper
+        u_new = np.concatenate((u_new_upper, u_new_lower))
         
         return u_new, u_new
 
@@ -252,10 +324,11 @@ class ConformalStormerVerlet(ODESolver):
         # u_new = (Ecoeff(-dt)*u[k,neq//2:] +dt/2*f(Ecoeff(-dt)*u[k], t[k])[neq//2:])/Gamma_p
         
         u_new = (Ecoeff(-dt)*u[k,neq//2:] +dt/2*f(u[k], t[k])[neq//2:])/Gamma_p
+        dfdu_k = dfdu(np.concatenate([u[k,:neq//2], u_new]), t[k])
         
-        H_qq_m = -dfdu(np.reshape([u[k,:neq//2], u_new],neq), t[k])[neq//2:,:neq//2]
-        H_qq_p = -dfdu(np.reshape([u[k+1,:neq//2], u_new],neq), t[k])[neq//2:,:neq//2]
-        H_pp = dfdu(np.reshape([u[k,:neq//2], u_new],neq), t[k])[:neq//2, neq//2:]
+        H_qq_m = -dfdu_k[neq//2:,:neq//2]
+        H_qq_p = -dfdu(np.concatenate([u[k+1,:neq//2], u_new]), t[k])[neq//2:,:neq//2]
+        H_pp = dfdu_k[:neq//2, neq//2:]
         
         du_11 = (Gamma_p*np.eye(neq//2) -dt**2*H_pp @ H_qq_m/2/Gamma_p)/Gamma_m
         du_12 = dt*H_pp/Gamma_p/Gamma_m

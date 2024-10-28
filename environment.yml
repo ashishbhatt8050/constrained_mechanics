@@ -1,6 +1,8 @@
-name: modred-dae
+name: modred-dae-torch
 channels:
   - conda-forge
+  - pytorch
+  - nvidia
 dependencies:
   - brewer2mpl
   - cycler
@@ -10,4 +12,8 @@ dependencies:
   - spyder
   - sympy
   - time
-prefix: /home/bhattah/miniconda3/envs/modred-dae
+  - numexpr
+  - joblib
+  - pathos
+  - pytorch
+  - pytorch-cuda=12.4

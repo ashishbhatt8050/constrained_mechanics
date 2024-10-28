@@ -1,36 +1,55 @@
-import numpy as np
 from numpy import linalg as LA
 import scipy as sp
-from pylab import sum
-from scipy.sparse import issparse
-from scipy.sparse.linalg import spsolve, ArpackNoConvergence, ArpackError
 
 def Newton(f, x, dfdx, epsilon=1.0E-7, N=100, store=False):
+    """
+    Newton's method for finding roots of a function.
+
+    Parameters:
+    f (function): The function to find roots for.
+    x (float or array): The initial guess.
+    dfdx (function): The derivative of the function.
+    epsilon (float, optional): The tolerance for convergence. Defaults to 1.0E-7.
+    N (int, optional): The maximum number of iterations. Defaults to 100.
+    store (bool, optional): Whether to store the iteration history. Defaults to False.
+
+    Returns:
+    x (float or array): The root of the function.
+    n (int): The number of iterations.
+    info (list, optional): The iteration history if store is True.
+    """
+    
+    # Initialize variables
     f_value = f(x)
+    dfdx_value = dfdx(x)
     n = 0
     if store: info = []
-    while np.linalg.norm(f_value) > epsilon and n <= N:
-        dfdx_value = dfdx(x)
-        if np.linalg.norm(dfdx_value) < 1E-14:
-            raise ValueError("Newton: f'(%g)=%g" % (x, np.linalg.norm(dfdx_value)))
 
-        if not issparse(dfdx_value):
-            try:
-                x = x - np.linalg.solve(dfdx_value, f_value)
-            except np.linalg.LinAlgError:
-                x = x - f_value/dfdx_value
-            except:
-                raise np.linalg.LinAlgError("Unable to solve the system")
-        else:
-            try:
+    # Check for sparse or dense matrix
+    is_sparse = sp.issparse(dfdx_value)
+    
+    while LA.norm(f_value) > epsilon and n <= N:
+        
+        # Check for singular derivative
+        if LA.norm(dfdx_value) < 1E-14:
+            raise ValueError("Newton: f'(%g)=%g" % (x, LA.norm(dfdx_value)))
+
+        # Solve the system
+        if is_sparse:
+            if f_value.size > 1:
                 x = x - sp.sparse.linalg.spsolve(dfdx_value, f_value)
-            except sp.linalg.LinAlgError:
-                x = x - f_value/dfdx_value
-            except:
-                raise ArpackError("Unable to solve the sparse system")
-            
-        n += 1
+            else:
+                x = x - f_value / dfdx_value
+        else:
+            if f_value.size > 1:
+                x = x - LA.solve(dfdx_value, f_value)
+            else:
+                x = x - f_value / dfdx_value
+        
+        # Update variables
         f_value = f(x)
+        dfdx_value = dfdx(x)
+        n += 1
         if store:
             info.append(x)
     
@@ -40,49 +59,51 @@ def Newton(f, x, dfdx, epsilon=1.0E-7, N=100, store=False):
         return x, n, f_value
     
 def fixed_point(g, x, dgdx, tol, M, store):
-    # TODO: convert * to matrix multiplication
-    
-    # m, Delta_Lambda = 0, g(x[1:2])/sum(dgdx(x[1:2])*dgdx(x[0:1]), axis=1)
-    # m, Delta_Lambda = 0, g(x[1])/((dgdx(x[1:2]).dot(dgdx(x[0:1]).T)).diagonal())
-    
+    """
+    Fixed point iteration method.
+
+    Parameters:
+    g (function): The function to find the fixed point for.
+    x (array): The initial guess.
+    dgdx (function): The derivative of the function.
+    tol (float): The tolerance for convergence.
+    M (int): The maximum number of iterations.
+    store (bool): Whether to store the iteration history.
+
+    Returns:
+    x (array): The fixed point.
+    info (list, optional): The iteration history if store is True.
+    """
+
+    # Initialize variables
     R = dgdx(x[1]) @ dgdx(x[0]).T
-    
-    if R.shape == (1,0) or R.shape == (1,1) or R.shape == ():
-        m, Delta_Lambda = 0, g(x[1])/R
-    else:
-        m, Delta_Lambda = 0, LA.solve(R, g(x[1]))
-    
-    if store: info = [(m, Delta_Lambda, x[1])]
+    Delta_Lambda = g(x[1]) / R if R.ndim <= 1 else LA.solve(R, g(x[1]))
+    m = 0
 
-    while ((LA.norm(g(x[1])) > tol) and (m < M)):
-    
-        if R.shape == (1,0) or R.shape == (1,1) or R.shape == ():
-            x[1] = x[1] -dgdx(x[0]) * Delta_Lambda
-    
-            # m, Delta_Lambda = m+1, g(x[1:2])/sum(dgdx(x[1:2])*dgdx(x[0:1]), axis=1)
-            R = dgdx(x[1]) @ dgdx(x[0]).T
-            m, Delta_Lambda = m+1, g(x[1])/R
+    if store:
+        info = [(m, Delta_Lambda, x[1])]
+
+    # Fixed point iteration
+    while LA.norm(g(x[1])) > tol and m < M:
+        # Update x
+        if R.ndim <= 1:
+            x[1] -= dgdx(x[0]) * Delta_Lambda
         else:
-            x[1] = x[1] -dgdx(x[0]).T @ Delta_Lambda
-    
-            # m, Delta_Lambda = m+1, g(x[1:2])/sum(dgdx(x[1:2])*dgdx(x[0:1]), axis=1)
-            R = dgdx(x[1]) @ dgdx(x[0]).T
-            m, Delta_Lambda = m+1, LA.solve(R, g(x[1]))
-        
-        # m, Delta_Lambda = m+1, LA.solve(R, g(x[1]))
-        
-        x[0] = x[1] # TODO: needs further justification
-        if store: info.append((m, Delta_Lambda, x[1]))
+            x[1] -= dgdx(x[0]).T @ Delta_Lambda
 
-    # while ((np.amax(abs(g(x[1]))) > tol) and (m < M)):
-    #     x[1] = x[1] -dgdx(x[0:1]).T.dot(Delta_Lambda)
+        # Update R and Delta_Lambda
+        R = dgdx(x[1]) @ dgdx(x[0]).T
+        Delta_Lambda = g(x[1]) / R if R.ndim <= 1 else LA.solve(R, g(x[1]))
 
-    #     # m, Delta_Lambda = m+1, g(x[1:2])/sum(dgdx(x[1:2])*dgdx(x[0:1]), axis=1)
-    #     m, Delta_Lambda = m+1, g(x[1])/((dgdx(x[1:2]).dot(dgdx(x[0:1]).T)).diagonal())
-    #     if store: info.append((m, Delta_Lambda, x[1]))
+        # Update m and x[0]
+        m += 1
+        x[0] = x[1]
+
+        # Store iteration history
+        if store:
+            info.append((m, Delta_Lambda, x[1]))
         
-    # print('%s' %m)
-        
+    # Check convergence
     assert m < M, "Nonlinear solver did not converge"
 
 #%% Testing

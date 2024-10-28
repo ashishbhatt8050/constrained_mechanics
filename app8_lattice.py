@@ -76,7 +76,7 @@ class MechSystem(System):
 
     registered_solver_classes = [ODESolver.ConformalStormerVerlet]
     dt_space_dim = 1
-    Omega2_space_dim = 10
+    Omega2_space_dim = 5
     beta = (max(1e-2, 0*np.random.rand()/10))*0
     JJ = lambda self, d=nosc: r_[c_[zeros((d,d)), eye(d)], c_[-eye(d), zeros((d,d))]]
 
@@ -326,20 +326,20 @@ class MechSystem(System):
     
         if hasattr(self, 'y_red'):
             y = self.y_red
-            nosc = self.y_red.shape[1]//2
+            # nosc = self.y_red.shape[1]//2
         else:
             y = self.y
-            nosc = self.nosc
+            # nosc = self.nosc
 
-        dpsi = np.zeros((2, 2*nosc, 2*nosc))
-        dpsi[0] = np.eye(2*nosc)
-        self.sym_error = np.zeros(self.n+1)
+        # dpsi = np.zeros((self.n+1, 2*nosc, 2*nosc))
+        # dpsi[0] = np.eye(2*nosc)
+        # self.sym_error = np.zeros(self.n+1)
 
-        for k in range(self.n):
-            dpsi_, _ = self.solver.var_solve(y[k:k+2], self.t_points[k:k+2])
-            dpsi[1] = dpsi_[-1]
-            sym_error_ =self.solver.symplectic_error(dpsi, self.t_points[k:k+2])
-            self.sym_error[k+1] = sym_error_[-1]
+        # for k in range(self.n):
+        dpsi, _ = self.solver.var_solve(y, self.t_points)
+        # dpsi[1] = dpsi_[-1]
+        self.sym_error = self.solver.symplectic_error(dpsi, self.t_points)
+        # self.sym_error[k+1] = sym_error_[-1]
 
     def plot(self):
         "plot the results"
@@ -479,7 +479,7 @@ try:
     beta = loaded_expressions['beta']
     y = loaded_expressions['y']
 
-except FileNotFoundError:
+except: #FileNotFoundError or AttributeError:
     print("Hamiltonian expressions not found on disk. Computing and saving them...")
 
     q = smp.Matrix(smp.symbols('q_:{}_:{}'.format(nosc//3,3), real=True)).reshape(nosc//3,3)
@@ -536,7 +536,7 @@ if MechSystem.constraint_type is not None:
         g_lam = loaded_expressions['g_lam']
         g_prime_lam = loaded_expressions['g_prime_lam']
 
-    except FileNotFoundError:
+    except: #FileNotFoundError:
         print("Constraints not found on disk. Computing and saving them...")
 
         q = q.reshape(nosc//3,3)
@@ -681,9 +681,6 @@ if __name__ == '__main__':
         time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r], time_lapsed[0].shape) / time_lapsed[0] * 100)
     else:
         time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r], time_lapsed[0].shape[:2]))
-
-            
-    1/0
 
 #%% Hyper-reduced model
 

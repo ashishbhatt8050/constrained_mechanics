@@ -71,7 +71,6 @@ def POD(S, Xh, eps=None):
     return Chi[:, :N], np.sqrt(Sigma2), N
 # %%
 
-
 def DEIM(Ub, plot_deim=False):
     'Function for discrete empirical interpolation of the basis Ub'
     p = abs(Ub[:, 0]).argmax()
@@ -139,7 +138,6 @@ def orthogonalize(W, V, X=None):
 
 # %% Testing
 
-
 def test_1D():
     'Test DEIM on a 1D function'
     N = 100  # full order
@@ -184,7 +182,6 @@ def pod_deim(N, x, f, F):
     ax1.semilogy(range(5, U.shape[1]), pl.c_[error_deim_pod, error_pod])
 
 # %%
-
 
 def test_2D():
     'Test DEIM on a 2D function'

@@ -1,5 +1,4 @@
 from numpy import linalg as LA
-import scipy as sp
 
 def Newton(f, x, dfdx, epsilon=1.0E-7, N=100, store=False):
     """
@@ -24,9 +23,6 @@ def Newton(f, x, dfdx, epsilon=1.0E-7, N=100, store=False):
     dfdx_value = dfdx(x)
     n = 0
     if store: info = []
-
-    # Check for sparse or dense matrix
-    is_sparse = sp.issparse(dfdx_value)
     
     while LA.norm(f_value) > epsilon and n <= N:
         
@@ -34,17 +30,10 @@ def Newton(f, x, dfdx, epsilon=1.0E-7, N=100, store=False):
         if LA.norm(dfdx_value) < 1E-14:
             raise ValueError("Newton: f'(%g)=%g" % (x, LA.norm(dfdx_value)))
 
-        # Solve the system
-        if is_sparse:
-            if f_value.size > 1:
-                x = x - sp.sparse.linalg.spsolve(dfdx_value, f_value)
-            else:
-                x = x - f_value / dfdx_value
+        if f_value.size > 1:
+            x = x - LA.solve(dfdx_value, f_value)
         else:
-            if f_value.size > 1:
-                x = x - LA.solve(dfdx_value, f_value)
-            else:
-                x = x - f_value / dfdx_value
+            x = x - f_value / dfdx_value
         
         # Update variables
         f_value = f(x)
@@ -118,7 +107,6 @@ def _dg(x):
            pi/2*exp(-0.1*x**2)*cos(pi/2*x)
 
 def _test():
-    import sys
 
     #x0 = float(sys.argv[1])
     x0 = 0.1
@@ -138,3 +126,4 @@ def _test():
 
 if __name__ == '__main__':
     _test()
+    

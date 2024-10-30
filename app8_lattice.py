@@ -11,36 +11,30 @@ fixed point iterators from the Newton.py,
 and bases from podDEIM.
 """
 
-import os
 import gc
 from datetime import datetime
 
 import numpy as np
 import sympy as smp
 from numpy import linalg as LA
-from pylab import  log, r_, c_, zeros, eye, sqrt, reshape, linspace, roll, figure, zeros_like
+from pylab import  log, r_, c_, sqrt, reshape, linspace, roll, figure, zeros_like
 
 from pathos.pools import _ProcessPool as Pool
-import multiprocessing
 
-import dill as pickle
 from functools import wraps
 
-import matplotlib.pyplot as plt
-from matplotlib import rc
-from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.ticker import MaxNLocator
-
-# Configuration
+from matplotlib import rc
 rc('text', usetex=True)  # Enable LaTeX rendering
 rc('text.latex', preamble=r'\usepackage{amsfonts}')  # Load AMSFonts for Fraktur
 
-import ODESolver
+from ODESolver import ConformalStormerVerlet, ConformalImplicitMidpoint
 from Newton import fixed_point
-from System import System
+from System import MechSystem, kwds, _ham_z_, ham_z_, _g_lam, ham_zz_
+from System import nosc, q, p, y, omega2, beta, ham_z_expr, ham_zz_expr, g_expr, g_prime_expr
+from System import _Omega2_space
 from podDEIM import POD, DEIM
 from PlotScript import plot_data, tex_table, logplot, save_figure, timing
-
 
 def compose_solver_solves(func):
     @wraps(func)
@@ -50,182 +44,13 @@ def compose_solver_solves(func):
                 
         return y_, y_full_
     return wrapper
-
-class MechSystem(System):
-    """ Class of MechSystem methods """
-
-    "Numerical solver and its properties"
-    w_values = [0.28, 0.62546642846767004501]
-    w_values.append(1.0 -2.0*(sum(w_values)))
-    w_values.append(w_values[1])
-    w_values.append(w_values[0])
-    w_values = [1]
-    assert np.isclose(sum(w_values), 1), 'sum_i w_i must be 1'
-
-    "Fixed-point nonliner equations solver properties"
-    tol, M, var, store = 1.0E-12, 100, True, False
-
-    "System parameters"
-    nosc = 50*3
-    assert nosc//3 % 2 == 0, 'nosc//3 must be even'
-
-    # These two properties only have effect during reduction
-    reducer = 'psd'
-    predict = True # False = reproduce
-    hyperreducer = 'MDEIM'
-
-    registered_solver_classes = [ODESolver.ConformalStormerVerlet]
-    dt_space_dim = 1
-    Omega2_space_dim = 5
-    beta = (max(1e-2, 0*np.random.rand()/10))*0
-    JJ = lambda self, d=nosc: r_[c_[zeros((d,d)), eye(d)], c_[-eye(d), zeros((d,d))]]
-
-    Omega2_space = np.sort(10*(1 -np.random.rand(Omega2_space_dim, nosc//3-2)))
-    # Omega2_space[1:] = Omega2_space[0]
-    # Omega2_space[:,:3] = np.sort(np.random.uniform(Omega2_space[:,0], Omega2_space[:,2], (3, Omega2_space_dim)), axis=0).T
-
-    dt_space = linspace(0.01, 0.05, num=dt_space_dim)
-    T_final = 2
-
-    keep_time = datetime.now().strftime('%Y-%m-%d_%H-%M_')
-
-    "Initial conditions satisfying the constraints"
-    # positions = np.zeros((nosc//3, 3))
-
-    # for i in range(nosc//3):
-    #     positions[i, 0] = i % 2 + 0*(i // 2 % 2) * 1e-1
-    #     positions[i, 1] = i // 2 + 0*(-1)**(i // 2) * 1e-1
-    #     positions[i, 2] = 0
-        
-    # Create a tensor to store the positions
-    i = np.arange(nosc//3)
-    positions = np.stack((i % 2 + 0*(i // 2 % 2) * 1e-1, i // 2 + 0*(-1)**(i // 2) * 1e-1, np.zeros_like(i)), axis=1)
-
-    positions = positions.flatten().reshape(-1, 1)
-
-    momenta = np.zeros((nosc//3, 3))
-    momenta[::2] = np.random.uniform(-0.01, 0.01, momenta[::2].shape)
-    momenta[1::2] = momenta[::2]
-    assert np.allclose(momenta[1::2] - momenta[::2], 0), 'position and momenta are not orthogonal'
-    momenta = momenta.flatten().reshape(-1, 1)
-
-    constraint_type = 'spherical'
-    constraints_reduce = True # True: Reduce constraint jacobian g_prime
-
-    y_init = r_[positions, momenta].flatten()
-
-    drag = lambda self, x, u: 0 #beta/2 * r_[x, u]
-    drag_z = lambda self, x, u: 0 #beta/2 * eye(2*x.shape[0])
+   
+class MechSystemSolver(MechSystem):
 
     def __init__(self, kwds):
-        "MechSystem properties"
-
-        System.__init__(self, kwds)
-
-        "Projection matrices"
-        if hasattr(self, 'RB'):
-            self.y_init = self.RB.T @ self.y_init
-
-            if self.reducer == 'pod':
-                self.JJ_r = self.RB.T @ self.JJ() @ self.RB
-            elif self.reducer == 'psd':
-                self.JJ_r = self.JJ(self.nosc_r)
-        else:
-            self.RB = None
-
-        if not hasattr(self, 'P'):
-            self.P = None
-            self.U = None
-
-        if self.solver_class in MechSystem.registered_solver_classes:
-            self.solver = self.solver_class(self)
-        else:
-            NameError(f'Unknown {self.solver_class.__name__ = }')
-
-        "various measures"
-        self.time_lapsed = []
-
-    "y_init alias"
-    @property
-    def u_init(self):
-        return self.y_init
-
-    @u_init.setter
-    def u_init(self, value):
-        self.y_init = value
-
-    @staticmethod
-    def solve_mech_system(solver_class, dt, Omega2, kwds):
-        kwds['pool'] = {'solver_class': solver_class, 'dt': dt, 'Omega2': Omega2, \
-                        'n': int(round(MechSystem.T_final/dt))}
-        kwds['pool'].update({'t_points': linspace(0, MechSystem.T_final, kwds['pool']['n']+1)})
-
-        MSsolver = MechSystem(kwds)
-        tl = MSsolver.solve()
-        MSsolver.time_lapsed.append(tl)
-
-        if not MSsolver.beta:
-            MSsolver.eng_error = MSsolver.get_en_err()
-            MSsolver.en_error = sqrt(dt)*LA.norm(MSsolver.eng_error)
-        else:
-            MSsolver.en_error = None
-
-        if MSsolver.var:
-            MSsolver.var_solve()
     
-        # print("Number of CPUs:", multiprocessing.cpu_count())
-        # print("Number of threads:", multiprocessing.active_children())
-
-        return MSsolver
-
-    @staticmethod
-    def parallel_solve_mech_system(kwds, Omega2_space, MSsolvers):
-
-        with Pool() as pool:
-
-            results = pool.starmap(MechSystem.solve_mech_system, \
-                                   [(x, y, z, kwds) for x in MechSystem.registered_solver_classes \
-                                    for y in MechSystem.dt_space for z in Omega2_space])
-
-        if 'pool' in kwds:
-            del kwds['pool']
-            print("kwds['pool'] deleted")
-
-        # rearrange results in the order of submitted jobs
-        for x, y, z in [(x, y, z) for x in MechSystem.registered_solver_classes \
-                        for y in MechSystem.dt_space for z in Omega2_space]:
-            for MSsolver in results:
-                if MSsolver.solver_class == x and MSsolver.dt == y and (MSsolver.Omega2 == z).all():
-                    MSsolvers.append(MSsolver)
-                    break
-
-
-    @staticmethod
-    def solver(kwds):
-
-        MSsolvers = []
-
-        if MechSystem.predict: # prediction experiment
-
-            if not hasattr(MechSystem, 'RB'):
-                # training parameters
-                Omega2_space = MechSystem.Omega2_space[:-1]
-                Omega2_space_dim = len(Omega2_space)
-
-            else:
-                # testing parameters
-                Omega2_space = MechSystem.Omega2_space[-1:]
-                Omega2_space_dim = len(Omega2_space)
-
-        else: # reproduction
-            Omega2_space = MechSystem.Omega2_space
-            Omega2_space_dim = len(Omega2_space)
-
-        MechSystem.parallel_solve_mech_system(kwds, Omega2_space, MSsolvers)
-
-        MechSystem.measures(MSsolvers, Omega2_space_dim)
-
-        return MSsolvers
+        super().__init__(kwds)
+        self.solver = kwds['pool']['solver_class'](kwds)
 
     @compose_solver_solves
     def solve_for_w(self, w_val, y_, k):
@@ -258,13 +83,7 @@ class MechSystem(System):
             self.y = np.zeros((self.n+1, 2*self.nosc_r))
             self.y_full = np.zeros((self.n+1, 2*self.nosc))
 
-            # y_ = np.array([self.y_init, self.y_init]) @ self.RB.T
-
-            # if self.constraint_type:
-            #     fixed_point(self.g, y_, self.g_prime, self.tol, self.M, False)
-
             self.y_full[0] = MechSystem.y_init
-            # self.y_init = self.RB.T @y_[1]
 
         self.y[0] = self.y_init
         if self.store: self.info = []
@@ -272,20 +91,11 @@ class MechSystem(System):
         for k in range(self.n):
             if self.store: self.info.append(self.y[k])
             y_ = np.array([self.y[k], self.y[k]])
-            
-            # if self.RB is not None:
-            #     y_full_ = np.array([self.y_full[k], self.y_full[k]])
-            # else:
-            #     y_full_ = y_
 
             y_, y_full_ = self.solve_for_w(y_, k)
             
             self.y[k+1] = y_[-1]
-
-            # if self.RB is None:
-            #     self.y[k+1] = y_[-1]
-            # else:
-            #     self.y[k+1] = y_[-1]
+            
             if self.RB is not None:
                 self.y_full[k+1] = y_full_[-1]
 
@@ -326,20 +136,11 @@ class MechSystem(System):
     
         if hasattr(self, 'y_red'):
             y = self.y_red
-            # nosc = self.y_red.shape[1]//2
         else:
             y = self.y
-            # nosc = self.nosc
-
-        # dpsi = np.zeros((self.n+1, 2*nosc, 2*nosc))
-        # dpsi[0] = np.eye(2*nosc)
-        # self.sym_error = np.zeros(self.n+1)
-
-        # for k in range(self.n):
+            
         dpsi, _ = self.solver.var_solve(y, self.t_points)
-        # dpsi[1] = dpsi_[-1]
         self.sym_error = self.solver.symplectic_error(dpsi, self.t_points)
-        # self.sym_error[k+1] = sym_error_[-1]
 
     def plot(self):
         "plot the results"
@@ -415,23 +216,16 @@ class MechSystem(System):
 
         for ax in [ax0, ax1, ax2, ax3, ax4, ax5]:
             ax.label_outer()
-
-        if self.RB is not None:
-            if self.predict: string = '_predict'
-            else: string = '_repro'
-        else:
-            string = '_full'
-
-        filename = self.keep_time +'osc_' +self.solver_class.__name__ +string +'.pdf'
-        # save_figure(fig, filename)
+            
+        string = '_full' if self.RB is None else '_predict' if self.predict else '_repro'
+        filename = f"{self.keep_time}osc_{self.solver_class.__name__}{string}.pdf"
+        save_figure(fig, filename)
 
     @staticmethod
     def measures(MSsolvers, Omega2_space_dim):
         "Various measurements based on the solution"
 
         r_form = lambda numer, denom: r_[float('nan'), (log(roll(numer, -1)/numer)/log(roll(denom, -1)/denom))[:-1]]
-        # C_form = lambda numer, denom, r: numer[:-1]/(denom[:-1]**r)
-        # en_error = [MSsolvers[i].en_error for i in range(len(MSsolvers))]
         en_error = [solver.en_error for solver in MSsolvers]
 
         for i in range(0, len(MSsolvers), MechSystem.dt_space_dim * Omega2_space_dim):
@@ -439,180 +233,89 @@ class MechSystem(System):
             if len(en_error) > 1 and en_error[0] is not None and MechSystem.dt_space_dim > 1:
                 "Compute convergence rates from the error in Energy"
                 r_values = r_form(en_error[i:i+MechSystem.dt_space_dim*Omega2_space_dim:Omega2_space_dim], MechSystem.dt_space)
-                # C_values.append(C_form(en_error[i:i+MechSystem.dt_space_dim*Omega2_space_dim:Omega2_space_dim], MechSystem.dt_space, r_values[-1]))
-
-                # print(f'{r_values =}')
-                # Display convergence rates if available
                 temp = c_[MechSystem.dt_space, r_values].T
                 tex_table(MSsolvers[i].solver_class.__name__, temp)
 
             # Plot the measures
             MSsolvers[i].plot()
+    
+#%% helper functions
+
+def solve_mech_system(solver_class, dt, Omega2, kwds):
+    kwds['pool'] = {'solver_class': solver_class, 'dt': dt, 'Omega2': Omega2, \
+                    'n': int(round(MechSystem.T_final/dt))}
+    kwds['pool'].update({'t_points': linspace(0, MechSystem.T_final, kwds['pool']['n']+1)})
+
+    MSsolver = MechSystemSolver(kwds)
+    tl = MSsolver.solve()
+    MSsolver.time_lapsed.append(tl)
+
+    if not MSsolver.beta:
+        MSsolver.eng_error = MSsolver.get_en_err()
+        MSsolver.en_error = sqrt(dt)*LA.norm(MSsolver.eng_error)
+    else:
+        MSsolver.en_error = None
+
+    if MSsolver.var:
+        MSsolver.var_solve()
+
+    return MSsolver
 
 
-#%% Find symbolic quantities
+def parallel_solve_mech_system(kwds, Omega2_space, MSsolvers):
 
-nosc = MechSystem.nosc
+    with Pool() as pool:
 
-# create the 'data' subfolder if it doesn't exist
-data_folder = 'data'
-if not os.path.exists(data_folder):
-    os.makedirs(data_folder)
+        results = pool.starmap(solve_mech_system, \
+                               [(x, y, z, kwds) for x in kwds['registered_solver_classes'] \
+                                for y in MechSystem.dt_space for z in Omega2_space])
 
-# try to load the expressions from disk
-filename = os.path.join(data_folder, f"ham_expr_{nosc}.pickle")
-try:
-    with open(filename, 'rb') as f:
-        loaded_expressions = pickle.load(f)
-    print("Loaded Hamiltonian expressions from disk.")
+    if 'pool' in kwds:
+        del kwds['pool']
+        print("kwds['pool'] deleted")
 
-    ham_expr = loaded_expressions['ham_expr']
-    ham_z_expr = loaded_expressions['ham_z_expr']
-    ham_zz_expr = loaded_expressions['ham_zz_expr']
-    _ham_z_ = loaded_expressions['_ham_z_']
-    ham_ = loaded_expressions['ham_']
-    ham_z_ = loaded_expressions['ham_z_']
-    ham_zz_ = loaded_expressions['ham_zz_']
-    q = loaded_expressions['q']
-    p = loaded_expressions['p']
-    omega2 = loaded_expressions['omega2']
-    beta = loaded_expressions['beta']
-    y = loaded_expressions['y']
-
-except: #FileNotFoundError or AttributeError:
-    print("Hamiltonian expressions not found on disk. Computing and saving them...")
-
-    q = smp.Matrix(smp.symbols('q_:{}_:{}'.format(nosc//3,3), real=True)).reshape(nosc//3,3)
-    p = smp.Matrix(smp.symbols('p_:{}_:{}'.format(nosc//3,3), real=True))
-    omega2 = smp.Matrix(smp.symbols('omega^2_0:{}'.format(nosc//3-2), real=True))
-    beta = smp.symbols('beta', real=True)
-
-    kin_expr = 0.5 * p.dot(p)
-
-    pi = smp.Matrix([(q.row(i+2) - q.row(i)).norm(2)**2 for i in range(nosc//3-2)])
-    pot_expr = 0.5 * omega2.dot((pi -smp.ones(nosc//3-2,1)).applyfunc(lambda x: x**2))
-
-    q = q.reshape(nosc,1)
-    y = list(q)+list(p)
-
-    ham_expr = kin_expr + pot_expr
-    ham_z_expr = smp.Matrix([ham_expr]).jacobian(y).T
-    ham_zz_expr = ham_z_expr.jacobian(y)
-
-    ham_ = smp.lambdify((q, p, omega2, beta), ham_expr, 'numpy')
-    _ham_z_ = smp.lambdify((q, p, omega2, beta), ham_z_expr, 'numpy')
-    ham_zz_ = smp.lambdify((q, p, omega2, beta), ham_zz_expr, 'numpy')
-
-    ham_z_ = lambda q, p, omega2, beta: _ham_z_(q, p, omega2, beta).squeeze()
-
-    expressions = {
-        "ham_expr": ham_expr,
-        "ham_z_expr": ham_z_expr,
-        "ham_zz_expr": ham_zz_expr,
-        "_ham_z_": _ham_z_,
-        "ham_": ham_,
-        "ham_z_": ham_z_,
-        "ham_zz_": ham_zz_,
-        "q": q, "p": p, "omega2": omega2, "beta": beta, "y": y,
-    }
-
-    # save the expressions to disk
-    with open(filename, 'wb') as f:
-        pickle.dump(expressions, f)
-    print("Hamiltonian expressions saved to disk.")
-
-if MechSystem.constraint_type is not None:
-
-    # try to load the expressions from disk
-    filename = os.path.join(data_folder, f"g_expr_{nosc}.pickle")
-    try:
-        with open(filename, 'rb') as f:
-            loaded_expressions = pickle.load(f)
-        print("Loaded constraints from disk.")
-
-        g_expr = loaded_expressions['g_expr']
-        g_prime_expr = loaded_expressions['g_prime_expr']
-        _g_lam = loaded_expressions['_g_lam']
-        g_lam = loaded_expressions['g_lam']
-        g_prime_lam = loaded_expressions['g_prime_lam']
-
-    except: #FileNotFoundError:
-        print("Constraints not found on disk. Computing and saving them...")
-
-        q = q.reshape(nosc//3,3)
-        p = p.reshape(nosc//3,3)
-        row_diffs_q = [q.row((i+1)) - q.row(i) for i in range(0, nosc//3, 2)]
-        row_diffs_p = [p.row((i+1)) - p.row(i) for i in range(0, nosc//3, 2)]
-        row_norms = [(row_diff.dot(row_diff) -1)/2 for row_diff in row_diffs_q]
-        ddt_row_norms = [row_diffs_q[i].dot(row_diffs_p[i]) for i in range(len(row_diffs_q))]
-
-        q = q.reshape(nosc,1)
-        p = p.reshape(nosc,1)
-        y = list(q)+list(p)
-        g_expr = smp.Matrix(row_norms+ ddt_row_norms)
-        g_prime_expr = g_expr.jacobian(y)
-
-        _g_lam = smp.lambdify((y,), g_expr, modules=['numpy'])
-        g_prime_lam = smp.lambdify((y,), g_prime_expr, modules=['numpy'])
-
-        g_lam = lambda x: _g_lam(x).squeeze()
-
-        expressions = {
-            "g_expr": g_expr,
-            "g_prime_expr": g_prime_expr,
-            "_g_lam": _g_lam,
-            "g_lam": g_lam,
-            "g_prime_lam": g_prime_lam
-        }
-
-        # save the expressions to disk
-        with open(filename, 'wb') as f:
-            pickle.dump(expressions, f)
-        print("Constraints saved to disk.")
+    # rearrange results in the order of submitted jobs
+    for x, y, z in [(x, y, z) for x in kwds['registered_solver_classes'] \
+                    for y in MechSystem.dt_space for z in Omega2_space]:
+        for MSsolver in results:
+            if MSsolver.solver_class == x and MSsolver.dt == y and (MSsolver.Omega2 == z).all():
+                MSsolvers.append(MSsolver)
+                break
+            
 
 #%% Main driver
+
 if __name__ == '__main__':
     "Model order reduction of the MechSystem using MechSystem"
 
 #%% Full order solution
+    
+    kwds.update({'registered_solver_classes': [ConformalImplicitMidpoint, ConformalStormerVerlet]})
+
+    MSsolvers = []
+
+    if MechSystem.predict: # prediction experiment
+        # training parameters
+        Omega2_space = _Omega2_space[:-1]
+    else: # reproduction
+        # training parameters
+        Omega2_space = _Omega2_space
+        
+    Omega2_space_dim = len(Omega2_space)
+
     print('Computing full solution ...')
+    parallel_solve_mech_system(kwds, Omega2_space, MSsolvers)
 
-    kwds = {'ham_': ham_, \
-            '_ham_z_': _ham_z_, \
-            'ham_z_': ham_z_, \
-            'ham_zz_': ham_zz_, \
-            '_g_lam': _g_lam, \
-            'g': g_lam, \
-            'g_prime': g_prime_lam, \
-            }
+    MechSystemSolver.measures(MSsolvers, Omega2_space_dim)
 
-    MSsolvers = MechSystem.solver(kwds)
-
-    if MSsolvers[-1].non_quad: # is not None
-        assert MechSystem.Omega2_space_dim == 1
-
-    if MechSystem.predict:
-        array_shape = (len(MechSystem.registered_solver_classes), MechSystem.dt_space_dim, MechSystem.Omega2_space_dim-1)
-    else:
-        array_shape = (len(MechSystem.registered_solver_classes), MechSystem.dt_space_dim, MechSystem.Omega2_space_dim)
-
-    # time_lapsed = []
-    # for x in MSsolvers:
-    #     time_lapsed.append(x.time_lapsed)
-    # reshape(time_lapsed, array_shape)
+    array_shape = (len(kwds['registered_solver_classes']), MechSystem.dt_space_dim, Omega2_space_dim)
 
     time_lapsed = [reshape([x.time_lapsed for x in MSsolvers], array_shape)]
 
 #%% Reduced order solution
-    # print('Assembling snapshots ...')
-    # y_list = np.hstack([MSsolver.y[np.unique(np.random.randint(0,MSsolver.n,int(MSsolver.n)//1))].T for MSsolver in MSsolvers])
-    # print(f'{y_list.shape = }')
-    # F2 = [np.array([MSsolver.ham_z(*np.split(y, 2)) for y in MSsolver.y]) for MSsolver in MSsolvers]
-    # F2 = np.hstack([F2[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)//1))].T for i in range(len(MSsolvers))])
-    # print(f'{F2.shape = }')
     
     print('Assembling snapshots ...')
-    n_samples_list = [int(MSsolver.n // 1) for MSsolver in MSsolvers]
+    n_samples_list = [int(MSsolver.n // 2) for MSsolver in MSsolvers]
     indices_list = [np.random.choice(MSsolver.n, n_samples, replace=False) for MSsolver, n_samples in zip(MSsolvers, n_samples_list)]
     y_list = np.hstack([MSsolver.y[indices].T for MSsolver, indices in zip(MSsolvers, indices_list)])
     print(f'{y_list.shape = }')
@@ -620,9 +323,7 @@ if __name__ == '__main__':
     F2 = np.hstack([np.array([MSsolver.ham_z(*np.split(y, 2)) for y in MSsolver.y[indices]]).T for MSsolver, indices in zip(MSsolvers, indices_list)])
     print(f'{F2.shape = }')
 
-    X = {#'Q_half': MSsolvers[-1].Q_spd()[:nosc, :nosc], \
-         # 'sqrt': sp.linalg.sqrtm(MSsolvers[-1].Q_spd()), \
-         'eye': np.eye(2*nosc), \
+    X = {'eye': np.eye(2*nosc), \
          'eye_half': np.eye(nosc)}
 
     if MechSystem.reducer == 'pod':
@@ -649,7 +350,7 @@ if __name__ == '__main__':
 
     fig, ax = logplot(sv, xlabel='index of singular values', xlims=(1, len(sv)))
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-    filename = MechSystem.keep_time +'osc_sv' + '.pdf'
+    # filename = MechSystem.keep_time +'osc_sv' + '.pdf'
     # save_figure(fig, filename)
 
     del y_list, F2
@@ -662,21 +363,26 @@ if __name__ == '__main__':
                  'ham_zz_': lambda q, p, omega2, beta: RB.T @ ham_zz_(q, p, omega2, beta) @ RB})
 
     print('solving reduced system ...')
-    MSsolvers_r = MechSystem.solver(kwds)
-
-    # if len(MSsolvers) == len(MSsolvers_r):
-    #     print('solution errors')
-    #     print(reshape([np.amax(abs(MSsolvers[i].y -MSsolvers_r[i].y)) for i in range(len(MSsolvers))], array_shape))
-
-    #     time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
-    #                                 time_lapsed[0].shape)/time_lapsed[0]*100)
-    # else:
-    #     time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r],\
-    #                                 time_lapsed[0].shape[:2]))
             
-    if len(MSsolvers) == len(MSsolvers_r):
+    MSsolvers_r = []
+    
+    if MechSystem.predict: # prediction experiment
+        # testing parameters
+        Omega2_space = _Omega2_space[-1:]
+        Omega2_space_dim = len(Omega2_space)
+    
+    else: # reproduction
+        Omega2_space = _Omega2_space
+        
+    Omega2_space_dim = len(Omega2_space)
+    
+    parallel_solve_mech_system(kwds, Omega2_space, MSsolvers_r)
+    
+    MechSystemSolver.measures(MSsolvers_r, Omega2_space_dim)
+            
+    if not MechSystem.predict:
         print('solution errors')
-        print(reshape([np.amax(abs(y1 - y2)) for y1, y2 in zip(MSsolvers, MSsolvers_r)], array_shape))
+        print(reshape([np.amax(abs(y1 - y2)) for y1, y2 in zip([x.y for x in MSsolvers], [x.y for x in MSsolvers_r])], array_shape))
     
         time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r], time_lapsed[0].shape) / time_lapsed[0] * 100)
     else:
@@ -704,19 +410,8 @@ if __name__ == '__main__':
         non_zero_indices = np.nonzero(MSsolvers[0].ham_zz(*np.split(MSsolvers[0].y[0], 2)).flatten())[0]
 
         IP = np.zeros((len(non_zero_indices), (2*nosc)**2))
-
-        # for i, val in enumerate(non_zero_indices):
-        #     IP[i, val] = 1
             
         IP[np.arange(len(non_zero_indices)), non_zero_indices] = 1
-
-        # F3 = [np.array([IP @ MSsolver.ham_zz(*np.split(y, 2)).flatten() for y in MSsolver.y]) for MSsolver in MSsolvers]
-
-        # F3 = np.hstack([F3[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)//1))].T for i in range(len(MSsolvers))])
-        # print(f'{F3.shape = }')
-        
-        # n_samples_list = [int(MSsolver.n // 1) for MSsolver in MSsolvers]
-        # indices_list = [np.random.choice(MSsolver.n, n_samples, replace=False) for MSsolver, n_samples in zip(MSsolvers, n_samples_list)]
         
         F3 = np.hstack([np.array([IP @ MSsolver.ham_zz(*np.split(y, 2)).flatten() for y in MSsolver.y[indices]]).T for MSsolver, indices in zip(MSsolvers, indices_list)])
         print(f'{F3.shape = }')
@@ -726,11 +421,10 @@ if __name__ == '__main__':
 
         fig, ax = logplot(sv, xlabel='index of singular values', xlims=(1, len(sv)))
         ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-        filename = MechSystem.keep_time +'osc_mdeim_sv' + '.pdf'
+        # filename = MechSystem.keep_time +'osc_mdeim_sv' + '.pdf'
         # save_figure(fig, filename)
 
         Pj, _ = DEIM(Uj, plot_deim=False)
-        # Sj = Pj.T @ RB
 
         _IP_UxPxU_inv = IP.T @ Uj @ LA.inv(Pj.T @ Uj)
 
@@ -742,14 +436,6 @@ if __name__ == '__main__':
 
     if MechSystem.constraint_type is not None and MechSystem.constraints_reduce:
 
-        # F5 = [np.array([MSsolver.g(y) +0.5 for y in MSsolver.y]) for MSsolver in MSsolvers]
-        # F5 = np.hstack([F5[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)//1))].T for i in range(len(MSsolvers))])
-        # print(f'{F5.shape = }')
-        
-        # n_samples_list = [int(MSsolver.n // 1) for MSsolver in MSsolvers]
-        # indices_list = [np.random.choice(MSsolver.n, n_samples, replace=False) for MSsolver, n_samples in zip(MSsolvers, n_samples_list)]
-        
-        # g_vec = np.vectorize(lambda MSsolver, y: MSsolver.g(y) + 0.5)
         F5 = np.hstack([np.array([MSsolver.g(y) + 0 for y in MSsolver.y[indices]]).T for MSsolver, indices in zip(MSsolvers, indices_list)])
         print(f'{F5.shape = }')
 
@@ -774,19 +460,8 @@ if __name__ == '__main__':
 
         g_prime_shape= MSsolvers[0].g_prime(MSsolvers[0].y[0]).shape
         IP = np.zeros((len(non_zero_indices), np.prod(g_prime_shape)))
-
-        # for i, val in enumerate(non_zero_indices):
-        #     IP[i, val] = 1
             
         IP[np.arange(len(non_zero_indices)), non_zero_indices] = 1
-
-        # F4 = [np.array([IP @ MSsolver.g_prime(y).flatten() for y in MSsolver.y]) for MSsolver in MSsolvers]
-
-        # F4 = np.hstack([F4[i][np.unique(np.random.randint(0,MSsolvers[i].n,int(MSsolvers[i].n)//1))].T for i in range(len(MSsolvers))])
-        # print(f'{F4.shape = }')
-        
-        # n_samples_list = [int(MSsolver.n // 1) for MSsolver in MSsolvers]
-        # indices_list = [np.random.choice(MSsolver.n, n_samples, replace=False) for MSsolver, n_samples in zip(MSsolvers, n_samples_list)]
         
         F4 = np.hstack([np.array([IP @ MSsolver.g_prime(y).flatten() for y in MSsolver.y[indices]]).T for MSsolver, indices in zip(MSsolvers, indices_list)])
         print(f'{F4.shape = }')
@@ -795,12 +470,11 @@ if __name__ == '__main__':
         del F4
 
         fig, ax = logplot(sv, xlabel='index of singular values', xlims=(1, len(sv)))
-        # ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-        filename = MechSystem.keep_time +'osc_mdeim_sv' + '.pdf'
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        # filename = MechSystem.keep_time +'osc_mdeim_sv' + '.pdf'
         # save_figure(fig, filename)
 
         Pj, _ = DEIM(Uj, plot_deim=False)
-        # Sj = Pj.T @ RB
 
         IP_UxPxU_inv_ = IP.T @ Uj @ LA.inv(Pj.T @ Uj)
 
@@ -813,21 +487,15 @@ if __name__ == '__main__':
 
     gc.collect()
     print('solving hyper-reduced system ...')
-    MSsolvers_dr = MechSystem.solver(kwds)
 
-    # if len(MSsolvers) == len(MSsolvers_dr):
-    #     print('solution errors')
-    #     print(reshape([np.amax(abs(MSsolvers[i].y -MSsolvers_dr[i].y)) for i in range(len(MSsolvers))], array_shape))
-
-    #     time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_dr],\
-    #                                 time_lapsed[0].shape)/time_lapsed[0]*100)
-    # else:
-    #     time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_dr],\
-    #                                 time_lapsed[0].shape[:2]))
+    MSsolvers_dr =[]
+    parallel_solve_mech_system(kwds, Omega2_space, MSsolvers_dr)
+    
+    MechSystemSolver.measures(MSsolvers_dr, Omega2_space_dim)
             
-    if len(MSsolvers) == len(MSsolvers_dr):
+    if not MechSystem.predict:
         print('solution errors')
-        print(reshape([np.amax(abs(y1 - y2)) for y1, y2 in zip(MSsolvers, MSsolvers_dr)], array_shape))
+        print(reshape([np.amax(abs(y1 - y2)) for y1, y2 in zip([x.y for x in MSsolvers], [x.y for x in MSsolvers_dr])], array_shape))
     
         time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_dr], time_lapsed[0].shape) / time_lapsed[0] * 100)
     else:

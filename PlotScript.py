@@ -14,7 +14,6 @@ import brewer2mpl
 from cycler import cycler
 import os
 import pickle
-import numpy as np
 from functools import wraps
 from time import time
 

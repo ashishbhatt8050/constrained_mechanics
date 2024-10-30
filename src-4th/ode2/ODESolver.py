@@ -1,5 +1,5 @@
 import numpy as np
-from pylab import r_, c_, eye
+from pylab import r_, c_
 from numpy import linalg as LA
 import os
 
@@ -8,13 +8,16 @@ import torch.linalg as torchLA
 torch.set_grad_enabled(False)
 # torch.cuda.empty_cache()
 
-from PlotScript import timing
+from System import MechSystem
+from Newton import Newton
 
-class ODESolver(object):
+class ODESolver(MechSystem):
     """
-    Superclass for numerical methods solving scalar and vector ODEs
+    Subclass of numerical methods solving scalar and vector ODEs
 
       du/dt = f(u, t)
+      
+     defined in MechSystem parent class.
 
     Attributes:
     t: array of time values
@@ -22,25 +25,19 @@ class ODESolver(object):
     k: step number of the most recently computed solution
     f: callable object implementing f(u, t)
     """
-    def __init__(self, MechSys):
-        if not callable(MechSys):
-            raise TypeError('MechSys is %s, not a function' % type(MechSys))
-        # For ODE systems, MechSys will often return a list, but
-        # arithmetic operations with MechSys in numerical methods
-        # require that MechSys is an array. Let self.MechSys be a function
-        # that first calls MechSys(u,t) and then ensures that the
-        # result is an array of floats.
-        self.f = lambda u, t: MechSys(u, t, func=True, jac=False)
         
-        self.dfdu = lambda u, t, *arg: MechSys(u, t, arg, func=False, jac=True)
+    def __init__(self, kwds):
+    
+        MechSystem.__init__(self, kwds)
         
-        self.beta = MechSys.beta
+        if not callable(MechSystem):
+            raise TypeError('MechSystem is %s, not a function' % type(MechSystem))
+        
+        self.f = lambda u, t: self.__call__(u, t, func=True, jac=False)
+        
+        self.dfdu = lambda u, t, *arg: self.__call__(u, t, arg, func=False, jac=True)
+        
         self.Ecoeff = lambda dt: np.exp(self.beta*dt/2)
-        
-        if hasattr(MechSys, 'JJ_r'):
-            self.JJ_r = MechSys.JJ_r
-        if hasattr(MechSys, 'JJ'):
-            self.JJ = MechSys.JJ
 
     def advance(self):
         """Advance solution one time step."""
@@ -133,7 +130,6 @@ class ODESolver(object):
                 break  # terminate loop over k
         return self.du, self.t
 
-    # @timing
     def symplectic_error(self, du, t):
         '''
         Compute Symplectic error for the method
@@ -149,33 +145,9 @@ class ODESolver(object):
         else:
             raise ValueError
             
-        # symp_error = np.zeros(n+1)
-
-        # for k in range(n-1):
-        #     dt = t[k+1] -t[k]
-        #     symp_error[k+1] = np.log(LA.norm((du[k+1].T).dot(LA.solve(J_mat, du[k+1])))/LA.norm(Ecoeff_dt*LA.solve(J_mat, eye(J_mat.shape[0]))))
-                #LA.norm((du[k+1].T).dot(LA.solve(J_mat, du[k+1])) -Ecoeff(-dt)**4*LA.solve(J_mat, eye(J_mat.shape[0])))
-            
-        # symp_error = np.log(LA.norm(np.dot(du.T, LA.solve(J_mat, du)), axis=1) / LA.norm(Ecoeff_dt * LA.solve(J_mat, np.eye(J_mat.shape[0]))))
-            
-        # symp_error = np.log(LA.norm(du.transpose((0,2,1)) @ LA.solve(J_mat, du), axis=(1,2)) / LA.norm(Ecoeff_dt * LA.solve(J_mat, np.eye(J_mat.shape[0]))))
-        
-        
         # Convert the numpy arrays to PyTorch tensors
         du = torch.from_numpy(du)
         J_mat = torch.from_numpy(J_mat)
-        
-        
-        # # Check if CUDA is available and has enough memory
-        # if torch.cuda.is_available():
-        #     device = torch.device('cuda')
-        #     available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0)
-        #     required_memory = du.element_size() * du.nelement() + J_mat.element_size() * J_mat.nelement() #+ Ecoeff_dt.element_size() * Ecoeff_dt.nelement()
-        #     if available_memory < 3 * required_memory:
-        #         print("CUDA out of memory, switching to CPU")
-        #         device = torch.device('cpu')
-        # else:
-        #     device = torch.device('cpu')
         
         # Move the tensors to the desired device (e.g. CUDA or CPU)
         device = torch.device('cpu') # if torch.cuda.is_available() else 'cpu')
@@ -190,21 +162,8 @@ class ODESolver(object):
         du_solve_transpose = torchLA.solve(J_mat, torch.eye(J_mat.shape[0], device=device, dtype=J_mat.dtype))
         symp_error = torch.log(torchLA.norm(du_transpose @ du_solve, dim=(1, 2)) / torchLA.norm(Ecoeff_dt * du_solve_transpose))
         
-        # del du, J_mat
-        
         # Move the result back to CPU
         symp_error = symp_error.cpu().numpy()
-        
-        
-        # # Release cached memory
-        # torch.cuda.empty_cache()
-        
-        # # Reset maximum memory allocated and reserved
-        # torch.cuda.reset_max_memory_allocated()
-        # torch.cuda.reset_max_memory_reserved()
-        
-        # Synchronize CUDA streams
-        # torch.cuda.synchronize()
         
         return symp_error
 
@@ -280,8 +239,8 @@ class RungeKutta4(ODESolver):
         return u_new
 
 class ConformalStormerVerlet(ODESolver):
-    def __init__(self, MechSys):
-        ODESolver.__init__(self, MechSys)
+    def __init__(self, kwds):
+        ODESolver.__init__(self, kwds)
         
         self.Gamma_p, self.Gamma_m = lambda dt: 1 + self.beta*dt/2, lambda dt: 1 - self.beta*dt/2
 
@@ -299,12 +258,6 @@ class ConformalStormerVerlet(ODESolver):
         Ecoeff_dt = self.Ecoeff(-dt)
         f_lower = f(u[k], t[k])[neq // 2:]
         
-        # u_new = np.zeros(neq)
-        # u_new[neq//2:] = (Ecoeff_dt * u[k,neq//2:] +dt/2*f(u[k], t[k])[neq//2:])/Gamma_p
-        # u_new[:neq//2] = (Gamma_p*Ecoeff_dt*u[k,:neq//2] +dt*f(np.reshape([u[k,:neq//2], u_new[neq//2:]],neq), t[k])[:neq//2]) \
-        #     * Ecoeff_dt/Gamma_m
-        # u_new[neq//2:] = Ecoeff_dt*(Gamma_m*u_new[neq//2:] +dt/2*f(np.reshape([u_new[:neq//2], u_new[neq//2:]],neq), t[k])[neq//2:])
-        
         u_new = np.zeros(neq)
         u_new_lower = (Ecoeff_dt * u_lower + dt/2 * f_lower)/Gamma_p
         u_new_upper = (Gamma_p * Ecoeff_dt * u_upper + dt * f(np.concatenate([u_upper, u_new_lower]), t[k])[:neq//2]) * Ecoeff_dt / Gamma_m
@@ -321,8 +274,6 @@ class ConformalStormerVerlet(ODESolver):
         dt = self.dt
         Gamma_p, Gamma_m = self.Gamma_p(dt), self.Gamma_m(dt)
                 
-        # u_new = (Ecoeff(-dt)*u[k,neq//2:] +dt/2*f(Ecoeff(-dt)*u[k], t[k])[neq//2:])/Gamma_p
-        
         u_new = (Ecoeff(-dt)*u[k,neq//2:] +dt/2*f(u[k], t[k])[neq//2:])/Gamma_p
         dfdu_k = dfdu(np.concatenate([u[k,:neq//2], u_new]), t[k])
         
@@ -340,36 +291,11 @@ class ConformalStormerVerlet(ODESolver):
         return du
     
 class ImplicitMidpoint(ODESolver):
-    def __init__(self, MechSys):
-        ODESolver.__init__(self, MechSys)
-
-        # BackwardEuler needs to import function Newton from Newton.py:
-        try:
-            from Newton import Newton
-            self.Newton = Newton
-        except ImportError:
-            raise ImportError('''
-Could not import module "Newton". Place Newton.py in this directory
-(%s)
-''' % (os.path.dirname(os.path.abspath(__file__))))
-
-        # Select correct derivative
-        if not callable(MechSys):
-            try:
-                _ =MechSys(np.array([1]), 1)
-            except IndexError: # must be scalar ODE
-                raise ValueError('MechSys(u,t) must return float/int')
-
-            self.discrete_derivative =True
-        else:
-            neq = np.size(MechSys.u_init)
-            self.discrete_derivative = False
-            # try:
-            #     self.dfdw = lambda u, t, dt: \
-            #                     np.eye(neq)-dt/2*np.asarray(dfdu((u[1]+u[0])/2, (t[1]+t[0])/2, dt), float)
-            # except TypeError:
-            self.dfdw = lambda u, t, dt: \
-                            np.eye(neq)-dt/2*self.dfdu((u[1]+u[0])/2, (t[1]+t[0])/2, dt)
+    def __init__(self, kwds):
+        ODESolver.__init__(self, kwds)
+            
+        self.dfdw = lambda u, t, dt: \
+                        np.eye(self.neq)-dt/2*self.dfdu((u[1]+u[0])/2, (t[1]+t[0])/2, dt)
 
     def advance(self, w_start=None):
         u, f, k, t = self.u, self.f, self.k, self.t
@@ -378,15 +304,12 @@ Could not import module "Newton". Place Newton.py in this directory
         def F(w):
             return w - dt*f((w +u[k])/2, (t[k+1] +t[k])/2) - u[k]
 
-        if self.discrete_derivative:
-            dFdw = Derivative(F)
-        else:
-            def dFdw(w):
-                dfdw = self.dfdw
-                return dfdw([w, u[k]], [t[k+1], t[k]], dt)
+        def dFdw(w):
+            dfdw = self.dfdw
+            return dfdw([w, u[k]], [t[k+1], t[k]], dt)
 
         if w_start is None: w_start = u[k] + dt*f(u[k], t[k])  # Forward Euler step
-        u_new, n, info = self.Newton(F, w_start, dFdw, N=100, store=True)
+        u_new, n, info = Newton(F, w_start, dFdw, N=100, store=True)
         if k == 0:
             self.Newton_iter = []
         self.Newton_iter.append(n)
@@ -404,8 +327,8 @@ Could not import module "Newton". Place Newton.py in this directory
         return du_new
 
 class ConformalImplicitMidpoint(ImplicitMidpoint):
-    def __init__(self, MechSys):
-        ImplicitMidpoint.__init__(self, MechSys)
+    def __init__(self, kwds):
+        ImplicitMidpoint.__init__(self, kwds)
 
     def advance(self):
         

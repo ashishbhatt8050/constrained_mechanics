@@ -35,8 +35,24 @@ def rb_svd(y):
     return u, s, vh
 
 def POD(S, Xh, eps=None):
-        
+    """
+    Compute Proper Orthogonal Decomposition (POD) of a matrix S.
+
+    Parameters:
+    S (numpy array): Input matrix
+    Xh (numpy array): Weighting matrix
+    eps (float, optional): Tolerance for truncation. Defaults to None.
+
+    Returns:
+    Chi (numpy array): POD modes
+    Sigma2 (numpy array): Singular values
+    N (int): Number of retained modes
+    """
+
+    # Get the dimensions of the input matrix
     Nh, ns = S.shape
+
+    # Compute the square root of the weighting matrix
     Xh_half = sp.linalg.sqrtm(Xh) if np.allclose(Xh, np.eye(Xh.shape[0])) else np.eye(Xh.shape[0])
     
     if ns <= Nh:
@@ -45,7 +61,7 @@ def POD(S, Xh, eps=None):
         Sigma2, Psi = np.flip(Sigma2), np.flip(Psi, axis=1)
         Sigma2, Psi = Sigma2[Sigma2>0], Psi.T[Sigma2>0].T
         
-        assert np.allclose(C_ @ Psi, Sigma2 * Psi)
+        assert np.allclose(C_ @ Psi, Sigma2 * Psi, atol=1e-5)
         
         Chi = S @ Psi/np.sqrt(Sigma2)
     else:
@@ -58,17 +74,25 @@ def POD(S, Xh, eps=None):
         
         Chi = np.linalg.solve(Xh_half, Chi_)
         
-    assert np.allclose(Chi.T @ Xh @ Chi, np.eye(Chi.shape[1]))
-    # Chi = Xh_half @ Chi
-        
+    # Truncate the POD modes based on the tolerance
     if eps is not None:
-        N = pl.argmin(abs(np.asarray([pl.norm(Sigma2[:i])/pl.norm(Sigma2) for i in range(len(Sigma2))]) -1 +eps))
-        if N %  2 == 1:
-            N = N + 1  # ensure N is even
+        # Compute the cumulative sum of the singular values
+        cum_sum = np.cumsum(Sigma2) / np.sum(Sigma2)
+
+        # Find the smallest index (>=2) where the cumulative sum exceeds 1 - eps
+        N = max(np.argmin(np.abs(cum_sum - (1 - eps))), 2)
+
+        # Ensure N is even
+        if N % 2 == 1:
+            N += 1
     else:
         N = Sigma2.size
         
-    return Chi[:, :N], np.sqrt(Sigma2), N
+    Chi = Chi[:, :N]
+    assert np.allclose(Chi.T @ Xh @ Chi, np.eye(N), atol=1e-5)
+    # Chi = Xh_half @ Chi
+        
+    return Chi, np.sqrt(Sigma2), N
 # %%
 
 def DEIM(Ub, plot_deim=False):

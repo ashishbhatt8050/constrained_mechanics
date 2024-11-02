@@ -30,15 +30,15 @@ class MechSystem(object):
     tol, M, var, store = 1.0E-12, 100, True, False
 
     "System parameters"
-    nosc = 50*3
+    nosc = 100*3
     assert nosc//3 % 2 == 0, 'nosc//3 must be even'
 
     # These two properties only have effect during reduction
     reducer = 'psd'
-    predict = False # False = reproduce
+    predict = True # False = reproduce
     hyperreducer = 'MDEIM'
 
-    dt_space_dim = 5
+    dt_space_dim = 1
     beta = (max(1e-2, 0*np.random.rand()/10))*0
     JJ = lambda self, d=nosc: r_[c_[zeros((d,d)), eye(d)], c_[-eye(d), zeros((d,d))]]
 
@@ -287,7 +287,7 @@ kwds = {'ham_': ham_, \
         'g_prime': g_prime_lam, \
         }
     
-_Omega2_space_dim = 1
+_Omega2_space_dim = 5
 _Omega2_space = np.sort(10*(1 -np.random.rand(_Omega2_space_dim, nosc//3-2)))
         
 #%%

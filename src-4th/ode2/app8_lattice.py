@@ -217,9 +217,9 @@ class MechSystemSolver(MechSystem):
         for ax in [ax0, ax1, ax2, ax3, ax4, ax5]:
             ax.label_outer()
             
-        string = '_full' if self.RB is None else '_predict' if self.predict else '_repro'
-        filename = f"{self.keep_time}osc_{self.solver_class.__name__}{string}.pdf"
-        save_figure(fig, filename)
+        # string = '_full' if self.RB is None else '_predict' if self.predict else '_repro'
+        # filename = f"{self.keep_time}osc_{self.solver_class.__name__}{string}.pdf"
+        # save_figure(fig, filename)
 
     @staticmethod
     def measures(MSsolvers, Omega2_space_dim):
@@ -419,6 +419,8 @@ if __name__ == '__main__':
         Uj, sv, mj = POD(F3, np.eye(F3.shape[0]), MSsolvers[0].tol)
         del F3
 
+        print(f'{mj = }')
+    
         fig, ax = logplot(sv, xlabel='index of singular values', xlims=(1, len(sv)))
         ax.xaxis.set_major_locator(MaxNLocator(integer=True))
         # filename = MechSystem.keep_time +'osc_mdeim_sv' + '.pdf'
@@ -441,6 +443,8 @@ if __name__ == '__main__':
 
         Uj, sv, mj = POD(F5, np.eye(F5.shape[0]), MechSystem.tol)
         del F5
+
+        print(f'{mj = }')
 
         Pj, _ = DEIM(Uj, plot_deim=False)
 
@@ -468,6 +472,8 @@ if __name__ == '__main__':
 
         Uj, sv, mj = POD(F4, np.eye(F4.shape[0]), MechSystem.tol)
         del F4
+
+        print(f'{mj = }')
 
         fig, ax = logplot(sv, xlabel='index of singular values', xlims=(1, len(sv)))
         ax.xaxis.set_major_locator(MaxNLocator(integer=True))

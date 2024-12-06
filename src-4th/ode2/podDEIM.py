@@ -16,7 +16,8 @@ Tests for the 1D and 2D cases
 from mpl_toolkits.mplot3d.axes3d import Axes3D
 import matplotlib.pyplot as plt
 from itertools import product
-from PlotScript import plot_3dsurface
+from PlotScript import plot_3dsurface, logplot
+from matplotlib.ticker import MaxNLocator
 from time import process_time
 import numpy as np
 import scipy as sp
@@ -93,6 +94,21 @@ def POD(S, Xh, eps=None):
     # Chi = Xh_half @ Chi
         
     return Chi, np.sqrt(Sigma2), N
+
+def PSD(F2, y_list, nosc, tol):
+    
+    RB, sv, nosc_r = POD(pl.c_[y_list[:nosc,:], y_list[nosc:,:], F2[:nosc, :], F2[nosc:,:]], np.eye(nosc), tol)
+    RB = np.block([[RB[:, :nosc_r], np.zeros_like(RB[:, :nosc_r])], [np.zeros_like(RB[:, :nosc_r]), RB[:, :nosc_r]]])
+
+    print(f'{2*nosc_r = }')
+
+    fig, ax = logplot(sv, xlabel='index of singular values', xlims=(1, len(sv)))
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+    # filename = MechSystem.keep_time +'osc_sv' + '.pdf'
+    # save_figure(fig, filename)
+    
+    return RB, sv, nosc_r, fig
+
 # %%
 
 def DEIM(Ub, plot_deim=False):

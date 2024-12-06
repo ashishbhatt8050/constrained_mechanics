@@ -47,6 +47,7 @@ def Newton(f, x, dfdx, epsilon=1.0E-7, N=100, store=False):
     else:
         return x, n, f_value
     
+'''
 def fixed_point(g, x, dgdx, tol, M, store):
     """
     Fixed point iteration method.
@@ -91,6 +92,60 @@ def fixed_point(g, x, dgdx, tol, M, store):
         # Store iteration history
         if store:
             info.append((m, Delta_Lambda, x[1]))
+        
+    # Check convergence
+    assert m < M, "Nonlinear solver did not converge"
+'''
+
+
+def fixed_point(g, x, dgdx, tol, M, store):
+    """
+    Fixed point iteration method.
+
+    Parameters:
+    g (function): The function to find the fixed point for.
+    x (array): The initial guess.
+    dgdx (function): The derivative of the function.
+    tol (float): The tolerance for convergence.
+    M (int): The maximum number of iterations.
+    store (bool): Whether to store the iteration history.
+
+    Returns:
+    x (array): The fixed point.
+    info (list, optional): The iteration history if store is True.
+    """
+
+    # Initialize counter
+    m = 0
+    
+    if isinstance(dgdx, tuple):
+        dgdx_0, dgdx_1 = dgdx[0], lambda x: dgdx[1](0.5 * (x[0]+x[1]))
+    else:
+        dgdx_0, dgdx_1 = dgdx, lambda x: dgdx(x[0])
+
+    if store:
+        info = [(m, x[1])]
+
+    # Fixed point iteration
+    while LA.norm(g(x[1])) > tol and m < M:
+
+        # Update R and Delta_Lambda
+        R = dgdx_0(x[1]) @ dgdx_1(x).T
+        Delta_Lambda = g(x[1]) / R if R.ndim <= 1 else LA.solve(R, g(x[1]))
+
+        # Update x
+        if R.ndim <= 1:
+            x[1] -= dgdx_1(x) * Delta_Lambda
+        else:
+            x[1] -= dgdx_1(x).T @ Delta_Lambda
+            
+        # Update m and x[0]
+        m += 1
+        x[0] = x[1]
+
+        # Store iteration history
+        if store:
+            info.append((m, x[1], Delta_Lambda))
         
     # Check convergence
     assert m < M, "Nonlinear solver did not converge"

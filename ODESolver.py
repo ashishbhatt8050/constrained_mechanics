@@ -33,9 +33,9 @@ class ODESolver(MechSystem):
         if not callable(MechSystem):
             raise TypeError('MechSystem is %s, not a function' % type(MechSystem))
         
-        self.f = lambda u, t: self.__call__(u, t, func=True, jac=False)
+        self.f = lambda u, t, *arg: self.__call__(u, t, arg, func=True)
         
-        self.dfdu = lambda u, t, *arg: self.__call__(u, t, arg, func=False, jac=True)
+        self.dfdu = lambda u, t, *arg: self.__call__(u, t, arg, func=False)
         
         self.Ecoeff = lambda dt: np.exp(self.beta*dt/2)
 
@@ -54,7 +54,8 @@ class ODESolver(MechSystem):
 
         # Check that f returns correct length:
         try:
-            f0 = self.f(self.U0, 0)
+            # print(self.U0.shape)
+            f0 = self.f(self.U0, 0, self.U0)
         except IndexError:
             raise IndexError('Index of u out of bounds in f(u,t) func. Legal indices are %s' % (str(list(range(self.neq)))))
         if f0.size != self.neq:
@@ -295,7 +296,7 @@ class ImplicitMidpoint(ODESolver):
         ODESolver.__init__(self, kwds)
             
         self.dfdw = lambda u, t, dt: \
-                        np.eye(self.neq)-dt/2*self.dfdu((u[1]+u[0])/2, (t[1]+t[0])/2, dt)
+                        np.eye(self.neq)-dt/2*self.dfdu((u[1]+u[0])/2, (t[1]+t[0])/2)
 
     def advance(self, w_start=None):
         u, f, k, t = self.u, self.f, self.k, self.t
@@ -325,6 +326,47 @@ class ImplicitMidpoint(ODESolver):
         temp = dt/2.0*self.dfdu((u[k+1] +u[k])/2.0, (t[k+1] +t[k])/2.0)
         du_new = LA.solve((I_mat -temp), (I_mat +temp))
         return du_new
+
+ 
+class DiscreteGradient(ODESolver):
+    def __init__(self, kwds):
+        ODESolver.__init__(self, kwds)
+            
+        # TODO: line up u[0:2], repeat for implicit midpoint
+        self.dfdw = lambda u, t: np.eye(self.neq) - self.dt * self.dfdu(u[0], t, u[1])
+
+    def advance(self, w_start=None):
+        u, f, k, t = self.u, self.f, self.k, self.t
+        dt = self.dt
+        
+        def F(w):
+            return w - u[k] - dt*f(u[k], t[k], w)
+
+        def dFdw(w):
+            return self.dfdw([u[k], w], t[k])
+
+        if w_start is None:
+            # w_start = u[k] + dt*f(u[k], t[k], u[k])  # Forward Euler step
+            # w_start[self.neq//2:] = u[k, self.neq//2:] + dt*f(u[k], t[k], r_[w_start[:self.neq//2], u[k, self.neq//2:]])[self.neq//2:]
+            
+            uk = u[k] if self.RB is None else u[k] @ self.RB.T
+            w_start = u[k] + dt * self.JJ(self.neq//2) @ self.ham_z(*np.split(uk, 2))
+        
+        u_new, n, info = Newton(F, w_start, dFdw, N=100, store=True)
+        
+        if n >= 100:
+            print(f"Newton's failed to converge at t={t[k+1]:.6f} ({n} iterations)")
+
+        return u_new, info
+
+    def var_advance(self):
+        u, k, t, I_mat = self.u, self.k, self.t, self.I_mat
+        dt = self.dt
+
+        temp = dt*self.dfdu(u[k], (t[k+1] +t[k])/2.0, u[k+1])
+        du_new = LA.solve((I_mat -temp), (I_mat +temp))
+        return du_new
+
 
 class ConformalImplicitMidpoint(ImplicitMidpoint):
     def __init__(self, kwds):

@@ -31,8 +31,8 @@ rc('text.latex', preamble=r'\usepackage{amsfonts}')  # Load AMSFonts for Fraktur
 from ODESolver import ConformalStormerVerlet, ConformalImplicitMidpoint, DiscreteGradient
 from Newton import fixed_point
 from System import MechSystem, kwds, _ham_z_, ham_z_, _g_lam, g_lam, ham_zz_
-from System import nosc, q, p, y, omega2, beta, ham_z_expr, ham_zz_expr, g_expr, g_prime_expr, g_prime_lam
-from System import q1, p1, _lag_dg_, lag_dg_, lag_dg_z_, lag_dg_expr, lag_dg_z_expr
+from System import nosc, q, p, y, y1, omega2, beta, ham_z_expr, DG_V_expr, ham_zz_expr, g_expr, g_prime_expr, g_prime_lam
+from System import _lag_dg_, lag_dg_, lag_dg_z_, lag_dg_expr, lag_dg_z_expr
 from System import _Omega2_space
 from podDEIM import POD, PSD, DEIM
 from PlotScript import plot_data, tex_table, logplot, save_figure, timing
@@ -339,8 +339,8 @@ if __name__ == '__main__':
     
     RB, _, nosc_r, _ = PSD(F2, y_list, nosc, MechSystem.tol)
     
-    F2_dg = np.hstack([np.array([MSsolver.lag_dg(np.split(y, 2)[0], np.split(y1, 2)[0], np.split(y, 2)[1], np.split(y1, 2)[1]) \
-                                for y, y1 in zip(MSsolver.y[indices], MSsolver.y[np.array(indices)+1])]).T \
+    F2_dg = np.hstack([np.array([MSsolver.lag_dg(y) \
+                                for y in zip(MSsolver.y[indices], MSsolver.y[np.array(indices)+1])]).T \
                                 for MSsolver, indices in zip(MSsolvers, indices_list)])
     print(f'{F2_dg.shape = }')
     
@@ -358,9 +358,10 @@ if __name__ == '__main__':
                  # 'nosc_r_dg': nosc_r_dg,
                  })
 
+    # TODO: change the pre-multiplier matrix to be the symplectic inverse
     if 'lag_dg_' in locals():
-        kwds.update({'lag_dg_': lambda x, u, x1, u1, Omega2: RB_dg.T @ lag_dg_(x, u, x1, u1, Omega2),
-                     'lag_dg_z_': lambda x, x1, u, u1, Omega2: RB_dg.T @ lag_dg_z_(x, x1, u, u1, Omega2) @ RB_dg,
+        kwds.update({'lag_dg_': lambda y, Omega2: RB_dg.T @ lag_dg_(y @ RB_dg.T, Omega2),
+                     'lag_dg_z_': lambda y, Omega2: RB_dg.T @ lag_dg_z_(y @ RB_dg.T, Omega2) @ RB_dg,
                      'g': lambda y: g_lam( y @ RB_dg.T),
                      'g_prime': lambda y: g_prime_lam( y @ RB_dg.T) @ RB_dg,
                      })
@@ -409,16 +410,16 @@ if __name__ == '__main__':
 
         PxU_inv_dg = LA.inv(P_dg.T @ RB_dg)
 
-        Pxlag_dg_ = smp.lambdify((q, q1, p, p1, omega2), P_dg.T @ lag_dg_expr.flat(), modules=['scipy'])
+        Pxlag_dg_ = smp.lambdify((y, y1, omega2), P_dg.T @ lag_dg_expr.flat(), modules=['scipy'])
 
-        kwds.update({'lag_dg_': lambda x, x1, u, u1, Omega2: PxU_inv_dg @ Pxlag_dg_(x, x1, u, u1, Omega2)})
+        kwds.update({'lag_dg_': lambda y, Omega2: PxU_inv_dg @ Pxlag_dg_(*(y @ RB_dg.T), Omega2)})
 
     if MechSystem.hyperreducer == 'DEIM':
         Pxham_zz_ = smp.lambdify((q, p, omega2, beta), P.T @ ham_zz_expr @ RB, modules=['scipy'])
         kwds.update({'ham_zz_': lambda q, p, omega2, beta: PxU_inv_ @ Pxham_zz_(q, p, omega2, beta)})
         
-        Pxlag_dg_z_ = smp.lambdify((q, q1, p, p1, omega2), P_dg.T @ lag_dg_z_expr @ RB_dg, modules=['scipy'])
-        kwds.update({'lag_dg_z_': lambda q, q1, p, p1, omega2: PxU_inv_dg @ Pxlag_dg_z_(q, q1, p, p1, omega2)})
+        Pxlag_dg_z_ = smp.lambdify((y, y1, omega2), P_dg.T @ lag_dg_z_expr @ RB_dg, modules=['scipy'])
+        kwds.update({'lag_dg_z_': lambda y, omega2: PxU_inv_dg @ Pxlag_dg_z_(*(y @ RB_dg.T), omega2)})
 
     elif MechSystem.hyperreducer == 'MDEIM':
 
@@ -428,7 +429,9 @@ if __name__ == '__main__':
             
         IP[np.arange(len(non_zero_indices)), non_zero_indices] = 1
         
-        F3 = np.hstack([np.array([IP @ MSsolver.ham_zz(*np.split(y, 2)).flatten() for y in MSsolver.y[indices]]).T for MSsolver, indices in zip(MSsolvers, indices_list)])
+        F3 = np.hstack([np.array([IP @ MSsolver.ham_zz(*np.split(y, 2)).flatten() \
+                                  for y in MSsolver.y[indices]]).T \
+                                    for MSsolver, indices in zip(MSsolvers, indices_list)])
         print(f'{F3.shape = }')
 
         Uj, sv, mj = POD(F3, np.eye(F3.shape[0]), MSsolvers[0].tol)
@@ -453,14 +456,14 @@ if __name__ == '__main__':
 
         if 'lag_dg_' in locals():
 
-            non_zero_indices = np.nonzero(MSsolvers[0].lag_dg_z(np.split(MSsolvers[0].y[0], 2)[0], np.split(MSsolvers[0].y[1], 2)[0], np.split(MSsolvers[0].y[0], 2)[1], np.split(MSsolvers[0].y[1], 2)[1]).flatten())[0]
+            non_zero_indices = np.nonzero(MSsolvers[0].lag_dg_z(MSsolvers[0].y[0:2]).flatten())[0]
 
             IP = np.zeros((len(non_zero_indices), (2*nosc)**2))
                 
             IP[np.arange(len(non_zero_indices)), non_zero_indices] = 1
             
-            F3 = np.hstack([np.array([IP @ MSsolver.lag_dg_z(np.split(y, 2)[0], np.split(y1, 2)[0], np.split(y, 2)[1], np.split(y1, 2)[1]).flatten()\
-                                        for y, y1 in zip(MSsolver.y[indices], MSsolver.y[np.array(indices)+1])]).T \
+            F3 = np.hstack([np.array([IP @ MSsolver.lag_dg_z(y).flatten()\
+                                        for y in zip(MSsolver.y[indices], MSsolver.y[np.array(indices)+1])]).T \
                                         for MSsolver, indices in zip(MSsolvers, indices_list)])
             print(f'{F3.shape = }')
 
@@ -480,9 +483,9 @@ if __name__ == '__main__':
 
             lag_dg_z_col = Pj.T @ IP @ lag_dg_z_expr.reshape((2*nosc)**2, 1)
 
-            Pxlag_dg_z_ = smp.lambdify((q, q1, p, p1, omega2), lag_dg_z_col, modules=['scipy'])
+            Pxlag_dg_z_ = smp.lambdify((y, y1, omega2), lag_dg_z_col, modules=['scipy'])
 
-            kwds.update({'ham_zz_': lambda q, q1, p, p1, omega2: RB_dg.T @ np.reshape(_IP_UxPxU_inv @ Pxlag_dg_z_(q, q1, p, p1, omega2), (2*nosc, 2*nosc)) @ RB_dg})
+            kwds.update({'lag_dg_z_': lambda y, omega2: RB_dg.T @ np.reshape(_IP_UxPxU_inv @ Pxlag_dg_z_(*(y @ RB_dg.T), omega2), (2*nosc, 2*nosc)) @ RB_dg})
         
         
     if MechSystem.constraint_type is not None and MechSystem.constraints_reduce:

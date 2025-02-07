@@ -147,7 +147,7 @@ class ODESolver(MechSystem):
         if hasattr(self, 'JJ_r'):
             J_mat = self.JJ_r
         elif hasattr(self, 'JJ'):
-            J_mat = self.JJ()
+            J_mat = self.JJ
         else:
             raise ValueError
             
@@ -365,7 +365,6 @@ class DiscreteGradient(ODESolver):
         u, k, t, I_mat = self.u, self.k, self.t, self.I_mat
         dt = self.dt
 
-        # TODO: factor out dt
         temp = dt*self.dfdu(u[k:k+2], (t[k+1] +t[k])/2.0)
         du_new = LA.solve((I_mat -temp), (I_mat +temp))
         return du_new

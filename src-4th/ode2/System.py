@@ -30,7 +30,7 @@ class MechSystem(object):
     tol, M, var, store = 1.0E-12, 100, True, False
 
     "System parameters"
-    nosc = 50*3
+    nosc = 12*3
     assert nosc//3 % 2 == 0, 'nosc//3 must be even'
 
     # These two properties only have effect during reduction
@@ -65,8 +65,8 @@ class MechSystem(object):
 
     y_init = r_[positions, momenta].flatten()
 
-    drag = lambda self, x, u: 0 #beta/2 * r_[x, u]
-    drag_z = lambda self, x, u: 0 #beta/2 * eye(2*x.shape[0])
+    drag = lambda self, y: 0 #beta/2 * r_[x, u]
+    drag_z = lambda self, y: 0 #beta/2 * eye(2*x.shape[0])
 
 
     def __init__(self, kwds):
@@ -81,9 +81,9 @@ class MechSystem(object):
         #     self.nosc_r = kwds['nosc_r_dg']
 
         "MechSystem constituents"
-        self.ham = lambda x, u, Omega2=self.Omega2, beta=self.beta: self.ham_(x, u, Omega2, beta)
-        self.ham_z = lambda x, u, Omega2=self.Omega2, beta=self.beta: self.ham_z_(x, u, Omega2, beta)
-        self.ham_zz = lambda x, u, Omega2=self.Omega2, beta=self.beta: self.ham_zz_(x, u, Omega2, beta)
+        self.ham = lambda y, Omega2=self.Omega2, beta=self.beta: self.ham_(y, Omega2, beta)
+        self.ham_z = lambda y, Omega2=self.Omega2, beta=self.beta: self.ham_z_(y, Omega2, beta)
+        self.ham_zz = lambda y, Omega2=self.Omega2, beta=self.beta: self.ham_zz_(y, Omega2, beta)
 
         self.non_quad = None
         
@@ -94,13 +94,12 @@ class MechSystem(object):
         "Projection matrices"
         if hasattr(self, 'RB'):
             self.y_init = self.RB.T @ self.y_init
-
-            if self.reducer == 'pod':
-                self.JJ_r = self.RB.T @ self.JJ() @ self.RB
-            elif self.reducer == 'psd':
-                self.JJ_r = self.JJ(self.nosc_r)
+            
+            if self.reducer == 'psd':
+                self.JJ = self.JJ(self.nosc_r)
         else:
             self.RB = None
+            self.JJ = self.JJ(self.nosc)
 
         if not hasattr(self, 'P'):
             self.P = None
@@ -120,43 +119,23 @@ class MechSystem(object):
          
             
     def __call__(self, y, t, *y1, **kwargs):
-        
-        # TODO: eliminate this if-else block
-        if self.RB is None:
-            x, u = np.split(y, 2)
-            JJ = self.JJ()
-            
-            if y1[0]:
-                # print(y1)
-                x1, u1 = np.split(y1[0][0], 2)
-                # print(x1.shape, u1.shape)
-        else:
-            x, u = np.split(y @ self.RB.T, 2)
-            JJ = self.JJ_r
-            
-            if y1[0]:
-                x1, u1 = np.split(self.RB @ y1[0][0], 2)
             
         if self.solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
-            f = JJ @ self.ham_z(x, u) - self.drag(*np.split(y, 2))
-            dfdy = JJ @ self.ham_zz(x, u) - self.drag_z(*np.split(y, 2))
+            f = self.JJ @ self.ham_z(y) - self.drag(y)
+            dfdy = self.JJ @ self.ham_zz(y) - self.drag_z(y)
     
         elif self.solver_class in [ODESolver.ConformalImplicitMidpoint]:
-            f = JJ @ self.ham_z(x, u)
-            dfdy = JJ @ self.ham_zz(x, u)
+            f = self.JJ @ self.ham_z(y)
+            dfdy = self.JJ @ self.ham_zz(y)
             
         elif self.solver_class in [ODESolver.ConformalStormerVerlet]:
-            f = JJ @ self.ham_z(x, u, self.Omega2, 0)
-            dfdy = JJ @ self.ham_zz(x, u, self.Omega2, 0)
+            f = self.JJ @ self.ham_z(y, self.Omega2, 0)
+            dfdy = self.JJ @ self.ham_zz(y, self.Omega2, 0)
             
         elif self.solver_class in [ODESolver.DiscreteGradient]:
-            # x1, u1 = args[0], args[1]
-            # print(f"{y1 =}")
-            # print(f"{y.shape =}")
             f = self.lag_dg(y)
             dfdy = self.lag_dg_z(y)
-             
-        # print(f'{self.solver_class =}')
+            
         if kwargs['func']:
             return f
         else:
@@ -164,15 +143,7 @@ class MechSystem(object):
                 
     def get_en_err(self):
             
-        x, u = np.split(self.y.T, 2, axis=0)
-            
-        if self.non_quad and self.P is not None:
-            return log(\
-                        (self.non_quad(x, u) +1/2 *self.y @ self.Q_spd() @self.y.T)\
-                        /(self.non_quad(x[0:1, :], u[None, 0, :]) +1/2 *self.y @ self.Q_spd() @self.y.T)\
-                        )
-        else:
-            return self.ham(x, u) - self.ham(x[:, 0], u[:, 0])
+        return np.array([self.ham(y) for y in self.y]) - self.ham(self.y[0])
     
 #%% Find symbolic quantities
 
@@ -199,10 +170,10 @@ try:
 except: #FileNotFoundError or AttributeError:
     print("Hamiltonian expressions not found on disk. Computing and saving them...")
 
-    # TODO: combine q and p into y
-    q = smp.Matrix(smp.symbols('q_:{}_:{}'.format(nosc//3,3), real=True)).reshape(nosc//3,3)
-    p = smp.Matrix(smp.symbols('p_:{}_:{}'.format(nosc//3,3), real=True))
-    omega2 = smp.Matrix(smp.symbols('omega^2_0:{}'.format(nosc//3-2), real=True))
+    y = smp.Matrix(smp.symbols('y_:{}_:{}'.format(nosc*2//3,3), real=True))
+    q = smp.Matrix(y[:nosc]).reshape(nosc//3,3)
+    p = smp.Matrix(y[nosc:])
+    omega2 = smp.Matrix(smp.symbols('omega^2_:{}'.format(nosc//3-2), real=True))
     beta = smp.symbols('beta', real=True)
 
     kin_expr = 0.5 * p.dot(p)
@@ -211,23 +182,19 @@ except: #FileNotFoundError or AttributeError:
     pot_expr_vec = 0.5 * omega2.multiply_elementwise((pi -smp.ones(nosc//3-2,1)).applyfunc(lambda x: x**2))
     pot_expr = sum(pot_expr_vec) #0.5 * omega2.dot((pi -smp.ones(nosc//3-2,1)).applyfunc(lambda x: x**2))
 
-    q = q.reshape(nosc,1)
-    y = smp.Matrix(list(q)+list(p))
-
     ham_expr = kin_expr + pot_expr
     ham_z_expr = smp.Matrix([ham_expr]).jacobian(y).T
     ham_zz_expr = ham_z_expr.jacobian(y)
 
-    ham_ = smp.lambdify((q, p, omega2, beta), ham_expr, 'numpy')
-    _ham_z_ = smp.lambdify((q, p, omega2, beta), ham_z_expr, 'numpy')
-    ham_zz_ = smp.lambdify((q, p, omega2, beta), ham_zz_expr, 'numpy')
+    ham_ = smp.lambdify((y, omega2, beta), ham_expr, 'numpy')
+    _ham_z_ = smp.lambdify((y, omega2, beta), ham_z_expr, 'numpy')
+    ham_zz_ = smp.lambdify((y, omega2, beta), ham_zz_expr, 'numpy')
 
-    ham_z_ = lambda q, p, omega2, beta: _ham_z_(q, p, omega2, beta).squeeze()
+    ham_z_ = lambda y, omega2, beta: _ham_z_(y, omega2, beta).squeeze()
     
     # Find discrete derivatives
-    q1 = smp.Matrix(smp.symbols('q1_:{}_:{}'.format(nosc//3,3), real=True))
-    p1 = smp.Matrix(smp.symbols('p1_:{}_:{}'.format(nosc//3,3), real=True))
-    y1 = smp.Matrix(list(q1) + list(p1))
+    q = q.reshape(nosc,1)
+    y1 = smp.Matrix(smp.symbols('y1_:{}_:{}'.format(nosc*2//3,3), real=True))
     
     # Update the replacement dictionaries
     y05_repl = dict(zip(y, (y + y1) / 2))
@@ -243,7 +210,7 @@ except: #FileNotFoundError or AttributeError:
     lag_dg_ = lambda y, omega2: _lag_dg_(*y, omega2).squeeze()
     
     # TODO: check math
-    lag_dg_z_expr = lag_dg_expr.jacobian(y1[-nosc:] +y1[:nosc])
+    lag_dg_z_expr = lag_dg_expr.jacobian(y1)
     _lag_dg_z_ = smp.lambdify((y, y1, omega2), lag_dg_z_expr, 'numpy')
     lag_dg_z_ = lambda y, omega2: _lag_dg_z_(*y, omega2)
 
@@ -288,8 +255,10 @@ if MechSystem.constraint_type is not None:
     except: #FileNotFoundError:
         print("Constraints not found on disk. Computing and saving them...")
 
-        q = q.reshape(nosc//3,3)
-        p = p.reshape(nosc//3,3)
+        y = smp.Matrix(smp.symbols('y_:{}_:{}'.format(nosc*2//3,3), real=True))
+        q = smp.Matrix(y[:nosc]).reshape(nosc//3,3)
+        p = smp.Matrix(y[nosc:]).reshape(nosc//3,3)
+        
         row_diffs_q = [q.row((i+1)) - q.row(i) for i in range(0, nosc//3, 2)]
         row_diffs_p = [p.row((i+1)) - p.row(i) for i in range(0, nosc//3, 2)]
         row_norms = [(row_diff.dot(row_diff) -1)/2 for row_diff in row_diffs_q]
@@ -297,7 +266,6 @@ if MechSystem.constraint_type is not None:
 
         q = q.reshape(nosc,1)
         p = p.reshape(nosc,1)
-        y = list(q)+list(p)
         g_expr = smp.Matrix(row_norms+ ddt_row_norms)
         g_prime_expr = g_expr.jacobian(y)
 

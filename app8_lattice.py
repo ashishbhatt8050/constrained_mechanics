@@ -19,7 +19,7 @@ import sympy as smp
 from numpy import linalg as LA
 from pylab import  log, r_, c_, sqrt, reshape, linspace, roll, figure, zeros_like
 
-from pathos.pools import _ProcessPool as Pool
+import concurrent.futures
 
 from functools import wraps
 
@@ -31,8 +31,8 @@ rc('text.latex', preamble=r'\usepackage{amsfonts}')  # Load AMSFonts for Fraktur
 from ODESolver import ConformalStormerVerlet, ConformalImplicitMidpoint, DiscreteGradient
 from Newton import fixed_point
 from System import MechSystem, kwds, _ham_z_, ham_z_, _g_lam, g_lam, ham_zz_
-from System import nosc, q, p, y, y1, omega2, beta, ham_z_expr, DG_V_expr, ham_zz_expr, g_expr, g_prime_expr, g_prime_lam
-from System import _lag_dg_, lag_dg_, lag_dg_z_, lag_dg_expr, lag_dg_z_expr
+from System import nosc, q, p, y, y1, omega2, beta, ham_z_expr, ham_zz_expr, g_expr, g_prime_expr, g_prime_lam
+from System import _lag_dg_, lag_dg_, lag_dg_z_, lag_dg_expr, lag_dg_z_expr, DG_V_expr
 from System import _Omega2_space
 from podDEIM import POD, PSD, DEIM
 from PlotScript import plot_data, tex_table, logplot, save_figure, timing
@@ -54,9 +54,7 @@ class MechSystemSolver(MechSystem):
         self.solver = kwds['pool']['solver_class'](kwds)
         
         if self.solver_class == DiscreteGradient:
-            # print(f"{self.JJ().shape =}")
-            # print(f"{self.g_prime(self.y_init).shape =}")
-            self.g_prime_ = (self.g_prime, lambda y: self.g_prime(y) @ self.JJ(self.y_init.size//2).T)
+            self.g_prime_ = (self.g_prime, lambda y: self.g_prime(y) @ self.JJ.T)
 
     @compose_solver_solves
     def solve_for_w(self, w_val, y_, k):
@@ -66,18 +64,8 @@ class MechSystemSolver(MechSystem):
 
         # enforce constraints
         if self.constraint_type:
-    
-            # if self.RB is not None:
-            #     y_full_ = y_ @ self.RB.T
-            # else:
-            #     y_full_ = y_
-
-            # if self.RB is not None: print(f"pre {LA.norm(y_[1]) =}")
-            fixed_point(self.g, y_, self.g_prime_, self.tol, self.M, False)
-            # if self.RB is not None: print(f"post {LA.norm(y_[1]) =}")
             
-            # if self.RB is not None:
-            #     y_ = y_full_ @ self.RB
+            fixed_point(self.g, y_, self.g_prime_, self.tol, self.M, False)
 
             if self.RB is None:
                 return y_, y_ 
@@ -278,21 +266,28 @@ def solve_mech_system(solver_class, dt, Omega2, kwds):
 
 def parallel_solve_mech_system(kwds, Omega2_space, MSsolvers):
 
-    with Pool() as pool:
+    # Prepare the arguments for solve_mech_system
+    args = [(x, y, z, kwds) for x in kwds['registered_solver_classes']
+            for y in MechSystem.dt_space for z in Omega2_space]
 
-        results = pool.starmap(solve_mech_system, \
-                               [(x, y, z, kwds) for x in kwds['registered_solver_classes'] \
-                                for y in MechSystem.dt_space for z in Omega2_space])
+    # Check the length of args
+    if len(args) > 1:
+        # Use ThreadPoolExecutor to parallelize the solve_mech_system calls
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            results = list(executor.map(lambda p: solve_mech_system(*p), args))
+    else:
+        # Sequentially solve the mechanical system
+        results = [solve_mech_system(*args[0])]
 
     if 'pool' in kwds:
         del kwds['pool']
         print("kwds['pool'] deleted")
 
-    # rearrange results in the order of submitted jobs
-    for x, y, z in [(x, y, z) for x in kwds['registered_solver_classes'] \
-                    for y in MechSystem.dt_space for z in Omega2_space]:
+    # Rearrange results in the order of submitted jobs
+    for arg in args:
+        solver_class, dt, Omega2, _ = arg
         for MSsolver in results:
-            if MSsolver.solver_class == x and MSsolver.dt == y and (MSsolver.Omega2 == z).all():
+            if MSsolver.solver_class == solver_class and MSsolver.dt == dt and (MSsolver.Omega2 == Omega2).all():
                 MSsolvers.append(MSsolver)
                 break
             
@@ -334,7 +329,7 @@ if __name__ == '__main__':
     y_list = np.hstack([MSsolver.y[indices].T for MSsolver, indices in zip(MSsolvers, indices_list)])
     print(f'{y_list.shape = }')
     
-    F2 = np.hstack([np.array([MSsolver.ham_z(*np.split(y, 2)) for y in MSsolver.y[indices]]).T for MSsolver, indices in zip(MSsolvers, indices_list)])
+    F2 = np.hstack([np.array([MSsolver.ham_z(y) for y in MSsolver.y[indices]]).T for MSsolver, indices in zip(MSsolvers, indices_list)])
     print(f'{F2.shape = }')
     
     RB, _, nosc_r, _ = PSD(F2, y_list, nosc, MechSystem.tol)
@@ -349,13 +344,10 @@ if __name__ == '__main__':
     MechSystem.RB = RB_dg
     MechSystem.nosc_r = nosc_r_dg
 
-    # TODO: multiply ham_z_ by RB on the inside
-    kwds.update({'ham_z_': lambda q, p, omega2, beta: RB.T @ ham_z_(q, p, omega2, beta),
-                 'ham_zz_': lambda q, p, omega2, beta: RB.T @ ham_zz_(q, p, omega2, beta) @ RB,
-                 # 'RB': RB,
-                 # 'RB_dg': RB_dg,
-                 # 'nosc_r': nosc_r,
-                 # 'nosc_r_dg': nosc_r_dg,
+    kwds.update({'ham_z_': lambda y, omega2, beta: RB.T @ ham_z_(y @ RB.T, omega2, beta),
+                 'ham_zz_': lambda y, omega2, beta: RB.T @ ham_zz_(y @ RB.T, omega2, beta) @ RB,
+                 'g': lambda y: g_lam( y @ RB.T),
+                 'g_prime': lambda y: g_prime_lam( y @ RB.T) @ RB,
                  })
 
     # TODO: change the pre-multiplier matrix to be the symplectic inverse
@@ -396,15 +388,15 @@ if __name__ == '__main__':
 
     P, _ = DEIM(RB, plot_deim=False)
 
-    # MechSystem.U = RB
     MechSystem.P = P
 
     PxU_inv_ = LA.inv(P.T @ RB)
 
-    Pxham_z_ = smp.lambdify((q, p, omega2, beta), P.T @ ham_z_expr.flat(), modules=['scipy'])
+    Pxham_z_ = smp.lambdify((y, omega2, beta), P.T @ ham_z_expr.flat(), modules=['scipy'])
 
-    kwds.update({'ham_z_': lambda q, p, omega2, beta: PxU_inv_ @ Pxham_z_(q, p, omega2, beta)})
+    kwds.update({'ham_z_': lambda y, omega2, beta: PxU_inv_ @ Pxham_z_(y @ RB.T, omega2, beta)})
 
+    
     if 'lag_dg_' in locals():
         P_dg, _ = DEIM(RB_dg, plot_deim=False)
 
@@ -415,21 +407,21 @@ if __name__ == '__main__':
         kwds.update({'lag_dg_': lambda y, Omega2: PxU_inv_dg @ Pxlag_dg_(*(y @ RB_dg.T), Omega2)})
 
     if MechSystem.hyperreducer == 'DEIM':
-        Pxham_zz_ = smp.lambdify((q, p, omega2, beta), P.T @ ham_zz_expr @ RB, modules=['scipy'])
-        kwds.update({'ham_zz_': lambda q, p, omega2, beta: PxU_inv_ @ Pxham_zz_(q, p, omega2, beta)})
+        Pxham_zz_ = smp.lambdify((y, omega2, beta), P.T @ ham_zz_expr @ RB, modules=['scipy'])
+        kwds.update({'ham_zz_': lambda y, omega2, beta: PxU_inv_ @ Pxham_zz_(y @ RB.T, omega2, beta)})
         
         Pxlag_dg_z_ = smp.lambdify((y, y1, omega2), P_dg.T @ lag_dg_z_expr @ RB_dg, modules=['scipy'])
         kwds.update({'lag_dg_z_': lambda y, omega2: PxU_inv_dg @ Pxlag_dg_z_(*(y @ RB_dg.T), omega2)})
-
+    
     elif MechSystem.hyperreducer == 'MDEIM':
 
-        non_zero_indices = np.nonzero(MSsolvers[0].ham_zz(*np.split(MSsolvers[0].y[0], 2)).flatten())[0]
+        non_zero_indices = np.nonzero(MSsolvers[0].ham_zz(MSsolvers[0].y[0]).flatten())[0]
 
         IP = np.zeros((len(non_zero_indices), (2*nosc)**2))
             
         IP[np.arange(len(non_zero_indices)), non_zero_indices] = 1
         
-        F3 = np.hstack([np.array([IP @ MSsolver.ham_zz(*np.split(y, 2)).flatten() \
+        F3 = np.hstack([np.array([IP @ MSsolver.ham_zz(y).flatten() \
                                   for y in MSsolver.y[indices]]).T \
                                     for MSsolver, indices in zip(MSsolvers, indices_list)])
         print(f'{F3.shape = }')
@@ -450,10 +442,10 @@ if __name__ == '__main__':
 
         ham_zz_col = Pj.T @ IP @ ham_zz_expr.reshape((2*nosc)**2, 1)
 
-        Pxham_zz_ = smp.lambdify((q, p, omega2, beta), ham_zz_col, modules=['scipy'])
+        Pxham_zz_ = smp.lambdify((y, omega2, beta), ham_zz_col, modules=['scipy'])
 
-        kwds.update({'ham_zz_': lambda q, p, omega2, beta: RB.T @ np.reshape(_IP_UxPxU_inv @ Pxham_zz_(q, p, omega2, beta), (2*nosc, 2*nosc)) @ RB})
-
+        kwds.update({'ham_zz_': lambda y, omega2, beta: RB.T @ np.reshape(_IP_UxPxU_inv @ Pxham_zz_(y @ RB.T, omega2, beta), (2*nosc, 2*nosc)) @ RB})
+    
         if 'lag_dg_' in locals():
 
             non_zero_indices = np.nonzero(MSsolvers[0].lag_dg_z(MSsolvers[0].y[0:2]).flatten())[0]
@@ -487,7 +479,6 @@ if __name__ == '__main__':
 
             kwds.update({'lag_dg_z_': lambda y, omega2: RB_dg.T @ np.reshape(_IP_UxPxU_inv @ Pxlag_dg_z_(*(y @ RB_dg.T), omega2), (2*nosc, 2*nosc)) @ RB_dg})
         
-        
     if MechSystem.constraint_type is not None and MechSystem.constraints_reduce:
 
         F5 = np.hstack([np.array([MSsolver.g(y) + 0 for y in MSsolver.y[indices]]).T for MSsolver, indices in zip(MSsolvers, indices_list)])
@@ -510,8 +501,8 @@ if __name__ == '__main__':
 
         _Pxg = smp.lambdify((y,), _g_col, modules=['scipy'])
 
-        kwds.update({'g': lambda y: (_UxPxU_inv @ _Pxg(y) -0).squeeze()})
-
+        kwds.update({'g': lambda y: (_UxPxU_inv @ _Pxg(y @ RB.T) -0).squeeze()})
+    
         non_zero_indices = np.nonzero(MSsolvers[0].g_prime(MSsolvers[0].y[0]).flatten())[0]
 
         g_prime_shape= MSsolvers[0].g_prime(MSsolvers[0].y[0]).shape
@@ -540,16 +531,17 @@ if __name__ == '__main__':
 
         Pxg_prime_ = smp.lambdify((y,), g_prime_col, modules=['scipy'])
 
-        kwds.update({'g_prime': lambda y: np.reshape(IP_UxPxU_inv_ @ Pxg_prime_(y), g_prime_shape) })
-            
-        
+        #TODO: update g and g_prime for new definitions
+        kwds.update({'g_prime': lambda y: np.reshape(IP_UxPxU_inv_ @ Pxg_prime_(y @ RB.T), g_prime_shape) })
+                
         if 'lag_dg_' in locals():
             kwds.update({'g': lambda y: (_UxPxU_inv @ _Pxg( y @ RB_dg.T ) -0).squeeze(),
                          'g_prime': lambda y: np.reshape(IP_UxPxU_inv_ @ Pxg_prime_( y @ RB_dg.T), g_prime_shape) @ RB_dg})
-
+            
     gc.collect()
     print('solving hyper-reduced system ...')
 
+#%%
     MSsolvers_dr =[]
     parallel_solve_mech_system(kwds, Omega2_space, MSsolvers_dr)
     

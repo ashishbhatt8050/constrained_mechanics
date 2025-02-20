@@ -95,10 +95,11 @@ def POD(S, Xh, eps=None):
         
     return Chi, np.sqrt(Sigma2), N
 
-def PSD(F2, y_list, nosc, tol):
+def PSD(F2, y_list, MechSystem):
     
-    RB, sv, nosc_r = POD(pl.c_[y_list[:nosc,:], y_list[nosc:,:], F2[:nosc, :], F2[nosc:,:]], np.eye(nosc), tol)
-    RB = np.block([[RB[:, :nosc_r], np.zeros_like(RB[:, :nosc_r])], [np.zeros_like(RB[:, :nosc_r]), RB[:, :nosc_r]]])
+    nosc, tol = MechSystem.nosc, MechSystem.tol
+    rb, sv, nosc_r = POD(pl.c_[y_list[:nosc, :], y_list[nosc:, :], F2[:nosc, :], F2[nosc:, :]], np.eye(nosc), tol)
+    RB = np.block([[rb[:, :nosc_r], np.zeros_like(rb[:, :nosc_r])], [np.zeros_like(rb[:, :nosc_r]), rb[:, :nosc_r]]])
 
     print(f'{2*nosc_r = }')
 

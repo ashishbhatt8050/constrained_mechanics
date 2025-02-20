@@ -11,13 +11,11 @@ fixed point iterators from the Newton.py,
 and bases from podDEIM.
 """
 
-import gc
-from datetime import datetime
-
+import os
 import numpy as np
 import sympy as smp
 from numpy import linalg as LA
-from pylab import  log, r_, c_, sqrt, reshape, linspace, roll, figure, zeros_like
+from pylab import  log, r_, c_, sqrt, reshape, linspace, roll, figure
 
 import concurrent.futures
 
@@ -28,15 +26,14 @@ from matplotlib import rc
 rc('text', usetex=True)  # Enable LaTeX rendering
 rc('text.latex', preamble=r'\usepackage{amsfonts}')  # Load AMSFonts for Fraktur
 
-from ODESolver import ConformalStormerVerlet, ConformalImplicitMidpoint, DiscreteGradient
+from ODESolver import (ConformalStormerVerlet, ConformalImplicitMidpoint, 
+                      DiscreteGradient)
 from Newton import fixed_point
-from System import MechSystem, kwds, _ham_z_, ham_z_, _g_lam, g_lam, ham_zz_
-from System import nosc, q, p, y, y1, omega2, beta, ham_z_expr, ham_zz_expr, g_expr, g_prime_expr, g_prime_lam
-from System import _lag_dg_, lag_dg_, lag_dg_z_, lag_dg_expr, lag_dg_z_expr, DG_V_expr
-from System import _Omega2_space
+from System import MechSystem  # Keep for static properties
 from podDEIM import POD, PSD, DEIM
 from PlotScript import plot_data, tex_table, logplot, save_figure, timing
 
+#%%
 def compose_solver_solves(func):
     @wraps(func)
     def wrapper(self, y_, k):
@@ -45,36 +42,23 @@ def compose_solver_solves(func):
                 
         return y_, y_full_
     return wrapper
-   
-class MechSystemSolver(MechSystem):
 
-    def __init__(self, kwds):
-    
-        super().__init__(kwds)
-        self.solver = kwds['pool']['solver_class'](kwds)
-        
-        if self.solver_class == DiscreteGradient:
-            self.g_prime_ = (self.g_prime, lambda y: self.g_prime(y) @ self.JJ.T)
-
+class BaseSolverMixin:
+    """Base mixin with common solving capabilities"""
     @compose_solver_solves
     def solve_for_w(self, w_val, y_, k):
-        self.solver.set_initial_condition(y_[1])
-        y_, _, info_ = self.solver.solve(w_val*self.t_points[k:k+2])
+        self.set_initial_condition(y_[1])
+        y_, _, info_ = super().solve(w_val*self.t_points[k:k+2])
         if self.store: self.info.append(np.array(info_[0::1]))
+        return self.handle_constraints(y_)
 
-        # enforce constraints
+    def handle_constraints(self, y_):
         if self.constraint_type:
-            
-            fixed_point(self.g, y_, self.g_prime_, self.tol, self.M, False)
-
-            if self.RB is None:
-                return y_, y_ 
-            else:
-                return y_, y_ @ self.RB.T
-
+                fixed_point(self.g, y_, self.g_prime, self.tol, self.M, False)
+                return (y_, y_ @ self.RB.T) if self.RB is not None else (y_, y_)
 
     @timing
-    def solve(self):
+    def solve_trajectory(self):
 
         if self.RB is None:
             self.y = np.zeros((self.n+1, 2*self.nosc))
@@ -122,7 +106,7 @@ class MechSystemSolver(MechSystem):
                 self.y_full[k+1] = y_[1]
                 self.y[k+1] = self.RB.T @y_[1]
         '''
-
+        
         if self.store:
             self.info.append(self.y[k+1])
             self.info = np.vstack(self.info)
@@ -130,19 +114,32 @@ class MechSystemSolver(MechSystem):
         if self.RB is not None:
             self.y_red = self.y
             self.y = self.y_full
-            
-    def var_solve(self):
-    
-        if hasattr(self, 'y_red'):
-            y = self.y_red
-        else:
-            y = self.y
-            
-        dpsi, _ = self.solver.var_solve(y, self.t_points)
-        self.sym_error = self.solver.symplectic_error(dpsi, self.t_points)
 
     def plot(self):
-        "plot the results"
+        """
+        Plot the results of the simulation.
+        This method generates a figure with multiple subplots to visualize various
+        aspects of the simulation results, including symmetry error, norm of g, 
+        energy error, linear momentum error, and angular momentum error. It also 
+        plots the particle positions over time in a 3D phase portrait.
+        Subplots:
+        - ax0: Symmetry error over time (if `self.sym_error` is available).
+        - ax1: Norm of g over time (if `self.g` is available).
+        - ax2: Energy error over time (if `self.eng_error` is available).
+        - ax3: Linear momentum error over time.
+        - ax4: Angular momentum error over time.
+        - ax5: (Commented out) Matrix condition number over time.
+        - ax6: 3D phase portrait of particle positions over time.
+        The figure's title includes the integrator name and time step size.
+        The x-axis of the last subplot (ax4) is labeled as 'time'.
+        The 3D phase portrait (ax6) includes labels for x, y, and z axes and a title.
+        Note:
+        - The method assumes that `self.y` contains the simulation data.
+        - The method uses `plot_data` to plot data on the subplots.
+        - The method uses `LA.norm` to compute norms.
+        - The method uses `np.vstack` and `np.cross` for data manipulation.
+        - The method includes commented-out code for plotting matrix condition number.
+        """
 
         fig = figure()
         fig.tight_layout(pad=0)
@@ -173,11 +170,11 @@ class MechSystemSolver(MechSystem):
             plot_data(ax2, self.t_points, self.eng_error, xlims=(0, self.T_final), \
                       ylabel=r'$\Delta H$', margins=1)
 
-        lin_momentum = np.sum(self.y[:, nosc:].reshape(-1, nosc//3, 3), axis=1)
+        lin_momentum = np.sum(self.y[:, self.nosc:].reshape(-1, self.nosc//3, 3), axis=1)
         lim_momentum_err = r_[0, LA.norm(lin_momentum[1:] - lin_momentum[0], axis=1)]
 
-        angular_momentum = np.cross(self.y[:, :nosc].reshape(-1, nosc//3, 3), \
-                                    self.y[:, nosc:].reshape(-1, nosc//3, 3))
+        angular_momentum = np.cross(self.y[:, :self.nosc].reshape(-1, self.nosc//3, 3), \
+                                    self.y[:, self.nosc:].reshape(-1, self.nosc//3, 3))
         angular_momentum_sum = np.sum(angular_momentum, axis=1)
         angular_momentum_err = r_[0, \
                                   LA.norm(angular_momentum_sum[1:] - angular_momentum_sum[0], axis=1)]
@@ -190,11 +187,11 @@ class MechSystemSolver(MechSystem):
 
         # # Plot matrix condition number
         # if self.RB is not None:
-        #     temp = lambda t: self.g_prime[0](self.y[t])[:,:nosc] @ self.RB[:nosc,:self.nosc_r]
+        #     temp = lambda t: self.g_prime[0](self.y[t])[:,:self.nosc] @ self.RB[:self.nosc,:self.nosc_r]
         #     mat = lambda t: temp(t) @ self.ham_zz(*np.split(self.y[t],2))[self.nosc_r:,self.nosc_r:] @ temp(t).T
         # else:
-        #     temp = lambda t: self.g_prime[0](self.y[t])[:,:nosc]
-        #     mat = lambda t: temp(t) @ self.ham_zz(*np.split(self.y[t],2))[nosc:,nosc:] @ temp(t).T
+        #     temp = lambda t: self.g_prime[0](self.y[t])[:,:self.nosc]
+        #     mat = lambda t: temp(t) @ self.ham_zz(*np.split(self.y[t],2))[self.nosc:,self.nosc:] @ temp(t).T
 
         # # self.mat_cond = [LA.cond(mat(t), 2) for t in range(self.n)]
         # self.mat_cond = LA.cond(np.array([mat(t) for t in range(self.n)]), 2)
@@ -205,7 +202,7 @@ class MechSystemSolver(MechSystem):
         ax4.set_xlabel('time')
 
         # Plot the particle positions over time
-        coords = self.y[:, :nosc].reshape(-1, nosc//3, 3)
+        coords = self.y[:, :self.nosc].reshape(-1, self.nosc//3, 3)
         for i in range(coords.shape[1]):
             ax6.plot(coords[:, i, 0], coords[:, i, 1], coords[:, i, 2], 'k-')  # plot the trajectory of each particle
             ax6.scatter(coords[-1, i, 0], coords[-1, i, 1], coords[-1, i, 2], s=20)  # plot the final position of each particle
@@ -218,51 +215,234 @@ class MechSystemSolver(MechSystem):
 
         for ax in [ax0, ax1, ax2, ax3, ax4, ax5]:
             ax.label_outer()
+
+        fig.show()
             
         # string = '_full' if self.RB is None else '_predict' if self.predict else '_repro'
-        # filename = f"{self.keep_time}osc_{self.solver_class.__name__}{string}.pdf"
+        # filename = os.path.join(MechSystem.data_folder, f"osc_{self.solver_class.__name__}{string}.pdf")
         # save_figure(fig, filename)
 
     @staticmethod
-    def measures(MSsolvers, Omega2_space_dim):
-        "Various measurements based on the solution"
+    def measures(solvers, Omega2_space_dim):
+        """Various measurements based on the solution"""
+        r_form = lambda numer, denom: r_[float('nan'), 
+                (log(roll(numer, -1)/numer)/log(roll(denom, -1)/denom))[:-1]]
+        en_error = [solver.en_error for solver in solvers]
 
-        r_form = lambda numer, denom: r_[float('nan'), (log(roll(numer, -1)/numer)/log(roll(denom, -1)/denom))[:-1]]
-        en_error = [solver.en_error for solver in MSsolvers]
-
-        for i in range(0, len(MSsolvers), MechSystem.dt_space_dim * Omega2_space_dim):
-            
+        for i in range(0, len(solvers), MechSystem.dt_space_dim * Omega2_space_dim):
             if len(en_error) > 1 and en_error[0] is not None and MechSystem.dt_space_dim > 1:
-                "Compute convergence rates from the error in Energy"
-                r_values = r_form(en_error[i:i+MechSystem.dt_space_dim*Omega2_space_dim:Omega2_space_dim], MechSystem.dt_space)
+                r_values = r_form(en_error[i:i+MechSystem.dt_space_dim*Omega2_space_dim:Omega2_space_dim], 
+                                MechSystem.dt_space)
                 temp = c_[MechSystem.dt_space, r_values].T
-                tex_table(MSsolvers[i].solver_class.__name__, temp)
+                tex_table(solvers[i].solver_class.__name__, temp)
+            solvers[i].plot()
 
-            # Plot the measures
-            MSsolvers[i].plot()
-    
+class HamiltonianSolverMixin(BaseSolverMixin):
+    """Mixin for Hamiltonian-based solvers"""
+    def update_deim_hyperreduction(self, kwds, RB, P, PxU_inv_):
+        """Update methods with DEIM hyperreduction"""
+        y, omega2, beta = MechSystem.y, MechSystem.omega2, MechSystem.beta
+        
+        Pxham_zz_ = smp.lambdify((y, omega2, beta), 
+                                P.T @ MechSystem.ham_zz_expr @ RB, 
+                                modules=['scipy'])
+        
+        kwds.update({
+            'ham_zz_': lambda y, omega2, beta: PxU_inv_ @ Pxham_zz_(y @ RB.T, omega2, beta)
+        })
+
+    def update_mdeim_hyperreduction(self, kwds, solvers, indices_list, RB, nosc):
+        """Update methods with MDEIM hyperreduction"""
+        print('Computing ham_zz reduction...')
+        
+        # Collect ham_zz snapshots
+        non_zero_indices = np.nonzero(solvers[0].ham_zz(solvers[0].y[0]).flatten())[0]
+        IP = np.zeros((len(non_zero_indices), (2*nosc)**2))
+        IP[np.arange(len(non_zero_indices)), non_zero_indices] = 1
+        
+        F3 = np.hstack([np.array([IP @ solver.ham_zz(y).flatten() 
+                                 for y in solver.y[indices]]).T 
+                       for solver, indices in zip(solvers, indices_list)])
+        
+        # Compute POD basis and plot singular values
+        Uj, sv, _ = POD(F3, np.eye(F3.shape[0]), self.tol)
+        fig, ax = logplot(sv, xlabel='index of singular values', xlims=(1, len(sv)))
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        filename = os.path.join(MechSystem.data_folder, f'ham_zz_sv_{self.__class__.__name__}.pdf')
+        save_figure(fig, filename)
+        
+        Pj, _ = DEIM(Uj, plot_deim=False)
+        _IP_UxPxU_inv = IP.T @ Uj @ LA.inv(Pj.T @ Uj)
+
+        # Create lambdified function
+        ham_zz_col = Pj.T @ IP @ MechSystem.ham_zz_expr.reshape((2*nosc)**2, 1)
+        Pxham_zz_ = smp.lambdify((MechSystem.y, MechSystem.omega2, MechSystem.beta), 
+                                ham_zz_col, modules=['scipy'])
+
+        # Update dictionary
+        kwds.update({
+            'ham_zz_': lambda y, omega2, beta: RB.T @ np.reshape(
+                _IP_UxPxU_inv @ Pxham_zz_(y @ RB.T, omega2, beta),
+                (2*nosc, 2*nosc)
+            ) @ RB
+        })
+
+class DiscreteGradientMixin(BaseSolverMixin):
+    """Mixin for Discrete Gradient specific computations"""
+    def update_deim_hyperreduction(self, kwds, RB_dg, P_dg, PxU_inv_dg):
+        """Update methods with DEIM hyperreduction"""
+        y, y1, omega2 = MechSystem.y, MechSystem.y1, MechSystem.omega2
+        
+        Pxlag_dg_z_ = smp.lambdify((y, y1, omega2), 
+                                  P_dg.T @ MechSystem.lag_dg_z_expr @ RB_dg, 
+                                  modules=['scipy'])
+        
+        kwds.update({
+            'lag_dg_z_': lambda y, omega2: PxU_inv_dg @ Pxlag_dg_z_(*(y @ RB_dg.T), omega2)
+        })
+
+    def update_mdeim_hyperreduction(self, kwds, solvers, indices_list, RB_dg, nosc):
+        """Update methods with MDEIM hyperreduction"""
+        print('Computing lag_dg_z reduction...')
+        
+        # Collect lag_dg_z snapshots
+        non_zero_indices = np.nonzero(solvers[0].lag_dg_z(solvers[0].y[0:2]).flatten())[0]
+        IP = np.zeros((len(non_zero_indices), (2*nosc)**2))
+        IP[np.arange(len(non_zero_indices)), non_zero_indices] = 1
+        
+        F3 = np.hstack([np.array([IP @ solver.lag_dg_z(y).flatten()
+                       for y in zip(solver.y[indices], solver.y[np.array(indices)+1])]).T 
+                       for solver, indices in zip(solvers, indices_list)])
+        
+        # Compute POD basis and plot singular values
+        Uj, sv, _ = POD(F3, np.eye(F3.shape[0]), self.tol)
+        fig, ax = logplot(sv, xlabel='index of singular values', xlims=(1, len(sv)))
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        filename = os.path.join(MechSystem.data_folder, f'lag_dg_z_sv_{self.__class__.__name__}.pdf')
+        save_figure(fig, filename)
+        
+        Pj, _ = DEIM(Uj, plot_deim=False)
+        _IP_UxPxU_inv = IP.T @ Uj @ LA.inv(Pj.T @ Uj)
+
+        # Create lambdified function
+        y, y1, omega2 = MechSystem.y, MechSystem.y1, MechSystem.omega2
+        lag_dg_z_col = Pj.T @ IP @ MechSystem.lag_dg_z_expr.reshape((2*nosc)**2, 1)
+        Pxlag_dg_z_ = smp.lambdify((y, y1, omega2), lag_dg_z_col, modules=['scipy'])
+
+        # Update dictionary
+        kwds.update({
+            'lag_dg_z_': lambda y, omega2: RB_dg.T @ np.reshape(
+                _IP_UxPxU_inv @ Pxlag_dg_z_(*(y @ RB_dg.T), omega2),
+                (2*nosc, 2*nosc)
+            ) @ RB_dg
+        })
+
+#%% Concrete solver classes
+class DiscreteGradientSolver(DiscreteGradientMixin, DiscreteGradient):
+    """DiscreteGradient solver with DG-specific capabilities"""
+    def __init__(self, kwds):
+        super().__init__(kwds)
+        self.g = self.g__
+        self.g_prime = (self.g_prime__, lambda y: self.g_prime__(y) @ self.JJ.T)
+        
+    @classmethod
+    def setup_reduced_model(cls, solvers, indices_list, y_list):
+        """Setup DG-specific reduced model"""
+        print('Computing DG reduced basis...')
+        F2 = np.hstack([np.array([solver.lag_dg(y) 
+            for y in zip(solver.y[indices], solver.y[np.array(indices)+1])]).T 
+            for solver, indices in zip(solvers, indices_list)])
+        print(f'{F2.shape = }')
+        
+        MechSystem.RB_dg, _, MechSystem.nosc_r_dg, _ = PSD(F2, y_list, MechSystem)
+
+    def setup_hyperreduction(self, RB_dg, hyperreducer='DEIM'):
+        """Setup DG-specific hyperreduction"""
+        if hyperreducer == 'DEIM':
+            P_dg, _ = DEIM(RB_dg, plot_deim=False)
+            PxU_inv_dg = LA.inv(P_dg.T @ RB_dg)
+            self.update_deim_hyperreduction(kwds, RB_dg, P_dg, PxU_inv_dg)
+            
+        elif hyperreducer == 'MDEIM':
+            self.update_mdeim_hyperreduction(
+                kwds, solvers, indices_list, RB_dg, nosc)
+
+class ConformalStormerVerletSolver(HamiltonianSolverMixin, ConformalStormerVerlet):
+    """CSVSolver with Hamiltonian capabilities"""
+    def __init__(self, kwds):
+        super().__init__(kwds)
+        self.g = self.g__
+        self.g_prime = self.g_prime__
+
+    @classmethod
+    def setup_reduced_model(cls, solvers, indices_list, y_list):
+        """Setup Hamiltonian-specific reduced basis"""
+        print('Computing Hamiltonian reduced basis...')
+        F2 = np.hstack([np.array([solver.ham_z(y) 
+            for y in solver.y[indices]]).T 
+            for solver, indices in zip(solvers, indices_list)])
+        print(f'{F2.shape = }')
+        
+        MechSystem.RB, _, MechSystem.nosc_r, _ = PSD(F2, y_list, MechSystem)
+                
+    def setup_hyperreduction(self, RB, hyperreducer='DEIM'):
+        """Setup Hamiltonian-specific hyperreduction"""
+        if hyperreducer == 'DEIM':
+            P, _ = DEIM(RB, plot_deim=False)
+            PxU_inv_ = LA.inv(P.T @ RB)
+            self.update_deim_hyperreduction(kwds, RB, P, PxU_inv_)
+            
+        elif hyperreducer == 'MDEIM':
+            self.update_mdeim_hyperreduction(
+                kwds, solvers, indices_list, RB, nosc)
+
+class ConformalImplicitMidpointSolver(HamiltonianSolverMixin, ConformalImplicitMidpoint):
+    """CIMSolver with Hamiltonian capabilities"""
+    def __init__(self, kwds):
+        super().__init__(kwds)
+        self.g = self.g__
+        self.g_prime = self.g_prime__
+
+    # Same implementation as ConformalStormerVerletSolver
+    setup_reduced_model = ConformalStormerVerletSolver.setup_reduced_model
+    setup_hyperreduction = ConformalStormerVerletSolver.setup_hyperreduction
+
+
 #%% helper functions
 
 def solve_mech_system(solver_class, dt, Omega2, kwds):
-    kwds['pool'] = {'solver_class': solver_class, 'dt': dt, 'Omega2': Omega2, \
-                    'n': int(round(MechSystem.T_final/dt))}
-    kwds['pool'].update({'t_points': linspace(0, MechSystem.T_final, kwds['pool']['n']+1)})
+    """Helper function to solve mechanical system"""
+    kwds['pool'] = {
+        'solver_class': solver_class, 
+        'dt': dt, 
+        'Omega2': Omega2,
+        'n': int(round(MechSystem.T_final/dt))
+    }
+    kwds['pool'].update({
+        't_points': linspace(0, MechSystem.T_final, kwds['pool']['n']+1)
+    })
 
-    MSsolver = MechSystemSolver(kwds)
-    tl = MSsolver.solve()
-    MSsolver.time_lapsed.append(tl)
+    # Create concrete solver instance instead of MechSystemSolver
+    solver = solver_class(kwds)
+    tl = solver.solve_trajectory()
+    solver.time_lapsed.append(tl)
 
-    if not MSsolver.beta:
-        MSsolver.eng_error = MSsolver.get_en_err()
-        MSsolver.en_error = sqrt(dt)*LA.norm(MSsolver.eng_error)
+    if not solver.beta:
+        solver.eng_error = solver.get_en_err()
+        solver.en_error = sqrt(dt) * LA.norm(solver.eng_error)
     else:
-        MSsolver.en_error = None
+        solver.en_error = None
 
-    if MSsolver.var:
-        MSsolver.var_solve()
+    if solver.var:
+        if hasattr(solver, 'y_red'):
+            y = solver.y_red
+        else:
+            y = solver.y
+            
+        dpsi, _ = solver.var_solve(y)
+        solver.sym_error = solver.symplectic_error(dpsi)
 
-    return MSsolver
-
+    return solver
 
 def parallel_solve_mech_system(kwds, Omega2_space, MSsolvers):
 
@@ -283,7 +463,7 @@ def parallel_solve_mech_system(kwds, Omega2_space, MSsolvers):
         del kwds['pool']
         print("kwds['pool'] deleted")
 
-    # Rearrange results in the order of submitted jobs
+    # Sort results in the order of submitted jobs
     for arg in args:
         solver_class, dt, Omega2, _ = arg
         for MSsolver in results:
@@ -291,275 +471,131 @@ def parallel_solve_mech_system(kwds, Omega2_space, MSsolvers):
                 MSsolvers.append(MSsolver)
                 break
             
+def setup_and_solve_reduced_system(solver_type, solvers, kwds_base):
+    """Setup and solve reduced system for a specific solver type"""
+    print(f'Setting up {solver_type} reduced system...')
+    
+    # Filter solvers by type
+    if solver_type == "DG":
+        filtered_solvers = [s for s in solvers if isinstance(s, DiscreteGradient)]
+        solver_class = DiscreteGradientSolver
+        kwds = kwds_base.copy()
+        kwds['registered_solver_classes'] = [DiscreteGradientSolver]
+    else:  # Hamiltonian
+        filtered_solvers = [s for s in solvers if not isinstance(s, DiscreteGradient)]
+        solver_class = ConformalStormerVerletSolver
+        kwds = kwds_base.copy()
+        kwds['registered_solver_classes'] = [ConformalStormerVerletSolver, ConformalImplicitMidpointSolver]
+
+    # Calculate samples and indices
+    n_samples_list = [int(solver.n // 2) for solver in filtered_solvers]
+    indices_list = [np.random.choice(solver.n-1, n_samples, replace=False)
+                   for solver, n_samples in zip(filtered_solvers, n_samples_list)]
+
+    # Create snapshot list
+    y_list = np.hstack([solver.y[indices].T for solver, indices 
+                        in zip(filtered_solvers, indices_list)])
+
+    # Setup reduced model and update methods
+    solver_class.setup_reduced_model(
+        filtered_solvers, 
+        indices_list, 
+        y_list
+    )
+
+    # Solve reduced system
+    solvers_r = []
+
+    # Update parameters for prediction/reproduction
+    if MechSystem.predict:
+        Omega2_space = MechSystem._Omega2_space[-1:]
+        Omega2_space_dim = len(Omega2_space)
+    else:
+        Omega2_space = MechSystem._Omega2_space
+        Omega2_space_dim = len(Omega2_space)
+
+    parallel_solve_mech_system(kwds, Omega2_space, solvers_r)
+    BaseSolverMixin.measures(solvers_r, Omega2_space_dim)
+    
+    return solvers_r
 
 #%% Main driver
-
 if __name__ == '__main__':
-    "Model order reduction of the MechSystem using MechSystem"
+    """Model order reduction of the MechSystem using concrete solvers"""
 
-#%% Full order solution
-    
-    kwds.update({'registered_solver_classes': [DiscreteGradient]})
+    #%% Full order solution
+    kwds = {
+        'registered_solver_classes': [
+            DiscreteGradientSolver,
+            ConformalStormerVerletSolver,
+            ConformalImplicitMidpointSolver
+        ]
+    }
 
-    MSsolvers = []
-
-    if MechSystem.predict: # prediction experiment
-        # training parameters
-        Omega2_space = _Omega2_space[:-1]
-    else: # reproduction
-        # training parameters
-        Omega2_space = _Omega2_space
-        
+    solvers = []
+    Omega2_space = (MechSystem._Omega2_space[:-1] if MechSystem.predict
+                else MechSystem._Omega2_space)        
     Omega2_space_dim = len(Omega2_space)
 
     print('Computing full solution ...')
-    parallel_solve_mech_system(kwds, Omega2_space, MSsolvers)
+    parallel_solve_mech_system(kwds, Omega2_space, solvers)
+    BaseSolverMixin.measures(solvers, Omega2_space_dim)
 
-    MechSystemSolver.measures(MSsolvers, Omega2_space_dim)
+    #%% Reduced order solution
+    print('Computing reduced bases...')
 
-    array_shape = (len(kwds['registered_solver_classes']), MechSystem.dt_space_dim, Omega2_space_dim)
+    # Solve for each solver type
+    solvers_r_dg = setup_and_solve_reduced_system("DG", solvers, kwds)
+    solvers_r_ham = setup_and_solve_reduced_system("Hamiltonian", solvers, kwds)
 
-    time_lapsed = [reshape([x.time_lapsed for x in MSsolvers], array_shape)]
-    
-#%% Reduced order solution
-    
-    print('Assembling snapshots ...')
-    n_samples_list = [int(MSsolver.n // 2) for MSsolver in MSsolvers]
-    indices_list = [np.random.choice(MSsolver.n-1, n_samples, replace=False) for MSsolver, n_samples in zip(MSsolvers, n_samples_list)]
-    y_list = np.hstack([MSsolver.y[indices].T for MSsolver, indices in zip(MSsolvers, indices_list)])
-    print(f'{y_list.shape = }')
-    
-    F2 = np.hstack([np.array([MSsolver.ham_z(y) for y in MSsolver.y[indices]]).T for MSsolver, indices in zip(MSsolvers, indices_list)])
-    print(f'{F2.shape = }')
-    
-    RB, _, nosc_r, _ = PSD(F2, y_list, nosc, MechSystem.tol)
-    
-    F2_dg = np.hstack([np.array([MSsolver.lag_dg(y) \
-                                for y in zip(MSsolver.y[indices], MSsolver.y[np.array(indices)+1])]).T \
-                                for MSsolver, indices in zip(MSsolvers, indices_list)])
-    print(f'{F2_dg.shape = }')
-    
-    RB_dg, _, nosc_r_dg, _ = PSD(F2_dg, y_list, nosc, MechSystem.tol)
-
-    MechSystem.RB = RB_dg
-    MechSystem.nosc_r = nosc_r_dg
-
-    kwds.update({'ham_z_': lambda y, omega2, beta: RB.T @ ham_z_(y @ RB.T, omega2, beta),
-                 'ham_zz_': lambda y, omega2, beta: RB.T @ ham_zz_(y @ RB.T, omega2, beta) @ RB,
-                 'g': lambda y: g_lam( y @ RB.T),
-                 'g_prime': lambda y: g_prime_lam( y @ RB.T) @ RB,
-                 })
-
-    # TODO: change the pre-multiplier matrix to be the symplectic inverse
-    if 'lag_dg_' in locals():
-        kwds.update({'lag_dg_': lambda y, Omega2: RB_dg.T @ lag_dg_(y @ RB_dg.T, Omega2),
-                     'lag_dg_z_': lambda y, Omega2: RB_dg.T @ lag_dg_z_(y @ RB_dg.T, Omega2) @ RB_dg,
-                     'g': lambda y: g_lam( y @ RB_dg.T),
-                     'g_prime': lambda y: g_prime_lam( y @ RB_dg.T) @ RB_dg,
-                     })
-
-    print('solving reduced system ...')
-            
-    MSsolvers_r = []
-    
-    if MechSystem.predict: # prediction experiment
-        # testing parameters
-        Omega2_space = _Omega2_space[-1:]
-        Omega2_space_dim = len(Omega2_space)
-    
-    else: # reproduction
-        Omega2_space = _Omega2_space
-        
-    Omega2_space_dim = len(Omega2_space)
-    
-    parallel_solve_mech_system(kwds, Omega2_space, MSsolvers_r)
-    
-    MechSystemSolver.measures(MSsolvers_r, Omega2_space_dim)
-            
-    if not MechSystem.predict:
-        print('solution errors')
-        print(reshape([np.amax(abs(y1 - y2)) for y1, y2 in zip([x.y for x in MSsolvers], [x.y for x in MSsolvers_r])], array_shape))
-    
-        time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r], time_lapsed[0].shape) / time_lapsed[0] * 100)
-    else:
-        time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_r], time_lapsed[0].shape[:2]))
-
-#%% Hyper-reduced model
-
-    P, _ = DEIM(RB, plot_deim=False)
-
-    MechSystem.P = P
-
-    PxU_inv_ = LA.inv(P.T @ RB)
-
-    Pxham_z_ = smp.lambdify((y, omega2, beta), P.T @ ham_z_expr.flat(), modules=['scipy'])
-
-    kwds.update({'ham_z_': lambda y, omega2, beta: PxU_inv_ @ Pxham_z_(y @ RB.T, omega2, beta)})
-
-    
-    if 'lag_dg_' in locals():
-        P_dg, _ = DEIM(RB_dg, plot_deim=False)
-
-        PxU_inv_dg = LA.inv(P_dg.T @ RB_dg)
-
-        Pxlag_dg_ = smp.lambdify((y, y1, omega2), P_dg.T @ lag_dg_expr.flat(), modules=['scipy'])
-
-        kwds.update({'lag_dg_': lambda y, Omega2: PxU_inv_dg @ Pxlag_dg_(*(y @ RB_dg.T), Omega2)})
-
-    if MechSystem.hyperreducer == 'DEIM':
-        Pxham_zz_ = smp.lambdify((y, omega2, beta), P.T @ ham_zz_expr @ RB, modules=['scipy'])
-        kwds.update({'ham_zz_': lambda y, omega2, beta: PxU_inv_ @ Pxham_zz_(y @ RB.T, omega2, beta)})
-        
-        Pxlag_dg_z_ = smp.lambdify((y, y1, omega2), P_dg.T @ lag_dg_z_expr @ RB_dg, modules=['scipy'])
-        kwds.update({'lag_dg_z_': lambda y, omega2: PxU_inv_dg @ Pxlag_dg_z_(*(y @ RB_dg.T), omega2)})
-    
-    elif MechSystem.hyperreducer == 'MDEIM':
-
-        non_zero_indices = np.nonzero(MSsolvers[0].ham_zz(MSsolvers[0].y[0]).flatten())[0]
-
-        IP = np.zeros((len(non_zero_indices), (2*nosc)**2))
-            
-        IP[np.arange(len(non_zero_indices)), non_zero_indices] = 1
-        
-        F3 = np.hstack([np.array([IP @ MSsolver.ham_zz(y).flatten() \
-                                  for y in MSsolver.y[indices]]).T \
-                                    for MSsolver, indices in zip(MSsolvers, indices_list)])
-        print(f'{F3.shape = }')
-
-        Uj, sv, mj = POD(F3, np.eye(F3.shape[0]), MSsolvers[0].tol)
-        del F3
-
-        print(f'{mj = }')
-    
-        fig, ax = logplot(sv, xlabel='index of singular values', xlims=(1, len(sv)))
-        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-        # filename = MechSystem.keep_time +'osc_mdeim_sv' + '.pdf'
-        # save_figure(fig, filename)
-
-        Pj, _ = DEIM(Uj, plot_deim=False)
-
-        _IP_UxPxU_inv = IP.T @ Uj @ LA.inv(Pj.T @ Uj)
-
-        ham_zz_col = Pj.T @ IP @ ham_zz_expr.reshape((2*nosc)**2, 1)
-
-        Pxham_zz_ = smp.lambdify((y, omega2, beta), ham_zz_col, modules=['scipy'])
-
-        kwds.update({'ham_zz_': lambda y, omega2, beta: RB.T @ np.reshape(_IP_UxPxU_inv @ Pxham_zz_(y @ RB.T, omega2, beta), (2*nosc, 2*nosc)) @ RB})
-    
-        if 'lag_dg_' in locals():
-
-            non_zero_indices = np.nonzero(MSsolvers[0].lag_dg_z(MSsolvers[0].y[0:2]).flatten())[0]
-
-            IP = np.zeros((len(non_zero_indices), (2*nosc)**2))
+    # Merge solver lists
+    solvers_r = solvers_r_dg + solvers_r_ham
+    raise SystemExit
                 
-            IP[np.arange(len(non_zero_indices)), non_zero_indices] = 1
-            
-            F3 = np.hstack([np.array([IP @ MSsolver.lag_dg_z(y).flatten()\
-                                        for y in zip(MSsolver.y[indices], MSsolver.y[np.array(indices)+1])]).T \
-                                        for MSsolver, indices in zip(MSsolvers, indices_list)])
-            print(f'{F3.shape = }')
-
-            Uj, sv, mj = POD(F3, np.eye(F3.shape[0]), MSsolvers[0].tol)
-            del F3
-
-            print(f'{mj = }')
-        
-            fig, ax = logplot(sv, xlabel='index of singular values', xlims=(1, len(sv)))
-            ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-            # filename = MechSystem.keep_time +'osc_mdeim_sv' + '.pdf'
-            # save_figure(fig, filename)
-
-            Pj, _ = DEIM(Uj, plot_deim=False)
-
-            _IP_UxPxU_inv = IP.T @ Uj @ LA.inv(Pj.T @ Uj)
-
-            lag_dg_z_col = Pj.T @ IP @ lag_dg_z_expr.reshape((2*nosc)**2, 1)
-
-            Pxlag_dg_z_ = smp.lambdify((y, y1, omega2), lag_dg_z_col, modules=['scipy'])
-
-            kwds.update({'lag_dg_z_': lambda y, omega2: RB_dg.T @ np.reshape(_IP_UxPxU_inv @ Pxlag_dg_z_(*(y @ RB_dg.T), omega2), (2*nosc, 2*nosc)) @ RB_dg})
-        
-    if MechSystem.constraint_type is not None and MechSystem.constraints_reduce:
-
-        F5 = np.hstack([np.array([MSsolver.g(y) + 0 for y in MSsolver.y[indices]]).T for MSsolver, indices in zip(MSsolvers, indices_list)])
-        print(f'{F5.shape = }')
-
-        Uj, sv, mj = POD(F5, np.eye(F5.shape[0]), MechSystem.tol)
-        del F5
-
-        print(f'{mj = }')
-
-        Pj, _ = DEIM(Uj, plot_deim=False)
-
-        fig, ax = logplot(sv, xlabel='index of singular values', xlims=(1, len(sv)))
-        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-        filename = MechSystem.keep_time +'osc_mdeim_sv' + '.pdf'
-
-        _UxPxU_inv = Uj @ LA.inv(Pj.T @ Uj)
-
-        _g_col = Pj.T @ g_expr
-
-        _Pxg = smp.lambdify((y,), _g_col, modules=['scipy'])
-
-        kwds.update({'g': lambda y: (_UxPxU_inv @ _Pxg(y @ RB.T) -0).squeeze()})
+    #%% Hyper-reduced model
+    print('Setting up hyper-reduction...')
     
-        non_zero_indices = np.nonzero(MSsolvers[0].g_prime(MSsolvers[0].y[0]).flatten())[0]
+    # Setup hyperreduction for each solver type
+    for solver in solvers:
+        if isinstance(solver, DiscreteGradientSolver):
+            solver.setup_hyperreduction(RB_dg, MechSystem.hyperreducer)
+        elif isinstance(solver, (ConformalStormerVerletSolver, ConformalImplicitMidpointSolver)):
+            solver.setup_hyperreduction(RB, MechSystem.hyperreducer)
 
-        g_prime_shape= MSsolvers[0].g_prime(MSsolvers[0].y[0]).shape
-        IP = np.zeros((len(non_zero_indices), np.prod(g_prime_shape)))
+    # Solve hyper-reduced system
+    print('Solving hyper-reduced system ...')
+    solvers_dr = []
+    parallel_solve_mech_system(kwds, Omega2_space, solvers_dr)
+    BaseSolverMixin.measures(solvers_dr, Omega2_space_dim)
             
-        IP[np.arange(len(non_zero_indices)), non_zero_indices] = 1
-        
-        F4 = np.hstack([np.array([IP @ MSsolver.g_prime(y).flatten() for y in MSsolver.y[indices]]).T for MSsolver, indices in zip(MSsolvers, indices_list)])
-        print(f'{F4.shape = }')
-
-        Uj, sv, mj = POD(F4, np.eye(F4.shape[0]), MechSystem.tol)
-        del F4
-
-        print(f'{mj = }')
-
-        fig, ax = logplot(sv, xlabel='index of singular values', xlims=(1, len(sv)))
-        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-        # filename = MechSystem.keep_time +'osc_mdeim_sv' + '.pdf'
-        # save_figure(fig, filename)
-
-        Pj, _ = DEIM(Uj, plot_deim=False)
-
-        IP_UxPxU_inv_ = IP.T @ Uj @ LA.inv(Pj.T @ Uj)
-
-        g_prime_col = Pj.T @ IP @ g_prime_expr.reshape(np.prod(g_prime_shape), 1)
-
-        Pxg_prime_ = smp.lambdify((y,), g_prime_col, modules=['scipy'])
-
-        #TODO: update g and g_prime for new definitions
-        kwds.update({'g_prime': lambda y: np.reshape(IP_UxPxU_inv_ @ Pxg_prime_(y @ RB.T), g_prime_shape) })
-                
-        if 'lag_dg_' in locals():
-            kwds.update({'g': lambda y: (_UxPxU_inv @ _Pxg( y @ RB_dg.T ) -0).squeeze(),
-                         'g_prime': lambda y: np.reshape(IP_UxPxU_inv_ @ Pxg_prime_( y @ RB_dg.T), g_prime_shape) @ RB_dg})
-            
-    gc.collect()
-    print('solving hyper-reduced system ...')
-
-#%%
-    MSsolvers_dr =[]
-    parallel_solve_mech_system(kwds, Omega2_space, MSsolvers_dr)
+    #%% Compute and display metrics
+    array_shape = (len(kwds['registered_solver_classes']), 
+                  MechSystem.dt_space_dim, 
+                  Omega2_space_dim)
     
-    MechSystemSolver.measures(MSsolvers_dr, Omega2_space_dim)
-            
+    time_lapsed = [reshape([x.time_lapsed for x in solvers], array_shape)]
+    
     if not MechSystem.predict:
-        print('solution errors')
-        print(reshape([np.amax(abs(y1 - y2)) for y1, y2 in zip([x.y for x in MSsolvers], [x.y for x in MSsolvers_dr])], array_shape))
+        print('Solution errors:')
+        print(reshape([np.amax(abs(y1 - y2)) 
+            for y1, y2 in zip([x.y for x in solvers], 
+            [x.y for x in solvers_dr])], 
+            array_shape))
     
-        time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_dr], time_lapsed[0].shape) / time_lapsed[0] * 100)
+        time_lapsed.append(reshape([x.time_lapsed for x in solvers_r], 
+                                        time_lapsed[0].shape) / time_lapsed[0] * 100)
+        time_lapsed.append(reshape([x.time_lapsed for x in solvers_dr], 
+                                        time_lapsed[0].shape) / time_lapsed[0] * 100)
     else:
-        time_lapsed.append(reshape([x.time_lapsed for x in MSsolvers_dr], time_lapsed[0].shape[:2]))
+        time_lapsed.extend([
+            reshape([x.time_lapsed for x in solvers_r], time_lapsed[0].shape[:2]),
+            reshape([x.time_lapsed for x in solvers_dr], time_lapsed[0].shape[:2])
+        ])
 
     print(f'{time_lapsed = }')
 
     # tex_table('', time_lapsed)
     '''
-
     Observations:
         - hyperreduced model is efficient
             - and symplecitc with sparse MDEIM

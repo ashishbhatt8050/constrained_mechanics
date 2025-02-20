@@ -248,8 +248,8 @@ class MechSystem:
             if self.solver_class.__name__ == "DiscreteGradientSolver":
                 self.RB = self.RB_dg  # Use RB_dg for DG solvers
                 self.nosc_r = self.nosc_r_dg
-                self.lag_dg = lambda y, Omega2: self.RB.T @ self.lag_dg_(y @ self.RB.T, Omega2)
-                self.lag_dg_z = lambda y, Omega2: self.RB.T @ self.lag_dg_z_(y @ self.RB.T, Omega2) @ self.RB
+                self.lag_dg = lambda y: self.RB.T @ self.lag_dg_(y @ self.RB.T, self.Omega2)
+                self.lag_dg_z = lambda y: self.RB.T @ self.lag_dg_z_(y @ self.RB.T, self.Omega2) @ self.RB
             else:
                 self.ham_z = lambda y, beta=self.beta: self.RB.T @ self.ham_z_(y @ self.RB.T, self.Omega2, beta)
                 self.ham_zz = lambda y, beta=self.beta: self.RB.T @ self.ham_zz_(y @ self.RB.T, self.Omega2, beta) @ self.RB

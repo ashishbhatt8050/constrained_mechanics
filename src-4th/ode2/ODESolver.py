@@ -27,17 +27,15 @@ class ODESolver(MechSystem):
     """
         
     def __init__(self, kwds):
-    
         MechSystem.__init__(self, kwds)
         
-        if not callable(MechSystem):
-            raise TypeError('MechSystem is %s, not a function' % type(MechSystem))
-        
         self.f = lambda u, t, *arg: self.__call__(u, t, arg, func=True)
-        
         self.dfdu = lambda u, t, *arg: self.__call__(u, t, arg, func=False)
-        
         self.Ecoeff = lambda dt: np.exp(self.beta*dt/2)
+            
+    def __call__(self, y, t, *y1, **kwargs):
+        """Base implementation - must be overridden"""
+        raise NotImplementedError("Subclasses must implement __call__")
 
     def advance(self):
         """Advance solution one time step."""
@@ -53,10 +51,10 @@ class ODESolver(MechSystem):
         self.U0 = U0
 
         # Check that f returns correct length:
+        # TODO: get rid of this check
         try:
-            # print(self.U0.shape)
-            # print(self.solver_class == DiscreteGradient)
-            if self.solver_class == DiscreteGradient:
+            # Determine function based on the solver class
+            if self.solver_class.__name__ == "DiscreteGradientSolver":
                 f0 = self.f(c_[self.U0, self.U0].T, 0)
             else:
                 f0 = self.f(self.U0, 0, self.U0)
@@ -101,7 +99,7 @@ class ODESolver(MechSystem):
                 break  # terminate loop over k
         return self.u[:k+2], self.t[:k+2], info_
 
-    def var_solve(self, u, time_points, terminate=None):
+    def var_solve(self, u, terminate=None):
         """
         Compute solution du for t values in the list/array
         time_points, as long as terminate(u,t,step_no) is False.
@@ -113,36 +111,36 @@ class ODESolver(MechSystem):
             terminate = lambda u, t, step_no: False
 
         self.u = u
-        self.t = np.asarray(time_points)
+        self.t = np.asarray(self.t_points)
         n = self.t.size - 1
         if self.U0.shape != self.u[0].shape:
             self.neq = self.u[0].size
             
-        if self.neq%2 == 1:  # odd number of equations
+        if self.neq % 2 == 1:  # odd number of equations
             raise ValueError('ODESolver.var_solve requires even number of equations')
-        else:              # systems of ODEs
-            self.du = np.zeros((n+1, self.neq, self.neq))
+        else:  # systems of ODEs
+            self.du = np.zeros((n + 1, self.neq, self.neq))
             self.I_mat = np.eye(self.neq)
 
         # Initialize du[0] with identity matrix
         self.du[0] = self.I_mat
 
         # Time loop
-        self.dt = self.t[1] -self.t[0]
+        self.dt = self.t[1] - self.t[0]
         for k in range(n):
             self.k = k
-            self.du[k+1] = self.var_advance()
-            if terminate(self.u, self.t, self.k+1):
+            self.du[k + 1] = self.var_advance()
+            if terminate(self.u, self.t, self.k + 1):
                 break  # terminate loop over k
         return self.du, self.t
 
-    def symplectic_error(self, du, t):
+    def symplectic_error(self, du):
         '''
         Compute Symplectic error for the method
         '''
         # n = t.size
         #du = self.du
-        Ecoeff_dt = self.Ecoeff(-(t[1] - t[0]))**4
+        Ecoeff_dt = self.Ecoeff(-(self.t_points[1] - self.t_points[0]))**4
 
         if hasattr(self, 'JJ_r'):
             J_mat = self.JJ_r
@@ -174,6 +172,11 @@ class ODESolver(MechSystem):
         return symp_error
 
 class ForwardEuler(ODESolver):
+    def __call__(self, y, t, *y1, **kwargs):
+        f = self.JJ @ self.ham_z(y) - self.drag(y)
+        dfdy = self.JJ @ self.ham_zz(y) - self.drag_z(y)
+        return f if kwargs['func'] else dfdy
+    
     def advance(self):
         u, f, k, t = self.u, self.f, self.k, self.t
         dt = t[k+1] - t[k]
@@ -245,6 +248,11 @@ class RungeKutta4(ODESolver):
         return u_new
 
 class ConformalStormerVerlet(ODESolver):
+    def __call__(self, y, t, *y1, **kwargs):
+        f = self.JJ @ self.ham_z(y, 0)
+        dfdy = self.JJ @ self.ham_zz(y, 0)
+        return f if kwargs['func'] else dfdy
+    
     def __init__(self, kwds):
         ODESolver.__init__(self, kwds)
         
@@ -297,6 +305,11 @@ class ConformalStormerVerlet(ODESolver):
         return du
     
 class ImplicitMidpoint(ODESolver):
+    def __call__(self, y, t, *y1, **kwargs):
+        f = self.JJ @ self.ham_z(y) - self.drag(y)
+        dfdy = self.JJ @ self.ham_zz(y) - self.drag_z(y)
+        return f if kwargs['func'] else dfdy
+    
     def __init__(self, kwds):
         ODESolver.__init__(self, kwds)
             
@@ -332,6 +345,11 @@ class ImplicitMidpoint(ODESolver):
 
  
 class DiscreteGradient(ODESolver):
+    def __call__(self, y, t, *y1, **kwargs):
+        f = self.lag_dg(y)
+        dfdy = self.lag_dg_z(y)
+        return f if kwargs['func'] else dfdy
+    
     def __init__(self, kwds):
         ODESolver.__init__(self, kwds)
         
@@ -371,32 +389,58 @@ class DiscreteGradient(ODESolver):
 
 
 class ConformalImplicitMidpoint(ImplicitMidpoint):
+    """Conformal Implicit Midpoint solver with energy-preserving capabilities"""
+    
     def __init__(self, kwds):
         ImplicitMidpoint.__init__(self, kwds)
+        # self.solver = kwds['pool']['solver_class'](kwds)
+
+    def __call__(self, y, t, *y1, **kwargs):
+        """Compute vector field and its Jacobian"""
+        f = self.JJ @ self.ham_z(y)  # Conservative part only
+        dfdy = self.JJ @ self.ham_zz(y)  # Conservative part Jacobian
+        return f if kwargs['func'] else dfdy
 
     def advance(self):
-        
+        """Advance solution one time step using conformal integration"""        
         k = self.k
         dt = self.dt
+
+        # Scale initial condition by conformal factor
         self.u[k] = self.Ecoeff(-dt)*self.u[k]
-        w_start = self.u[k] + dt*(self.f(self.u[k], self.t[k]) -self.beta/2*self.u[k])  # Forward Euler step
+
+        # Forward Euler predictor with conformal modification
+        w_start = self.u[k] + dt*(self.f(self.u[k], self.t[k]) 
+                                 - self.beta/2*self.u[k])
         
+        # Implicit midpoint corrector 
         u_new, info = ImplicitMidpoint.advance(self, w_start=w_start)
         
+        # Scale final solution by conformal factor
         u_new = self.Ecoeff(-dt)*u_new
         info = self.Ecoeff(-dt)*np.array(info)
         
+        # Restore initial condition
         self.u[k] = self.Ecoeff(dt)*self.u[k]
                 
         return u_new, info
 
     def var_advance(self):
-        u, k, t, Ecoeff, I_mat = self.u, self.k, self.t, \
-                                        self.Ecoeff, self.I_mat
+        """Advance variational equation for error analysis"""
+        u, k, t = self.u, self.k, self.t
+        Ecoeff, I_mat = self.Ecoeff, self.I_mat
         dt = self.dt
 
-        temp = dt/2.0*self.dfdu((Ecoeff(dt)*u[k+1] +Ecoeff(-dt)*u[k])/2.0, (Ecoeff(dt)*t[k+1] +Ecoeff(-dt)*t[k])/2.0)
-        du_new = LA.solve(Ecoeff(dt)*(I_mat -temp), Ecoeff(-dt)*(I_mat +temp))
+        # Compute midpoint with conformal scaling
+        midpoint = (Ecoeff(dt)*u[k+1] + Ecoeff(-dt)*u[k])/2.0
+        midtime = (Ecoeff(dt)*t[k+1] + Ecoeff(-dt)*t[k])/2.0
+        
+        # Compute Jacobian at midpoint
+        temp = dt/2.0*self.dfdu(midpoint, midtime)
+        
+        # Solve variational equation
+        du_new = LA.solve(Ecoeff(dt)*(I_mat - temp), 
+                            Ecoeff(-dt)*(I_mat + temp))
         return du_new
 
 class Derivative:
@@ -406,7 +450,7 @@ class Derivative:
 
     def __call__(self, x, discrete=True):
         f, h = self.f, self.h      # make short forms
-        return (f(x+h) - f(x-h))/(2*h)
+        return (f(x + h) - f(x - h)) / (2 * h)
 
 #%% Testing
 def test_exact_numerical_solution():

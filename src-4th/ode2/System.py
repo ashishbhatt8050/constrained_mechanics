@@ -7,51 +7,193 @@ Created on Tue Aug  2 12:40:39 2022
 """
 
 import numpy as np
-from pylab import log, r_, c_, zeros, eye, linspace
-import ODESolver #import ConformalImplicitMidpoint, ConformalStormerVerlet
+from pylab import r_, c_, zeros, eye, linspace
 from datetime import datetime
 import os
 import dill as pickle
 import sympy as smp
+from functools import wraps
 
-#%% System definition
-class MechSystem(object):
-    """ Class of MechSystem methods """
+class SymbolicComputer:
+    """Class to compute and store symbolic expressions"""
+    def __init__(self, nosc):
+        self.nosc = nosc
+        # Common symbolic variables
+        self.y = smp.Matrix(smp.symbols('y_:{}_:{}'.format(nosc*2//3,3), real=True))
+        self._q = smp.Matrix(self.y[:nosc])
+        self.q = self._q.reshape(nosc//3,3)
+        # Store both forms of p
+        self._p = smp.Matrix(self.y[nosc:])
+        self.p = self._p.reshape(nosc//3,3)
+        # Additional variables for discrete derivatives
+        self.y1 = smp.Matrix(smp.symbols('y1_:{}_:{}'.format(nosc*2//3,3), real=True))
+        self.y05_repl = dict(zip(self.y, (self.y + self.y1) / 2))
+        self.y1_repl = dict(zip(self.y, self.y1))
+        
+    def compute_hamiltonian(self):
+        """Compute Hamiltonian expressions"""
+        print("Computing Hamiltonian expressions...")
+        
+        omega2 = smp.Matrix(smp.symbols('omega^2_:{}'.format(self.nosc//3-2), real=True))
+        beta = smp.symbols('beta', real=True)
 
+        kin_expr = 0.5 * self._p.dot(self._p)
+        
+        pi = smp.Matrix([(self.q.row(i+2) - self.q.row(i)).norm(2)**2 
+                         for i in range(self.nosc//3-2)])
+        pot_expr_vec = 0.5 * omega2.multiply_elementwise(
+            (pi - smp.ones(self.nosc//3-2,1)).applyfunc(lambda x: x**2))
+        pot_expr = sum(pot_expr_vec)
+
+        ham_expr = kin_expr + pot_expr
+        ham_z_expr = smp.Matrix([ham_expr]).jacobian(self.y).T
+        ham_zz_expr = ham_z_expr.jacobian(self.y)
+
+        ham_ = smp.lambdify((self.y, omega2, beta), ham_expr, 'numpy')
+        _ham_z_ = smp.lambdify((self.y, omega2, beta), ham_z_expr, 'numpy')
+        ham_zz_ = smp.lambdify((self.y, omega2, beta), ham_zz_expr, 'numpy')
+        ham_z_ = lambda y, omega2, beta: _ham_z_(y, omega2, beta).squeeze()
+
+        return {
+            'y': self.y, 'y1': self.y1,
+            'omega2': omega2,
+            'beta': beta,
+            'ham_expr': ham_expr,
+            'ham_z_expr': ham_z_expr,
+            'ham_zz_expr': ham_zz_expr,
+            'ham_': ham_,
+            'ham_z_': ham_z_,
+            'ham_zz_': ham_zz_,
+            'pi': pi,
+            'pot_expr_vec': pot_expr_vec
+        }
+
+    def compute_lagrangian(self, ham_exprs):
+        """Compute Lagrangian expressions"""
+        print("Computing Lagrangian expressions...")
+        
+        # Discrete derivatives
+        dpi_dq = ham_exprs['pi'].jacobian(self._q).subs(self.y05_repl)
+        dV_dpi = ((ham_exprs['pot_expr_vec'].subs(self.y1_repl) - ham_exprs['pot_expr_vec']).multiply_elementwise(
+            (ham_exprs['pi'].subs(self.y1_repl) - ham_exprs['pi']).applyfunc(lambda x: 1/x)).applyfunc(smp.factor))
+        DG_V_expr = dpi_dq.T @ dV_dpi
+        
+        lag_dg_expr = smp.Matrix.vstack(ham_exprs['ham_z_expr'][self.nosc:,:].subs(self.y05_repl), -DG_V_expr)
+        _lag_dg_ = smp.lambdify((self.y, self.y1, ham_exprs['omega2']), lag_dg_expr, 'numpy')
+        lag_dg_ = lambda y, omega2: _lag_dg_(*y, omega2).squeeze()
+        
+        lag_dg_z_expr = lag_dg_expr.jacobian(self.y1)
+        _lag_dg_z_ = smp.lambdify((self.y, self.y1, ham_exprs['omega2']), lag_dg_z_expr, 'numpy')
+        lag_dg_z_ = lambda y, omega2: _lag_dg_z_(*y, omega2)
+
+        return {
+            'lag_dg_expr': lag_dg_expr,
+            'lag_dg_': lag_dg_,
+            'lag_dg_z_expr': lag_dg_z_expr,
+            'lag_dg_z_': lag_dg_z_
+        }
+
+    def compute_constraints(self):
+        """Compute constraint expressions"""
+        print("Computing constraint expressions...")
+        
+        row_diffs_q = [self.q.row((i+1)) - self.q.row(i) 
+                       for i in range(0, self.nosc//3, 2)]
+        row_diffs_p = [self.p.row((i+1)) - self.p.row(i) 
+                       for i in range(0, self.nosc//3, 2)]
+        row_norms = [(row_diff.dot(row_diff) -1)/2 for row_diff in row_diffs_q]
+        ddt_row_norms = [row_diffs_q[i].dot(row_diffs_p[i]) 
+                        for i in range(len(row_diffs_q))]
+
+        g_expr = smp.Matrix(row_norms + ddt_row_norms)
+        g_prime_expr = g_expr.jacobian(self.y)
+
+        _g_lam = smp.lambdify((self.y,), g_expr, modules=['numpy'])
+        g_prime_lam = smp.lambdify((self.y,), g_prime_expr, modules=['numpy'])
+        g_lam = lambda x: _g_lam(x).squeeze()
+        
+        return {
+            'g_expr': g_expr,
+            'g_prime_expr': g_prime_expr,
+            'g_': g_lam,
+            'g_prime_': g_prime_lam
+        }
+    
+    def compute_all(self):
+        """Compute all symbolic expressions"""
+        expressions = {}
+        ham_exprs = self.compute_hamiltonian()
+        expressions.update(ham_exprs)
+        expressions.update(self.compute_lagrangian(ham_exprs))
+        expressions.update(self.compute_constraints())
+        return expressions
+
+
+def load_symbolic_expressions(cls):
+    """Decorator to handle loading/saving of symbolic expressions"""
+    try:
+        # Try to load expressions
+        expressions_file = os.path.join('data', f"symbolic_expr_{cls.nosc}.pickle")
+        with open(expressions_file, 'rb') as f:
+            expressions = pickle.load(f)
+        print("Loaded symbolic expressions from disk.")
+    except:
+        # Compute and save if loading fails
+        computer = SymbolicComputer(cls.nosc)
+        expressions = computer.compute_all()
+        os.makedirs('data', exist_ok=True)
+        with open(expressions_file, 'wb') as f:
+            pickle.dump(expressions, f)
+        print("Saved symbolic expressions to disk.")
+    
+    # Update class attributes, wrapping lambdas to include self
+    for k, v in expressions.items():
+        if callable(v) and not isinstance(v, type):
+            # Wrap lambda functions to include self parameter
+            wrapped = (lambda f: lambda self, *args, **kwargs: f(*args, **kwargs))(v)
+            setattr(cls, k, wrapped)
+        else:
+            setattr(cls, k, v)
+    
+    return cls
+
+@load_symbolic_expressions
+class MechSystem:
+    """Class of MechSystem methods"""
+    
+    # Load or compute expressions once at module level
+    keep_time = datetime.now().strftime('%Y-%m-%d_')  #_%H-%M_')
+    data_folder = os.path.join('data', keep_time)
+    if not os.path.exists(data_folder):
+        os.makedirs(data_folder)
+        
     "Numerical solver and its properties"
     w_values = [0.28, 0.62546642846767004501]
-    w_values.append(1.0 -2.0*(sum(w_values)))
+    w_values.append(1.0 - 2.0 * (sum(w_values)))
     w_values.append(w_values[1])
     w_values.append(w_values[0])
     w_values = [1]
     assert np.isclose(sum(w_values), 1), 'sum_i w_i must be 1'
 
-    "Fixed-point nonliner equations solver properties"
-    tol, M, var, store = 1.0E-12, 100, True, False
-
-    "System parameters"
-    nosc = 12*3
-    assert nosc//3 % 2 == 0, 'nosc//3 must be even'
-
-    # These two properties only have effect during reduction
-    reducer = 'psd'
-    predict = True # False = reproduce
-    hyperreducer = 'MDEIM'
-
     dt_space_dim = 1
-    beta = (max(1e-2, 0*np.random.rand()/10))*0
-    JJ = lambda self, d=nosc: r_[c_[zeros((d,d)), eye(d)], c_[-eye(d), zeros((d,d))]]
-
     dt_space = linspace(0.01, 0.05, num=dt_space_dim)
     T_final = 5
 
-    keep_time = datetime.now().strftime('%Y-%m-%d_%H-%M_')
+    "Fixed-point nonliner equations solver properties"
+    tol, M, var, store = 1.0E-12, 100, True, False
+
+    # parameter space: frequency of the oscillators -- omega^2
+    nosc = 6*3
+    _Omega2_space_dim = 5
+    _Omega2_space = np.sort(10 * (1 - np.random.rand(_Omega2_space_dim, nosc // 3 - 2)))
+    JJ = lambda self, d=nosc: r_[c_[zeros((d, d)), eye(d)], c_[-eye(d), zeros((d, d))]]
 
     "Initial conditions satisfying the constraints"
     # Create a tensor to store the positions
     i = np.arange(nosc//3)
-    positions = np.stack((i % 2 + 0*(i // 2 % 2) * 1e-1, i // 2 + 0*(-1)**(i // 2) * 1e-1, np.zeros_like(i)), axis=1)
-
+    positions = np.stack((i % 2 + 0*(i // 2 % 2) * 1e-1, 
+                          i // 2 + 0*(-1)**(i // 2) * 1e-1, 
+                          np.zeros_like(i)), axis=1)
     positions = positions.flatten().reshape(-1, 1)
 
     momenta = np.zeros((nosc//3, 3))
@@ -60,37 +202,61 @@ class MechSystem(object):
     assert np.allclose(momenta[1::2] - momenta[::2], 0), 'position and momenta are not orthogonal'
     momenta = momenta.flatten().reshape(-1, 1)
 
+    y_init = r_[positions, momenta].flatten()
+
+    # These two properties only have effect during reduction
+    reducer = 'psd'
+    predict = True # False = reproduce
+    hyperreducer = 'MDEIM'
+
+    # constraints
     constraint_type = 'spherical'
     constraints_reduce = True # True: Reduce constraint jacobian g_prime
-
-    y_init = r_[positions, momenta].flatten()
 
     drag = lambda self, y: 0 #beta/2 * r_[x, u]
     drag_z = lambda self, y: 0 #beta/2 * eye(2*x.shape[0])
 
+    non_quad = None
+            
+    "y_init alias"
+    @property
+    def u_init(self):
+        return self.y_init
 
-    def __init__(self, kwds):
-        
-        self.__dict__.update(kwds)
-        
+    @u_init.setter
+    def u_init(self, value):
+        self.y_init = value
+
+    def __init__(self, kwds):        
+        self.__dict__.update(kwds)        
         if 'pool' in kwds:
             self.__dict__.update(kwds['pool'])
-        
-        # if hasattr(self, 'nosc_r') and self.solver_class in [ODESolver.DiscreteGradient]:
-        #     self.RB = kwds['RB_dg']
-        #     self.nosc_r = kwds['nosc_r_dg']
-
-        "MechSystem constituents"
-        self.ham = lambda y, Omega2=self.Omega2, beta=self.beta: self.ham_(y, Omega2, beta)
-        self.ham_z = lambda y, Omega2=self.Omega2, beta=self.beta: self.ham_z_(y, Omega2, beta)
-        self.ham_zz = lambda y, Omega2=self.Omega2, beta=self.beta: self.ham_zz_(y, Omega2, beta)
-
-        self.non_quad = None
-        
-        if hasattr(self, 'lag_dg_'): # if Lagrangian is defined
-            self.lag_dg = lambda y, Omega2=self.Omega2: self.lag_dg_(y, Omega2)
-            self.lag_dg_z = lambda y, Omega2=self.Omega2: self.lag_dg_z_(y, Omega2)
             
+        self.beta = (max(1e-2, 0 * np.random.rand() / 10)) * 0
+        
+        # Update functions based on solver type
+        self.ham = lambda y, beta=self.beta: self.ham_(y, self.Omega2, beta)
+        if not hasattr(self, 'RB'):
+            self.ham_z = lambda y, beta=self.beta: self.ham_z_(y, self.Omega2, beta)
+            self.ham_zz = lambda y, beta=self.beta: self.ham_zz_(y, self.Omega2, beta)
+            self.lag_dg = lambda y: self.lag_dg_(y, self.Omega2)
+            self.lag_dg_z = lambda y: self.lag_dg_z_(y, self.Omega2)
+
+            self.g__ = lambda y: self.g_(y)
+            self.g_prime__ = lambda y: self.g_prime_(y)
+        else:
+            if self.solver_class.__name__ == "DiscreteGradientSolver":
+                self.RB = self.RB_dg  # Use RB_dg for DG solvers
+                self.nosc_r = self.nosc_r_dg
+                self.lag_dg = lambda y, Omega2: self.RB.T @ self.lag_dg_(y @ self.RB.T, Omega2)
+                self.lag_dg_z = lambda y, Omega2: self.RB.T @ self.lag_dg_z_(y @ self.RB.T, Omega2) @ self.RB
+            else:
+                self.ham_z = lambda y, beta=self.beta: self.RB.T @ self.ham_z_(y @ self.RB.T, self.Omega2, beta)
+                self.ham_zz = lambda y, beta=self.beta: self.RB.T @ self.ham_zz_(y @ self.RB.T, self.Omega2, beta) @ self.RB
+
+            self.g__ = lambda y: self.g_(y @ self.RB.T)
+            self.g_prime__ = lambda y: self.g_prime_(y @ self.RB.T) @ self.RB
+
         "Projection matrices"
         if hasattr(self, 'RB'):
             self.y_init = self.RB.T @ self.y_init
@@ -107,201 +273,10 @@ class MechSystem(object):
             
         "various measures"
         self.time_lapsed = []
-
-    "y_init alias"
-    @property
-    def u_init(self):
-        return self.y_init
-
-    @u_init.setter
-    def u_init(self, value):
-        self.y_init = value
-         
-            
-    def __call__(self, y, t, *y1, **kwargs):
-            
-        if self.solver_class in [ODESolver.ImplicitMidpoint, ODESolver.ForwardEuler]:
-            f = self.JJ @ self.ham_z(y) - self.drag(y)
-            dfdy = self.JJ @ self.ham_zz(y) - self.drag_z(y)
-    
-        elif self.solver_class in [ODESolver.ConformalImplicitMidpoint]:
-            f = self.JJ @ self.ham_z(y)
-            dfdy = self.JJ @ self.ham_zz(y)
-            
-        elif self.solver_class in [ODESolver.ConformalStormerVerlet]:
-            f = self.JJ @ self.ham_z(y, self.Omega2, 0)
-            dfdy = self.JJ @ self.ham_zz(y, self.Omega2, 0)
-            
-        elif self.solver_class in [ODESolver.DiscreteGradient]:
-            f = self.lag_dg(y)
-            dfdy = self.lag_dg_z(y)
-            
-        if kwargs['func']:
-            return f
-        else:
-            return dfdy
                 
     def get_en_err(self):
-            
         return np.array([self.ham(y) for y in self.y]) - self.ham(self.y[0])
-    
-#%% Find symbolic quantities
 
-# TODO: move inside the system class, profile it
-nosc = MechSystem.nosc
-
-# create the 'data' subfolder if it doesn't exist
-data_folder = 'data'
-if not os.path.exists(data_folder):
-    os.makedirs(data_folder)
-
-# try to load the expressions from disk
-filename = os.path.join(data_folder, f"ham_expr_{nosc}.pickle")
-try:
-    with open(filename, 'rb') as f:
-        loaded_expressions = pickle.load(f)
-
-
-    for key, value in loaded_expressions.items():
-        exec(f"{key} = value")
-    
-    print("Loaded Hamiltonian expressions from disk.")
-
-except: #FileNotFoundError or AttributeError:
-    print("Hamiltonian expressions not found on disk. Computing and saving them...")
-
-    y = smp.Matrix(smp.symbols('y_:{}_:{}'.format(nosc*2//3,3), real=True))
-    q = smp.Matrix(y[:nosc]).reshape(nosc//3,3)
-    p = smp.Matrix(y[nosc:])
-    omega2 = smp.Matrix(smp.symbols('omega^2_:{}'.format(nosc//3-2), real=True))
-    beta = smp.symbols('beta', real=True)
-
-    kin_expr = 0.5 * p.dot(p)
-
-    pi = smp.Matrix([(q.row(i+2) - q.row(i)).norm(2)**2 for i in range(nosc//3-2)])
-    pot_expr_vec = 0.5 * omega2.multiply_elementwise((pi -smp.ones(nosc//3-2,1)).applyfunc(lambda x: x**2))
-    pot_expr = sum(pot_expr_vec) #0.5 * omega2.dot((pi -smp.ones(nosc//3-2,1)).applyfunc(lambda x: x**2))
-
-    ham_expr = kin_expr + pot_expr
-    ham_z_expr = smp.Matrix([ham_expr]).jacobian(y).T
-    ham_zz_expr = ham_z_expr.jacobian(y)
-
-    ham_ = smp.lambdify((y, omega2, beta), ham_expr, 'numpy')
-    _ham_z_ = smp.lambdify((y, omega2, beta), ham_z_expr, 'numpy')
-    ham_zz_ = smp.lambdify((y, omega2, beta), ham_zz_expr, 'numpy')
-
-    ham_z_ = lambda y, omega2, beta: _ham_z_(y, omega2, beta).squeeze()
-    
-    # Find discrete derivatives
-    q = q.reshape(nosc,1)
-    y1 = smp.Matrix(smp.symbols('y1_:{}_:{}'.format(nosc*2//3,3), real=True))
-    
-    # Update the replacement dictionaries
-    y05_repl = dict(zip(y, (y + y1) / 2))
-    y1_repl = dict(zip(y, y1))
-    
-    dpi_dq = pi.jacobian(q).subs(y05_repl)
-    # dV_dpi = smp.Matrix([smp.factor((pot_expr_vec.subs(y1_repl) - pot_expr_vec)[i]/(pi.subs(y1_repl) - pi)[i]) for i in range(nosc//3-2)])
-    dV_dpi = ((pot_expr_vec.subs(y1_repl) - pot_expr_vec).multiply_elementwise((pi.subs(y1_repl) - pi).applyfunc(lambda x: 1/x))).applyfunc(smp.factor)
-    DG_V_expr = dpi_dq.T @ dV_dpi #smp.Matrix(np.sum([dV_dpi[i] * dpi_dq[i,:] for i in range(nosc//3-2)], axis=0)[0])
-    
-    lag_dg_expr = smp.Matrix.vstack(ham_z_expr[nosc:,:].subs(y05_repl), -DG_V_expr)
-    _lag_dg_ = smp.lambdify((y, y1, omega2), lag_dg_expr, 'numpy')
-    lag_dg_ = lambda y, omega2: _lag_dg_(*y, omega2).squeeze()
-    
-    # TODO: check math
-    lag_dg_z_expr = lag_dg_expr.jacobian(y1)
-    _lag_dg_z_ = smp.lambdify((y, y1, omega2), lag_dg_z_expr, 'numpy')
-    lag_dg_z_ = lambda y, omega2: _lag_dg_z_(*y, omega2)
-
-    expressions = {
-        "ham_expr": ham_expr,
-        "ham_z_expr": ham_z_expr,
-        "ham_zz_expr": ham_zz_expr,
-        "_ham_z_": _ham_z_,
-        "ham_": ham_,
-        "ham_z_": ham_z_,
-        "ham_zz_": ham_zz_,
-        "DG_V_expr": DG_V_expr,
-        "lag_dg_expr": lag_dg_expr,
-        "_lag_dg_": _lag_dg_,
-        "lag_dg_": lag_dg_,
-        "lag_dg_z_expr": lag_dg_z_expr,
-        '_lag_dg_z_': _lag_dg_z_,
-        "lag_dg_z_": lag_dg_z_,
-        "q": q, "p": p, "omega2": omega2, "beta": beta,
-        "y": y, "y1": y1,
-        }
-
-    # save the expressions to disk
-    with open(filename, 'wb') as f:
-        pickle.dump(expressions, f)
-    print("Hamiltonian expressions saved to disk.")
-
-#%%
-if MechSystem.constraint_type is not None:
-
-    # try to load the expressions from disk
-    filename = os.path.join(data_folder, f"g_expr_{nosc}.pickle")
-    try:
-        with open(filename, 'rb') as f:
-            loaded_expressions = pickle.load(f)
-
-        for key, value in loaded_expressions.items():
-            exec(f"{key} = value")
-            
-        print("Loaded constraints from disk.")
-
-    except: #FileNotFoundError:
-        print("Constraints not found on disk. Computing and saving them...")
-
-        y = smp.Matrix(smp.symbols('y_:{}_:{}'.format(nosc*2//3,3), real=True))
-        q = smp.Matrix(y[:nosc]).reshape(nosc//3,3)
-        p = smp.Matrix(y[nosc:]).reshape(nosc//3,3)
-        
-        row_diffs_q = [q.row((i+1)) - q.row(i) for i in range(0, nosc//3, 2)]
-        row_diffs_p = [p.row((i+1)) - p.row(i) for i in range(0, nosc//3, 2)]
-        row_norms = [(row_diff.dot(row_diff) -1)/2 for row_diff in row_diffs_q]
-        ddt_row_norms = [row_diffs_q[i].dot(row_diffs_p[i]) for i in range(len(row_diffs_q))]
-
-        q = q.reshape(nosc,1)
-        p = p.reshape(nosc,1)
-        g_expr = smp.Matrix(row_norms+ ddt_row_norms)
-        g_prime_expr = g_expr.jacobian(y)
-
-        _g_lam = smp.lambdify((y,), g_expr, modules=['numpy'])
-        g_prime_lam = smp.lambdify((y,), g_prime_expr, modules=['numpy'])
-        
-        g_lam = lambda x: _g_lam(x).squeeze()
-        
-        expressions = {
-            "g_expr": g_expr,
-            "g_prime_expr": g_prime_expr,
-            "_g_lam": _g_lam,
-            "g_lam": g_lam,
-            "g_prime_lam": g_prime_lam,
-        }
-
-        # save the expressions to disk
-        with open(filename, 'wb') as f:
-            pickle.dump(expressions, f)
-        print("Constraints saved to disk.")
-
-kwds = {'ham_': ham_, \
-        '_ham_z_': _ham_z_, \
-        'ham_z_': ham_z_, \
-        'ham_zz_': ham_zz_, \
-        '_g_lam': _g_lam, \
-        'g': g_lam, \
-        'g_prime': g_prime_lam, \
-        "_lag_dg_": _lag_dg_,
-        "lag_dg_": lag_dg_,
-        "lag_dg_z_": lag_dg_z_,
-        }
-    
-_Omega2_space_dim = 5
-_Omega2_space = np.sort(10*(1 -np.random.rand(_Omega2_space_dim, nosc//3-2)))
-        
 #%% main
 if __name__ == '__main__':
-    pass
+    system = MechSystem({'nosc': 6*3})

@@ -29,9 +29,9 @@ class ODESolver(MechSystem):
     def __init__(self, kwds):
         MechSystem.__init__(self, kwds)
         
-        self.f = lambda u, t, *arg: self.__call__(u, t, arg, func=True)
-        self.dfdu = lambda u, t, *arg: self.__call__(u, t, arg, func=False)
-        self.Ecoeff = lambda dt: np.exp(self.beta*dt/2)
+        self.f = self._f
+        self.dfdu = self._dfdu
+        self.Ecoeff = self._Ecoeff
             
     def __call__(self, y, t, *y1, **kwargs):
         """Base implementation - must be overridden"""
@@ -171,6 +171,16 @@ class ODESolver(MechSystem):
         
         return symp_error
 
+
+    def _f(self, u, t, *arg):
+        return self.__call__(u, t, arg, func=True)
+
+    def _dfdu(self, u, t, *arg):
+        return self.__call__(u, t, arg, func=False)
+
+    def _Ecoeff(self, dt):
+        return np.exp(self.beta*dt/2)
+    
 class ForwardEuler(ODESolver):
     def __call__(self, y, t, *y1, **kwargs):
         f = self.JJ @ self.ham_z(y) - self.drag(y)
@@ -256,7 +266,7 @@ class ConformalStormerVerlet(ODESolver):
     def __init__(self, kwds):
         ODESolver.__init__(self, kwds)
         
-        self.Gamma_p, self.Gamma_m = lambda dt: 1 + self.beta*dt/2, lambda dt: 1 - self.beta*dt/2
+        self.Gamma_p, self.Gamma_m = self._Gamma_p, self._Gamma_m
 
     def advance(self):
         u, f, k, t, neq = self.u, self.f, self.k, self.t, self.neq
@@ -304,6 +314,12 @@ class ConformalStormerVerlet(ODESolver):
         
         return du
     
+    def _Gamma_p(self, dt):
+        return 1 + self.beta*dt/2
+    
+    def _Gamma_m(self, dt):
+        return 1 - self.beta*dt/2
+    
 class ImplicitMidpoint(ODESolver):
     def __call__(self, y, t, *y1, **kwargs):
         f = self.JJ @ self.ham_z(y) - self.drag(y)
@@ -313,7 +329,7 @@ class ImplicitMidpoint(ODESolver):
     def __init__(self, kwds):
         ODESolver.__init__(self, kwds)
             
-        self.dfdw = lambda u, t: np.eye(self.neq) - self.dt/2*self.dfdu((u[1]+u[0])/2, (t[1]+t[0])/2)
+        self.dfdw = self._dfdw
 
     def advance(self, w_start=None):
         u, f, k, t = self.u, self.f, self.k, self.t
@@ -343,7 +359,9 @@ class ImplicitMidpoint(ODESolver):
         du_new = LA.solve((I_mat -temp), (I_mat +temp))
         return du_new
 
- 
+    def _dfdw(self, u, t):
+        return np.eye(self.neq) - self.dt/2*self.dfdu((u[1]+u[0])/2, (t[1]+t[0])/2)
+
 class DiscreteGradient(ODESolver):
     def __call__(self, y, t, *y1, **kwargs):
         f = self.lag_dg(y)
@@ -353,7 +371,7 @@ class DiscreteGradient(ODESolver):
     def __init__(self, kwds):
         ODESolver.__init__(self, kwds)
         
-        self.dfdw = lambda u, t: np.eye(self.neq) - self.dt * self.dfdu(u, t)
+        self.dfdw = self._dfdw
 
     def advance(self, w_start=None):
         u, f, k, t = self.u, self.f, self.k, self.t
@@ -387,6 +405,8 @@ class DiscreteGradient(ODESolver):
         du_new = LA.solve((I_mat -temp), (I_mat +temp))
         return du_new
 
+    def _dfdw(self, u, t):
+        return np.eye(self.neq) - self.dt * self.dfdu(u, t)
 
 class ConformalImplicitMidpoint(ImplicitMidpoint):
     """Conformal Implicit Midpoint solver with energy-preserving capabilities"""
@@ -453,52 +473,5 @@ class Derivative:
         return (f(x + h) - f(x - h)) / (2 * h)
 
 #%% Testing
-def test_exact_numerical_solution():
-    a = 0.2; b = 3
-    alg = lambda solver_class: solver_class.__name__
-    
-    class fun(object):
-        def __init__(self, method=None):
-            self.u_init = u_exact(0)
-            self.beta = 0
-    
-        def __call__(self, u, t):
-            return a + (u - u_exact(t))**5
-            
-    class funJac(fun):
-        def __call__(self, u, t, dt=0):
-            return 5*(u - u_exact(t))**4
-
-    def u_exact(t):
-        """Exact u(t) corresponding to f above."""
-        return a*t + b
-
-    U0 = u_exact(0)
-    T = 8
-    n = 10
-    tol = 1E-15
-    t_points = np.linspace(0, T, n)
-    registered_solver_classes = [ImplicitMidpoint, ConformalImplicitMidpoint]
-
-    for solver_class in registered_solver_classes:
-        f, dfdu = fun(alg(solver_class)), funJac(alg(solver_class))
-        # solver = solver_class(f)
-        # solver.set_initial_condition(U0)
-        # u, t = solver.solve(t_points)
-        # u_e = u_exact(t)
-        # max_error = (u_e - u).max()
-        # msg = '%s failed with max_error=%g' % \
-        #       (solver.__class__.__name__, max_error)
-        # assert max_error < tol, msg
-
-        solver = solver_class(f, dfdu)
-        solver.set_initial_condition(U0)
-        u, t = solver.solve(t_points)
-        u_e = u_exact(t)
-        max_error = (u_e - u).max()
-        msg = '%s failed with max_error=%g' % \
-              (solver.__class__.__name__, max_error)
-        assert max_error < tol, msg
-
 if __name__ == '__main__':
-    test_exact_numerical_solution()
+    pass

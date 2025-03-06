@@ -10,6 +10,7 @@ Copied from https://github.com/jbmouret/matplotlib_for_papers
 
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
+from matplotlib.ticker import MaxNLocator
 import brewer2mpl
 from cycler import cycler
 import os
@@ -99,8 +100,12 @@ def logplot(y_data, xlabel=None, xlims=None):
     configure_axis(ax)
     ax.semilogy(y_data, linewidth=2)
     if xlabel is not None: ax.set_xlabel(xlabel)
-    ax.margins(y=0.1)
-    if xlims is not None: ax.set_xlim(xlims)
+    if xlims is not None:
+        # Set the x-axis ticks to include both min and max values
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.set_xticks(xlims[0] + list(ax.get_xticks()) + [xlims[1]])
+        ax.set_xlim(xlims)  # Extend the x-axis slightly beyond the max value
+    ax.margins(0.1)
     return fig, ax
 
 def save_figure(fig, filename):

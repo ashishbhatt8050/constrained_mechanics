@@ -19,7 +19,7 @@ class SymbolicComputer:
     def __init__(self, nosc):
         self.nosc = nosc
         # Common symbolic variables
-        self.y = smp.Matrix(smp.symbols('y_:{}_:{}'.format(nosc*2//3,3), real=True))
+        self.y = smp.Matrix(smp.symbols(f'y_:{nosc*2//3}_:{3}', real=True))
         self._q = smp.Matrix(self.y[:nosc])
         self.q = self._q.reshape(nosc//3,3)
         # Store both forms of p
@@ -42,13 +42,16 @@ class SymbolicComputer:
         pi = smp.Matrix([(self.q.row(i+2) - self.q.row(i)).norm(2)**2 
                          for i in range(self.nosc//3-2)])
         pot_expr_vec = 0.5 * omega2.multiply_elementwise(
-            (pi - smp.ones(self.nosc//3-2,1)).applyfunc(lambda x: x**2))
+            (pi - smp.ones(*pi.shape)).applyfunc(lambda x: x**2))
         pot_expr = sum(pot_expr_vec)
 
         ham_expr = kin_expr + pot_expr
         ham_z_expr = smp.Matrix([ham_expr]).jacobian(self.y).T
         ham_zz_expr = ham_z_expr.jacobian(self.y)
 
+        # Generate a numerical function for the Hamiltonian expression
+        # This function takes the symbolic variables y, omega2, and beta as input
+        # and returns the evaluated Hamiltonian expression as a numpy array.
         ham_ = smp.lambdify((self.y, omega2, beta), ham_expr, 'numpy')
         _ham_z_ = smp.lambdify((self.y, omega2, beta), ham_z_expr, 'numpy')
         ham_zz_ = smp.lambdify((self.y, omega2, beta), ham_zz_expr, 'numpy')
@@ -128,7 +131,6 @@ class SymbolicComputer:
         expressions.update(self.compute_constraints())
         return expressions
 
-
 def load_symbolic_expressions(cls):
     """Decorator to handle loading/saving of symbolic expressions"""
     try:
@@ -137,7 +139,7 @@ def load_symbolic_expressions(cls):
         with open(expressions_file, 'rb') as f:
             expressions = pickle.load(f)
         print("Loaded symbolic expressions from disk.")
-    except:
+    except (FileNotFoundError, pickle.UnpicklingError):
         # Compute and save if loading fails
         computer = SymbolicComputer(cls.nosc)
         expressions = computer.compute_all()
@@ -175,7 +177,7 @@ class MechSystem:
     w_values = [1]
     assert np.isclose(sum(w_values), 1), 'sum_i w_i must be 1'
 
-    dt_space_dim = 1
+    dt_space_dim = 3
     dt_space = linspace(0.01, 0.05, num=dt_space_dim)
     T_final = 5
 
@@ -183,8 +185,8 @@ class MechSystem:
     tol, M, var, store = 1.0E-12, 100, True, False
 
     # parameter space: frequency of the oscillators -- omega^2
-    nosc = 6*3
-    _Omega2_space_dim = 5
+    nosc = 16*3
+    _Omega2_space_dim = 3
     _Omega2_space = np.sort(10 * (1 - np.random.rand(_Omega2_space_dim, nosc // 3 - 2)))
     JJ = lambda self, d=nosc: r_[c_[zeros((d, d)), eye(d)], c_[-eye(d), zeros((d, d))]]
 
@@ -199,14 +201,14 @@ class MechSystem:
     momenta = np.zeros((nosc//3, 3))
     momenta[::2] = np.random.uniform(-0.01, 0.01, momenta[::2].shape)
     momenta[1::2] = momenta[::2]
-    assert np.allclose(momenta[1::2] - momenta[::2], 0), 'position and momenta are not orthogonal'
+    assert np.allclose(momenta[1::2], momenta[::2]), 'position and momenta are not orthogonal'
     momenta = momenta.flatten().reshape(-1, 1)
 
     y_init = r_[positions, momenta].flatten()
 
     # These two properties only have effect during reduction
+    predict = False # False = reproduce the results of the full model
     reducer = 'psd'
-    predict = True # False = reproduce
     hyperreducer = 'MDEIM'
 
     # constraints
@@ -227,6 +229,78 @@ class MechSystem:
     def u_init(self, value):
         self.y_init = value
 
+    def ham_lambda(self, y, beta=0):
+        return self.ham_(y, self.Omega2, beta)
+
+    def ham_z_lambda(self, y, beta=0):
+        return self.ham_z_(y, self.Omega2, beta)
+
+    def ham_zz_lambda(self, y, beta=0):
+        return self.ham_zz_(y, self.Omega2, beta)
+
+    def lag_dg_lambda(self, y):
+        return self.lag_dg_(y, self.Omega2)
+
+    def lag_dg_z_lambda(self, y):
+        return self.lag_dg_z_(y, self.Omega2)
+
+    def g__lambda(self, y):
+        return self.g_(y)
+
+    def g_prime__lambda(self, y):
+        return self.g_prime_(y)
+
+    def ham_z_reduced(self, y, beta=0):
+        return self.RB.T @ self.ham_z_(y @ self.RB.T, self.Omega2, beta)
+
+    def ham_zz_reduced(self, y, beta=0):
+        return self.RB.T @ self.ham_zz_(y @ self.RB.T, self.Omega2, beta) @ self.RB
+
+    def lag_dg_reduced(self, y):
+        return self.RB.T @ self.lag_dg_(y @ self.RB.T, self.Omega2)
+
+    def lag_dg_z_reduced(self, y):
+        return self.RB.T @ self.lag_dg_z_(y @ self.RB.T, self.Omega2) @ self.RB
+    
+    def g_reduced(self, y):
+        return self.g_(y @ self.RB.T)
+
+    def g_prime_reduced(self, y):
+        return self.g_prime_(y @ self.RB.T) @ self.RB
+
+    def ham_z_hyperreduced(self, y, beta=0):
+        return self.RBxUx_inv_PxU @ self.ham_z_deim(y @ self.RB.T, self.Omega2, beta)
+
+    def ham_zz_hyperreduced(self, y, beta=0):
+        return self.RBxUx_inv_PxU @ self.ham_zz_deim(y @ self.RB.T, self.Omega2, beta) @ self.RB
+    
+    def ham_zz_mdeim_hyperreduced(self, y, beta=0):
+        return self.RB.T @ np.reshape(
+            self.IP_Ux_inv_PxU @ self.ham_zz_mdeim(y @ self.RB.T, self.Omega2, beta),
+            (2*self.nosc, 2*self.nosc)
+        ) @ self.RB
+
+    def lag_dg_hyperreduced(self, y):
+        return self._RBxUx_inv_PxU_ @ self.lag_dg_deim(*(y @ self.RB.T), self.Omega2)
+
+    def lag_dg_z_hyperreduced(self, y):
+        return self._RBxUx_inv_PxU_ @ self.lag_dg_z_deim(*(y @ self.RB.T), self.Omega2) @ self.RB
+    
+    def lag_dg_z_mdeim_hyperreduced(self, y):
+        return self.RB.T @ np.reshape(
+            self._IP_Ux_inv_PxU_ @ self.lag_dg_z_mdeim(*(y @ self.RB.T), self.Omega2),
+            (2*self.nosc, 2*self.nosc)
+        ) @ self.RB
+    
+    def g_hyperreduced(self, y):
+        return (self._Ux_inv_PxU @ self.g_deim(y @ self.RB.T)).squeeze()
+
+    def g_prime_hyperreduced(self, y):
+        return np.reshape(
+            self._IP_Ux_inv_PxU @ self.g_prime_mdeim(y @ self.RB.T),
+            self.g_prime_shape
+        ) @ self.RB
+
     def __init__(self, kwds):        
         self.__dict__.update(kwds)        
         if 'pool' in kwds:
@@ -235,29 +309,45 @@ class MechSystem:
         self.beta = (max(1e-2, 0 * np.random.rand() / 10)) * 0
         
         # Update functions based on solver type
-        self.ham = lambda y, beta=self.beta: self.ham_(y, self.Omega2, beta)
+        self.ham = self.ham_lambda
         if not hasattr(self, 'RB'):
-            self.ham_z = lambda y, beta=self.beta: self.ham_z_(y, self.Omega2, beta)
-            self.ham_zz = lambda y, beta=self.beta: self.ham_zz_(y, self.Omega2, beta)
-            self.lag_dg = lambda y: self.lag_dg_(y, self.Omega2)
-            self.lag_dg_z = lambda y: self.lag_dg_z_(y, self.Omega2)
+            self.ham_z = self.ham_z_lambda
+            self.ham_zz = self.ham_zz_lambda
+            self.lag_dg = self.lag_dg_lambda
+            self.lag_dg_z = self.lag_dg_z_lambda
 
-            self.g__ = lambda y: self.g_(y)
-            self.g_prime__ = lambda y: self.g_prime_(y)
+            self.g__ = self.g__lambda
+            self.g_prime__ = self.g_prime__lambda
+        elif not hasattr(self, 'P'):
+            if self.solver_class.__name__ == "DiscreteGradientSolver":
+                self.RB = self.RB_dg  # Use RB_dg for DG solvers
+                self.nosc_r = self.nosc_r_dg
+
+            self.lag_dg = self.lag_dg_reduced
+            self.lag_dg_z = self.lag_dg_z_reduced
+            self.ham_z = self.ham_z_reduced
+            self.ham_zz = self.ham_zz_reduced
+
+            self.g__ = self.g_reduced
+            self.g_prime__ = self.g_prime_reduced
         else:
             if self.solver_class.__name__ == "DiscreteGradientSolver":
                 self.RB = self.RB_dg  # Use RB_dg for DG solvers
                 self.nosc_r = self.nosc_r_dg
-                self.lag_dg = lambda y: self.RB.T @ self.lag_dg_(y @ self.RB.T, self.Omega2)
-                self.lag_dg_z = lambda y: self.RB.T @ self.lag_dg_z_(y @ self.RB.T, self.Omega2) @ self.RB
-            else:
-                self.ham_z = lambda y, beta=self.beta: self.RB.T @ self.ham_z_(y @ self.RB.T, self.Omega2, beta)
-                self.ham_zz = lambda y, beta=self.beta: self.RB.T @ self.ham_zz_(y @ self.RB.T, self.Omega2, beta) @ self.RB
 
-            self.g__ = lambda y: self.g_(y @ self.RB.T)
-            self.g_prime__ = lambda y: self.g_prime_(y @ self.RB.T) @ self.RB
+            self.lag_dg = self.lag_dg_hyperreduced
+            self.lag_dg_z = self.lag_dg_z_hyperreduced
+            self.ham_z = self.ham_z_hyperreduced
+            self.ham_zz = self.ham_zz_hyperreduced
 
-        "Projection matrices"
+            self.g__ = self.g_hyperreduced
+            self.g_prime__ = self.g_prime_hyperreduced
+
+            if self.hyperreducer == 'MDEIM':
+                self.ham_zz = self.ham_zz_mdeim_hyperreduced
+                self.lag_dg_z = self.lag_dg_z_mdeim_hyperreduced
+
+        # Projection matrices
         if hasattr(self, 'RB'):
             self.y_init = self.RB.T @ self.y_init
             
@@ -271,7 +361,7 @@ class MechSystem:
             self.P = None
             self.U = None
             
-        "various measures"
+        # various measures
         self.time_lapsed = []
                 
     def get_en_err(self):
@@ -280,3 +370,4 @@ class MechSystem:
 #%% main
 if __name__ == '__main__':
     system = MechSystem({'nosc': 6*3})
+    # print(f"Shape of g_prime_expr: {system.g_prime_expr.flatten().shape}")

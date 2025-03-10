@@ -103,7 +103,7 @@ def logplot(y_data, xlabel=None, xlims=None):
     if xlims is not None:
         # Set the x-axis ticks to include both min and max values
         ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-        ax.set_xticks(xlims[0] + list(ax.get_xticks()) + [xlims[1]])
+        ax.set_xticks([xlims[0]] + list(ax.get_xticks()) + [xlims[1]])
         ax.set_xlim(xlims)  # Extend the x-axis slightly beyond the max value
     ax.margins(0.1)
     return fig, ax

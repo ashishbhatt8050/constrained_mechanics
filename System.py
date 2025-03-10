@@ -53,9 +53,9 @@ class SymbolicComputer:
         # This function takes the symbolic variables y, omega2, and beta as input
         # and returns the evaluated Hamiltonian expression as a numpy array.
         ham_ = smp.lambdify((self.y, omega2, beta), ham_expr, 'numpy')
-        _ham_z_ = smp.lambdify((self.y, omega2, beta), ham_z_expr, 'numpy')
+        ham_z_ = smp.lambdify((self.y, omega2, beta), ham_z_expr, 'numpy')
         ham_zz_ = smp.lambdify((self.y, omega2, beta), ham_zz_expr, 'numpy')
-        ham_z_ = lambda y, omega2, beta: _ham_z_(y, omega2, beta).squeeze()
+        # ham_z_ = lambda y, omega2, beta: _ham_z_(y, omega2, beta).squeeze()
 
         return {
             'y': self.y, 'y1': self.y1,
@@ -82,12 +82,12 @@ class SymbolicComputer:
         DG_V_expr = dpi_dq.T @ dV_dpi
         
         lag_dg_expr = smp.Matrix.vstack(ham_exprs['ham_z_expr'][self.nosc:,:].subs(self.y05_repl), -DG_V_expr)
-        _lag_dg_ = smp.lambdify((self.y, self.y1, ham_exprs['omega2']), lag_dg_expr, 'numpy')
-        lag_dg_ = lambda y, omega2: _lag_dg_(*y, omega2).squeeze()
+        lag_dg_ = smp.lambdify((self.y, self.y1, ham_exprs['omega2']), lag_dg_expr, 'numpy')
+        # lag_dg_ = lambda y, omega2: _lag_dg_(*y, omega2).squeeze()
         
         lag_dg_z_expr = lag_dg_expr.jacobian(self.y1)
-        _lag_dg_z_ = smp.lambdify((self.y, self.y1, ham_exprs['omega2']), lag_dg_z_expr, 'numpy')
-        lag_dg_z_ = lambda y, omega2: _lag_dg_z_(*y, omega2)
+        lag_dg_z_ = smp.lambdify((self.y, self.y1, ham_exprs['omega2']), lag_dg_z_expr, 'numpy')
+        # lag_dg_z_ = lambda y, omega2: _lag_dg_z_(*y, omega2)
 
         return {
             'lag_dg_expr': lag_dg_expr,
@@ -111,9 +111,9 @@ class SymbolicComputer:
         g_expr = smp.Matrix(row_norms + ddt_row_norms)
         g_prime_expr = g_expr.jacobian(self.y)
 
-        _g_lam = smp.lambdify((self.y,), g_expr, modules=['numpy'])
+        g_lam = smp.lambdify((self.y,), g_expr, modules=['numpy'])
         g_prime_lam = smp.lambdify((self.y,), g_prime_expr, modules=['numpy'])
-        g_lam = lambda x: _g_lam(x).squeeze()
+        # g_lam = lambda x: _g_lam(x).squeeze()
         
         return {
             'g_expr': g_expr,
@@ -207,7 +207,7 @@ class MechSystem:
     y_init = r_[positions, momenta].flatten()
 
     # These two properties only have effect during reduction
-    predict = False # False = reproduce the results of the full model
+    predict = True  # False = reproduce the results of the full model
     reducer = 'psd'
     hyperreducer = 'MDEIM'
 
@@ -233,37 +233,37 @@ class MechSystem:
         return self.ham_(y, self.Omega2, beta)
 
     def ham_z_lambda(self, y, beta=0):
-        return self.ham_z_(y, self.Omega2, beta)
+        return self.ham_z_(y, self.Omega2, beta).squeeze()
 
     def ham_zz_lambda(self, y, beta=0):
         return self.ham_zz_(y, self.Omega2, beta)
 
     def lag_dg_lambda(self, y):
-        return self.lag_dg_(y, self.Omega2)
+        return self.lag_dg_(*y, self.Omega2).squeeze()
 
     def lag_dg_z_lambda(self, y):
-        return self.lag_dg_z_(y, self.Omega2)
+        return self.lag_dg_z_(*y, self.Omega2)
 
     def g__lambda(self, y):
-        return self.g_(y)
+        return self.g_(y).squeeze()
 
     def g_prime__lambda(self, y):
         return self.g_prime_(y)
 
     def ham_z_reduced(self, y, beta=0):
-        return self.RB.T @ self.ham_z_(y @ self.RB.T, self.Omega2, beta)
+        return self.RB.T @ self.ham_z_(y @ self.RB.T, self.Omega2, beta).squeeze()
 
     def ham_zz_reduced(self, y, beta=0):
         return self.RB.T @ self.ham_zz_(y @ self.RB.T, self.Omega2, beta) @ self.RB
 
     def lag_dg_reduced(self, y):
-        return self.RB.T @ self.lag_dg_(y @ self.RB.T, self.Omega2)
+        return self.RB.T @ self.lag_dg_(*(y @ self.RB.T), self.Omega2).squeeze()
 
     def lag_dg_z_reduced(self, y):
-        return self.RB.T @ self.lag_dg_z_(y @ self.RB.T, self.Omega2) @ self.RB
+        return self.RB.T @ self.lag_dg_z_(*(y @ self.RB.T), self.Omega2) @ self.RB
     
     def g_reduced(self, y):
-        return self.g_(y @ self.RB.T)
+        return self.g_(y @ self.RB.T).squeeze()
 
     def g_prime_reduced(self, y):
         return self.g_prime_(y @ self.RB.T) @ self.RB
@@ -318,9 +318,10 @@ class MechSystem:
 
             self.g__ = self.g__lambda
             self.g_prime__ = self.g_prime__lambda
+
         elif not hasattr(self, 'P'):
-            if self.solver_class.__name__ == "DiscreteGradientSolver":
-                self.RB = self.RB_dg  # Use RB_dg for DG solvers
+            if self.solver_class.__name__ == 'DiscreteGradientSolver':
+                self.RB = self.RB_dg
                 self.nosc_r = self.nosc_r_dg
 
             self.lag_dg = self.lag_dg_reduced
@@ -330,11 +331,14 @@ class MechSystem:
 
             self.g__ = self.g_reduced
             self.g_prime__ = self.g_prime_reduced
+            
         else:
-            if self.solver_class.__name__ == "DiscreteGradientSolver":
-                self.RB = self.RB_dg  # Use RB_dg for DG solvers
+            if self.solver_class.__name__ == 'DiscreteGradientSolver':
+                self.RB = self.RB_dg
                 self.nosc_r = self.nosc_r_dg
 
+                self._Ux_inv_PxU, self._IP_Ux_inv_PxU = self._Ux_inv_PxU_dg, self._IP_Ux_inv_PxU_dg
+                
             self.lag_dg = self.lag_dg_hyperreduced
             self.lag_dg_z = self.lag_dg_z_hyperreduced
             self.ham_z = self.ham_z_hyperreduced
@@ -357,7 +361,7 @@ class MechSystem:
             self.RB = None
             self.JJ = self.JJ(self.nosc)
 
-        if not hasattr(self, 'P'):
+        if not hasattr(self, 'RBxUx_inv_PxU'):
             self.P = None
             self.U = None
             
@@ -369,5 +373,5 @@ class MechSystem:
 
 #%% main
 if __name__ == '__main__':
-    system = MechSystem({'nosc': 6*3})
+    system = MechSystem({'nosc': 16*3})
     # print(f"Shape of g_prime_expr: {system.g_prime_expr.flatten().shape}")

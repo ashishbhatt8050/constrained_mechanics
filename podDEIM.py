@@ -100,15 +100,8 @@ def PSD(F2, y_list, MechSystem):
     nosc, tol = MechSystem.nosc, MechSystem.tol
     rb, sv, nosc_r = POD(pl.c_[y_list[:nosc, :], y_list[nosc:, :], F2[:nosc, :], F2[nosc:, :]], np.eye(nosc), tol)
     RB = np.block([[rb[:, :nosc_r], np.zeros_like(rb[:, :nosc_r])], [np.zeros_like(rb[:, :nosc_r]), rb[:, :nosc_r]]])
-
-    print(f'{2*nosc_r = }')
-
-    fig, ax = logplot(sv, xlabel='index of singular values', xlims=(1, len(sv)))
-    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-    # filename = MechSystem.keep_time +'osc_sv' + '.pdf'
-    # save_figure(fig, filename)
     
-    return RB, sv, nosc_r, fig
+    return RB, sv, nosc_r
 
 # %%
 

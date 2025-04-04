@@ -13,6 +13,26 @@ import os
 import dill as pickle
 import sympy as smp
 from functools import wraps
+from PlotScript import timing
+
+# Set and print random seed
+rng = np.random.default_rng(seed=208394104)  # Create RNG with fixed seed
+
+# Safely get and print seed
+state = rng.__getstate__()
+if isinstance(state, dict) and 'bit_generator' in state:
+    bg_state = state['bit_generator']
+    if hasattr(bg_state, '_seed_seq') and bg_state._seed_seq is not None:
+        print(f"NumPy RNG seed: {bg_state._seed_seq.entropy}")
+    else:
+        print(f"NumPy RNG seed: {bg_state.state['seed']}")
+else:
+    ValueError("Unable to retrieve exact seed value")
+
+# np.random.seed(208394104)  # Choose a fixed seed
+# print(f"NumPy RNG seed: {np.random.get_state()[1][0]}")
+
+#%%
 
 class SymbolicComputer:
     """Class to compute and store symbolic expressions"""
@@ -77,8 +97,56 @@ class SymbolicComputer:
         
         # Discrete derivatives
         dpi_dq = ham_exprs['pi'].jacobian(self._q).subs(self.y05_repl)
-        dV_dpi = ((ham_exprs['pot_expr_vec'].subs(self.y1_repl) - ham_exprs['pot_expr_vec']).multiply_elementwise(
-            (ham_exprs['pi'].subs(self.y1_repl) - ham_exprs['pi']).applyfunc(lambda x: 1/x)).applyfunc(smp.factor))
+
+
+        dV_dpi = 0.5 * ham_exprs['omega2'].multiply_elementwise(
+                ham_exprs['pi'].subs(self.y1_repl) + ham_exprs['pi'] - 2 * smp.ones(*ham_exprs['pi'].shape)
+                )
+        
+        '''
+        # First collect terms, then factor
+        numerator = ham_exprs['pot_expr_vec'].subs(self.y1_repl) - ham_exprs['pot_expr_vec']
+        denominator = ham_exprs['pi'].subs(self.y1_repl) - ham_exprs['pi']
+
+        _numerator = 0.5 * ham_exprs['omega2'].multiply_elementwise(
+                denominator.multiply_elementwise(
+                ham_exprs['pi'].subs(self.y1_repl) + ham_exprs['pi'] - 2 * smp.ones(*ham_exprs['pi'].shape))
+                )
+
+        dV_dpi = _numerator.multiply_elementwise(
+            denominator.applyfunc(lambda x: 1/x)
+        ).applyfunc(smp.factor)
+
+        def compare_expressions(expr1, expr2):
+            """Compare two sympy expressions using multiple methods"""
+            # Try direct comparison
+            if expr1 == expr2:
+                return True, "Direct comparison"
+                
+            # Try comparing simplified forms
+            if smp.simplify(expr1 - expr2) == 0:
+                return True, "After simplification"
+                
+            # Try comparing expanded forms
+            if smp.expand(expr1) == smp.expand(expr2):
+                return True, "After expansion"
+                
+            # Try comparing factored forms
+            if smp.factor(expr1) == smp.factor(expr2):
+                return True, "After factoring"
+            
+            return False, "Expressions are different"
+
+        # Use in your code
+        are_equal, method = compare_expressions(numerator, _numerator)
+        print(f"Expressions are equal using {method}: {are_equal}")
+        are_equal, method = compare_expressions(dV_dpi, _dV_dpi)
+        print(f"Expressions are equal using {method}: {are_equal}")
+
+        # dV_dpi = ((ham_exprs['pot_expr_vec'].subs(self.y1_repl) - ham_exprs['pot_expr_vec']).multiply_elementwise(
+        #     (ham_exprs['pi'].subs(self.y1_repl) - ham_exprs['pi']).applyfunc(lambda x: 1/x)).applyfunc(smp.factor))'
+        '''
+        
         DG_V_expr = dpi_dq.T @ dV_dpi
         
         lag_dg_expr = smp.Matrix.vstack(ham_exprs['ham_z_expr'][self.nosc:,:].subs(self.y05_repl), -DG_V_expr)
@@ -122,14 +190,15 @@ class SymbolicComputer:
             'g_prime_': g_prime_lam
         }
     
-    def compute_all(self):
+    @timing
+    def compute_all(self, expressions):
         """Compute all symbolic expressions"""
-        expressions = {}
+        # expressions = {}
         ham_exprs = self.compute_hamiltonian()
         expressions.update(ham_exprs)
         expressions.update(self.compute_lagrangian(ham_exprs))
         expressions.update(self.compute_constraints())
-        return expressions
+        # return expressions
 
 def load_symbolic_expressions(cls):
     """Decorator to handle loading/saving of symbolic expressions"""
@@ -142,7 +211,9 @@ def load_symbolic_expressions(cls):
     except (FileNotFoundError, pickle.UnpicklingError):
         # Compute and save if loading fails
         computer = SymbolicComputer(cls.nosc)
-        expressions = computer.compute_all()
+        expressions = {}
+        tl = computer.compute_all(expressions)
+        print(f'Computed symbolic expressions in {tl:.2f} seconds.')
         os.makedirs('data', exist_ok=True)
         with open(expressions_file, 'wb') as f:
             pickle.dump(expressions, f)
@@ -177,17 +248,20 @@ class MechSystem:
     w_values = [1]
     assert np.isclose(sum(w_values), 1), 'sum_i w_i must be 1'
 
-    dt_space_dim = 3
-    dt_space = linspace(0.01, 0.05, num=dt_space_dim)
-    T_final = 5
+    dt_space_dim = 2
+    dt_space = np.logspace(-2.5, -2, num=dt_space_dim)
+    T_final = 1
 
     "Fixed-point nonliner equations solver properties"
-    tol, M, var, store = 1.0E-12, 100, True, False
+    tol, M, var, store = 1.0E-10, 100, True, False
 
     # parameter space: frequency of the oscillators -- omega^2
+    # TODO: seed random generators
     nosc = 16*3
-    _Omega2_space_dim = 3
-    _Omega2_space = np.sort(10 * (1 - np.random.rand(_Omega2_space_dim, nosc // 3 - 2)))
+    _Omega2_space_dim = 4
+    _Omega2_space = np.sort(10 * (1 - rng.random((_Omega2_space_dim, nosc // 3 - 2))))
+    # _Omega2_space[:, 2*_Omega2_space_dim-1:] = _Omega2_space[0, 2*_Omega2_space_dim-1:] # Only first _Omega2_space_dim-1 columns are random
+
     JJ = lambda self, d=nosc: r_[c_[zeros((d, d)), eye(d)], c_[-eye(d), zeros((d, d))]]
 
     "Initial conditions satisfying the constraints"
@@ -199,7 +273,7 @@ class MechSystem:
     positions = positions.flatten().reshape(-1, 1)
 
     momenta = np.zeros((nosc//3, 3))
-    momenta[::2] = np.random.uniform(-0.01, 0.01, momenta[::2].shape)
+    momenta[::2] = rng.uniform(-0.01, 0.01, momenta[::2].shape)
     momenta[1::2] = momenta[::2]
     assert np.allclose(momenta[1::2], momenta[::2]), 'position and momenta are not orthogonal'
     momenta = momenta.flatten().reshape(-1, 1)
@@ -207,7 +281,7 @@ class MechSystem:
     y_init = r_[positions, momenta].flatten()
 
     # These two properties only have effect during reduction
-    predict = True  # False = reproduce the results of the full model
+    predict = False  # False = reproduce results of the full model
     reducer = 'psd'
     hyperreducer = 'MDEIM'
 
@@ -254,19 +328,87 @@ class MechSystem:
         return self.RB.T @ self.ham_z_(y @ self.RB.T, self.Omega2, beta).squeeze()
 
     def ham_zz_reduced(self, y, beta=0):
+        # print(f'Computing ham_zz inside ham_zz_reduced')
         return self.RB.T @ self.ham_zz_(y @ self.RB.T, self.Omega2, beta) @ self.RB
+
+        """Break large matrix multiplication into smaller chunks"""
+        y_projected = y @ self.RB.T
+        ham_zz_result = self.ham_zz_(y_projected, self.Omega2, beta)
+        
+        # Use 32 as chunk size (96 % 32 = 0 and 32 < 36)
+        chunk_size = 32  # Gives exactly 3 chunks of size 32
+        n_chunks = ham_zz_result.shape[1] // chunk_size
+        
+        # First multiplication
+        result = np.zeros((self.RB.T.shape[0], ham_zz_result.shape[1]))
+        for i in range(n_chunks):
+            start = i * chunk_size
+            end = (i + 1) * chunk_size
+            result[:, start:end] = self.RB.T @ ham_zz_result[:, start:end]
+        
+        # Second multiplication
+        final = np.zeros((result.shape[0], self.RB.shape[1]))
+        for i in range(n_chunks):
+            start = i * chunk_size
+            end = (i + 1) * chunk_size
+            final += result[:, start:end] @ self.RB[start:end, :]
+            
+        return final
 
     def lag_dg_reduced(self, y):
         return self.RB.T @ self.lag_dg_(*(y @ self.RB.T), self.Omega2).squeeze()
 
     def lag_dg_z_reduced(self, y):
+        # print(f'Computing lag_dg_z inside lag_dg_z_reduced')
         return self.RB.T @ self.lag_dg_z_(*(y @ self.RB.T), self.Omega2) @ self.RB
+    
+        """Break large matrix multiplication into smaller chunks"""
+        # First compute the DG result
+        result = self.lag_dg_z_(*(y @ self.RB.T), self.Omega2)
+        
+        # Use 32 as chunk size (96 % 32 = 0 and 32 < 36)
+        chunk_size = 32  # Gives exactly 3 chunks of size 32
+        n_chunks = result.shape[1] // chunk_size
+        
+        # First multiplication
+        intermediate = np.zeros((self.RB.T.shape[0], result.shape[1]))
+        for i in range(n_chunks):
+            start = i * chunk_size
+            end = (i + 1) * chunk_size
+            intermediate[:, start:end] = self.RB.T @ result[:, start:end]
+        
+        # Second multiplication
+        final = np.zeros((intermediate.shape[0], self.RB.shape[1]))
+        for i in range(n_chunks):
+            start = i * chunk_size
+            end = (i + 1) * chunk_size
+            final += intermediate[:, start:end] @ self.RB[start:end, :]
+            
+        return final
     
     def g_reduced(self, y):
         return self.g_(y @ self.RB.T).squeeze()
 
     def g_prime_reduced(self, y):
         return self.g_prime_(y @ self.RB.T) @ self.RB
+    
+        """Break large matrix multiplication into smaller chunks"""
+        # First compute g_prime result
+        y_projected = y @ self.RB.T
+        g_prime_result = self.g_prime_(y_projected)
+        
+        # Use 32 as chunk size (96 % 32 = 0 and 32 < 36)
+        chunk_size = 32  # Gives exactly 3 chunks of size 32
+        n_chunks = g_prime_result.shape[1] // chunk_size
+        
+        # Process in chunks
+        final = np.zeros((g_prime_result.shape[0], self.RB.shape[1]))
+        for i in range(n_chunks):
+            start = i * chunk_size
+            end = (i + 1) * chunk_size
+            final += g_prime_result[:, start:end] @ self.RB[start:end, :]
+        
+        return final
 
     def ham_z_hyperreduced(self, y, beta=0):
         return self.RBxUx_inv_PxU @ self.ham_z_deim(y @ self.RB.T, self.Omega2, beta)
@@ -281,14 +423,14 @@ class MechSystem:
         ) @ self.RB
 
     def lag_dg_hyperreduced(self, y):
-        return self._RBxUx_inv_PxU_ @ self.lag_dg_deim(*(y @ self.RB.T), self.Omega2)
+        return self.RBxUx_inv_PxU @ self.lag_dg_deim(*(y @ self.RB.T), self.Omega2)
 
     def lag_dg_z_hyperreduced(self, y):
-        return self._RBxUx_inv_PxU_ @ self.lag_dg_z_deim(*(y @ self.RB.T), self.Omega2) @ self.RB
+        return self.RBxUx_inv_PxU @ self.lag_dg_z_deim(*(y @ self.RB.T), self.Omega2) @ self.RB
     
     def lag_dg_z_mdeim_hyperreduced(self, y):
         return self.RB.T @ np.reshape(
-            self._IP_Ux_inv_PxU_ @ self.lag_dg_z_mdeim(*(y @ self.RB.T), self.Omega2),
+            self.IP_Ux_inv_PxU @ self.lag_dg_z_mdeim(*(y @ self.RB.T), self.Omega2),
             (2*self.nosc, 2*self.nosc)
         ) @ self.RB
     
@@ -306,11 +448,13 @@ class MechSystem:
         if 'pool' in kwds:
             self.__dict__.update(kwds['pool'])
             
-        self.beta = (max(1e-2, 0 * np.random.rand() / 10)) * 0
+        
+        self.beta = (max(1e-2, 0 * rng.random() / 10)) * 0
         
         # Update functions based on solver type
         self.ham = self.ham_lambda
-        if not hasattr(self, 'RB'):
+        if (not hasattr(self, 'RB')) and (not hasattr(self, 'RB_dg')):
+            print('Setting full order functions...')
             self.ham_z = self.ham_z_lambda
             self.ham_zz = self.ham_zz_lambda
             self.lag_dg = self.lag_dg_lambda
@@ -319,8 +463,11 @@ class MechSystem:
             self.g__ = self.g__lambda
             self.g_prime__ = self.g_prime__lambda
 
-        elif not hasattr(self, 'P'):
+        elif (not hasattr(MechSystem, 'RBxUx_inv_PxU')) and (not hasattr(MechSystem, '_RBxUx_inv_PxU_')) and (not hasattr(MechSystem, '_Ux_inv_PxU_dg')) and (not hasattr(MechSystem, '_Ux_inv_PxU')):
+            print('Setting reduced order functions...')
             if self.solver_class.__name__ == 'DiscreteGradientSolver':
+                # TODO: move these inside the concrete solvers
+                print('Setting RB to RB_dg...')
                 self.RB = self.RB_dg
                 self.nosc_r = self.nosc_r_dg
 
@@ -333,11 +480,20 @@ class MechSystem:
             self.g_prime__ = self.g_prime_reduced
             
         else:
+            print('Setting hyperreduced functions...')
             if self.solver_class.__name__ == 'DiscreteGradientSolver':
+                print('Setting RB to RB_dg...')
                 self.RB = self.RB_dg
                 self.nosc_r = self.nosc_r_dg
+                self.RBxUx_inv_PxU = self._RBxUx_inv_PxU_
+                if self.hyperreducer == 'MDEIM':
+                    self.IP_Ux_inv_PxU = self._IP_Ux_inv_PxU_
 
                 self._Ux_inv_PxU, self._IP_Ux_inv_PxU = self._Ux_inv_PxU_dg, self._IP_Ux_inv_PxU_dg
+
+                self.g_deim = self.g_deim_dg
+                self.g_prime_mdeim = self.g_prime_mdeim_dg
+                self.g_prime_shape = self.g_prime_shape_dg
                 
             self.lag_dg = self.lag_dg_hyperreduced
             self.lag_dg_z = self.lag_dg_z_hyperreduced
@@ -361,10 +517,6 @@ class MechSystem:
             self.RB = None
             self.JJ = self.JJ(self.nosc)
 
-        if not hasattr(self, 'RBxUx_inv_PxU'):
-            self.P = None
-            self.U = None
-            
         # various measures
         self.time_lapsed = []
                 
@@ -373,5 +525,6 @@ class MechSystem:
 
 #%% main
 if __name__ == '__main__':
-    system = MechSystem({'nosc': 16*3})
+    pass
+    # system = MechSystem({'nosc': 16*3})
     # print(f"Shape of g_prime_expr: {system.g_prime_expr.flatten().shape}")

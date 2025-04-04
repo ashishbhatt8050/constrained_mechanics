@@ -1,6 +1,6 @@
 from numpy import linalg as LA
 
-def Newton(f, x, dfdx, epsilon=1.0E-7, N=100, store=False):
+def Newton(f, x, dfdx, tol, M, store):
     """
     Newton's method for finding roots of a function.
 
@@ -8,9 +8,9 @@ def Newton(f, x, dfdx, epsilon=1.0E-7, N=100, store=False):
     f (function): The function to find roots for.
     x (float or array): The initial guess.
     dfdx (function): The derivative of the function.
-    epsilon (float, optional): The tolerance for convergence. Defaults to 1.0E-7.
-    N (int, optional): The maximum number of iterations. Defaults to 100.
-    store (bool, optional): Whether to store the iteration history. Defaults to False.
+    tol (float): The tolerance for convergence. Defaults to 1.0E-7.
+    M (int): The maximum number of iterations. Defaults to 100.
+    store (bool): Whether to store the iteration history. Defaults to False.
 
     Returns:
     x (float or array): The root of the function.
@@ -21,10 +21,10 @@ def Newton(f, x, dfdx, epsilon=1.0E-7, N=100, store=False):
     # Initialize variables
     f_value = f(x)
     dfdx_value = dfdx(x)
-    n = 0
+    m = 0
     if store: info = []
     
-    while LA.norm(f_value) > epsilon and n <= N:
+    while LA.norm(f_value) > tol and m < M:
         
         # Check for singular derivative
         if LA.norm(dfdx_value) < 1E-14:
@@ -38,14 +38,18 @@ def Newton(f, x, dfdx, epsilon=1.0E-7, N=100, store=False):
         # Update variables
         f_value = f(x)
         dfdx_value = dfdx(x)
-        n += 1
+        m += 1
         if store:
             info.append(x)
+        
+    # Check convergence
+    if m >= M:
+        raise RuntimeError("Newton: nonlinear solver did not converge")
     
     if store:
-        return x, n, info
+        return x, m, info
     else:
-        return x, n, f_value
+        return x, m, f_value
     
 def fixed_point(g, x, dgdx, tol, M, store):
     """
@@ -98,7 +102,8 @@ def fixed_point(g, x, dgdx, tol, M, store):
             info.append((m, x[1], Delta_Lambda))
         
     # Check convergence
-    assert m < M, "Nonlinear solver did not converge"
+    if m >= M:
+        raise RuntimeError("Nonlinear solver did not converge")
 
 #%% Testing
 if __name__ == "__main__":

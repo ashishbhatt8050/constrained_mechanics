@@ -28,10 +28,6 @@ class ODESolver(MechSystem):
         
     def __init__(self, kwds):
         MechSystem.__init__(self, kwds)
-        
-        self.f = self._f
-        self.dfdu = self._dfdu
-        self.Ecoeff = self._Ecoeff
             
     def __call__(self, y, t, *y1, **kwargs):
         """Base implementation - must be overridden"""
@@ -149,7 +145,7 @@ class ODESolver(MechSystem):
         else:
             raise ValueError
             
-        # Convert the numpy arrays to PyTorch tensors
+        # TODO: Convert the numpy arrays to PyTorch tensors
         du = torch.from_numpy(du)
         J_mat = torch.from_numpy(J_mat)
         
@@ -171,14 +167,7 @@ class ODESolver(MechSystem):
         
         return symp_error
 
-
-    def _f(self, u, t, *arg):
-        return self.__call__(u, t, arg, func=True)
-
-    def _dfdu(self, u, t, *arg):
-        return self.__call__(u, t, arg, func=False)
-
-    def _Ecoeff(self, dt):
+    def Ecoeff(self, dt):
         return np.exp(self.beta*dt/2)
     
 class ForwardEuler(ODESolver):
@@ -258,15 +247,15 @@ class RungeKutta4(ODESolver):
         return u_new
 
 class ConformalStormerVerlet(ODESolver):
-    def __call__(self, y, t, *y1, **kwargs):
-        f = self.JJ @ self.ham_z(y, 0)
-        dfdy = self.JJ @ self.ham_zz(y, 0)
-        return f if kwargs['func'] else dfdy
+
+    def f(self, y, t, *arg):
+        return self.JJ @ self.ham_z(y, 0)
+    
+    def dfdu(self, y, t, *arg):
+        return self.JJ @ self.ham_zz(y, 0)
     
     def __init__(self, kwds):
         ODESolver.__init__(self, kwds)
-        
-        self.Gamma_p, self.Gamma_m = self._Gamma_p, self._Gamma_m
 
     def advance(self):
         u, f, k, t, neq = self.u, self.f, self.k, self.t, self.neq
@@ -314,10 +303,10 @@ class ConformalStormerVerlet(ODESolver):
         
         return du
     
-    def _Gamma_p(self, dt):
+    def Gamma_p(self, dt):
         return 1 + self.beta*dt/2
     
-    def _Gamma_m(self, dt):
+    def Gamma_m(self, dt):
         return 1 - self.beta*dt/2
     
 class ImplicitMidpoint(ODESolver):
@@ -328,8 +317,6 @@ class ImplicitMidpoint(ODESolver):
     
     def __init__(self, kwds):
         ODESolver.__init__(self, kwds)
-            
-        self.dfdw = self._dfdw
 
     def advance(self, w_start=None):
         u, f, k, t = self.u, self.f, self.k, self.t
@@ -339,16 +326,11 @@ class ImplicitMidpoint(ODESolver):
             return w - dt*f((w +u[k])/2, (t[k+1] +t[k])/2) - u[k]
 
         def dFdw(w):
-            return self.dfdw([w, u[k]], [t[k+1], t[k]])
+            return np.eye(self.neq) - self.dt/2*self.dfdu((w+u[k])/2, (t[k+1]+t[k])/2)
 
         if w_start is None: w_start = u[k] + dt*f(u[k], t[k])  # Forward Euler step
-        u_new, n, info = Newton(F, w_start, dFdw, N=100, store=True)
-        if k == 0:
-            self.Newton_iter = []
-        self.Newton_iter.append(n)
-        if n >= 100:
-            print("Newton's failed to converge at t=%g "\
-                  "(%d iterations)" % (t[k+1], n))
+        u_new, n, info = Newton(F, w_start, dFdw, self.tol, self.M, False)
+        
         return u_new, info
 
     def var_advance(self):
@@ -359,19 +341,15 @@ class ImplicitMidpoint(ODESolver):
         du_new = LA.solve((I_mat -temp), (I_mat +temp))
         return du_new
 
-    def _dfdw(self, u, t):
-        return np.eye(self.neq) - self.dt/2*self.dfdu((u[1]+u[0])/2, (t[1]+t[0])/2)
-
 class DiscreteGradient(ODESolver):
-    def __call__(self, y, t, *y1, **kwargs):
-        f = self.lag_dg(y)
-        dfdy = self.lag_dg_z(y)
-        return f if kwargs['func'] else dfdy
+    def f(self, y, t, *arg):
+        return self.lag_dg(y)
+    
+    def dfdu(self, y, t, *arg):
+        return self.lag_dg_z(y)
     
     def __init__(self, kwds):
         ODESolver.__init__(self, kwds)
-        
-        self.dfdw = self._dfdw
 
     def advance(self, w_start=None):
         u, f, k, t = self.u, self.f, self.k, self.t
@@ -381,7 +359,7 @@ class DiscreteGradient(ODESolver):
             return w - u[k] - dt*f(c_[u[k], w].T, t[k])
 
         def dFdw(w):
-            return self.dfdw(c_[u[k], w].T, t[k])
+            return np.eye(self.neq) - self.dt * self.dfdu(c_[u[k], w].T, t[k])
 
         if w_start is None:
             w_start = u[k] + dt*f(c_[u[k], u[k]].T, t[k])  # Forward Euler step
@@ -390,10 +368,7 @@ class DiscreteGradient(ODESolver):
             # uk = u[k] if self.RB is None else u[k] @ self.RB.T
             # w_start = u[k] + dt * self.JJ(self.neq//2) @ self.ham_z(*np.split(uk, 2))
         
-        u_new, n, info = Newton(F, w_start, dFdw, N=100, store=True)
-        
-        if n >= 100:
-            print(f"Newton's failed to converge at t={t[k+1]:.6f} ({n} iterations)")
+        u_new, n, info = Newton(F, w_start, dFdw, self.tol, self.M, False)
 
         return u_new, info
 
@@ -405,9 +380,6 @@ class DiscreteGradient(ODESolver):
         du_new = LA.solve((I_mat -temp), (I_mat +temp))
         return du_new
 
-    def _dfdw(self, u, t):
-        return np.eye(self.neq) - self.dt * self.dfdu(u, t)
-
 class ConformalImplicitMidpoint(ImplicitMidpoint):
     """Conformal Implicit Midpoint solver with energy-preserving capabilities"""
     
@@ -415,11 +387,11 @@ class ConformalImplicitMidpoint(ImplicitMidpoint):
         ImplicitMidpoint.__init__(self, kwds)
         # self.solver = kwds['pool']['solver_class'](kwds)
 
-    def __call__(self, y, t, *y1, **kwargs):
-        """Compute vector field and its Jacobian"""
-        f = self.JJ @ self.ham_z(y)  # Conservative part only
-        dfdy = self.JJ @ self.ham_zz(y)  # Conservative part Jacobian
-        return f if kwargs['func'] else dfdy
+    def f(self, y, t, *arg):
+        return self.JJ @ self.ham_z(y)
+    
+    def dfdu(self, y, t, *arg):
+        return self.JJ @ self.ham_zz(y)
 
     def advance(self):
         """Advance solution one time step using conformal integration"""        

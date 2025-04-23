@@ -98,19 +98,35 @@ class ReduceMechSystem(MechSystem):
     def setup_reduced_model(cls, solvers):
         """Setup reduced basis"""
         print('Computing reduced basis...')
+
+        def compute_batch_snapshots(solver, indices, expr, batch_size=100):
+            """Process snapshots in batches"""
+            result = []
+            for i in range(0, len(indices), batch_size):
+                batch_indices = indices[i:i+batch_size]
+                if isinstance(solver, DiscreteGradient):  # For DiscreteGradient
+                    batch_results = [expr(y) for y in zip(solver.y[batch_indices], 
+                                                        solver.y[np.array(batch_indices)+1])]
+                else:  # For Hamiltonian
+                    batch_results = [expr(y) for y in solver.y[batch_indices]]
+                result.extend(batch_results)
+                if (i + batch_size) % 100 == 0:
+                    gc.collect()
+                    
+            return np.array(result).T
         
         def compute_reduced_basis(solver_type, expr, attr_name):
             filtered_solvers, filtered_indices = cls.filter_solvers(solvers, solver_type)
+
+            # Create F2 in batches
+            F2_list = []
+            for solver, indices in zip(filtered_solvers, filtered_indices):
+                batch_result = compute_batch_snapshots(solver, indices, expr)
+                F2_list.append(batch_result)
             
-            if solver_type == "Hamiltonian":
-                F2 = np.hstack([np.array([expr(y) 
-                    for y in solver.y[indices]]).T 
-                    for solver, indices in zip(filtered_solvers, filtered_indices)])
-            elif solver_type == "DiscreteGradient":
-                F2 = np.hstack([np.array([expr(y) 
-                    for y in zip(solver.y[indices], solver.y[np.array(indices)+1])]).T 
-                    for solver, indices in zip(filtered_solvers, filtered_indices)]
-                )
+            F2 = np.hstack(F2_list)
+            del F2_list
+            gc.collect()
 
             # Create snapshot list
             y_list = np.hstack([solver.y[indices].T for solver, indices 
@@ -232,8 +248,9 @@ class ReduceMechSystem(MechSystem):
             # Though _IP_Ux_inv_PxU_ @ lag_dg_z_col can be done here once and for all solvers.
             print(f'Computing {func_name} reduction...')
             
-            # Collect snapshots
-            non_zero_indices = np.nonzero(getattr(solvers[0], func_name)(solvers[0].y[0:2] if solver_type == "DiscreteGradient" else solvers[0].y[0]).flatten())[0]
+            # Collect snapshots, load non-zero indices stored in func_name_nonzero_indices
+            # and create interpolation matrix IP
+            non_zero_indices = getattr(cls, func_name + "_nonzero_indices")
             IP = np.zeros((len(non_zero_indices), (2*cls.nosc)**2), dtype=np.int8)
             IP[np.arange(len(non_zero_indices)), non_zero_indices] = 1
             
@@ -311,7 +328,7 @@ class ReduceMechSystem(MechSystem):
                 g_prime_shape = solvers[0].g_prime__(solvers[0].y[0]).shape
                 setattr(MechSystem, 'g_prime_shape' if solver_type == "Hamiltonian" else 'g_prime_shape_dg', g_prime_shape)
 
-                non_zero_indices = np.nonzero(solvers[0].g_prime__(solvers[0].y[0]).flatten())[0]
+                non_zero_indices = getattr(cls, func_name + "_nonzero_indices")
                 IP = np.zeros((len(non_zero_indices), np.prod(g_prime_shape)), dtype=np.int8)
                 IP[np.arange(len(non_zero_indices)), non_zero_indices] = 1
                 
@@ -517,7 +534,7 @@ class BaseSolverMixin:
               args.append((x, y, z, process_kwds))
 
         # Check the length of args
-        if len(args) > 1 and  not hasattr(MechSystem, 'RB') and not hasattr(MechSystem, 'RB_dg'):
+        if False and len(args) > 1 and not hasattr(MechSystem, 'RB') and not hasattr(MechSystem, 'RB_dg'):
             # Use ProcessPoolExecutor to parallelize the solve_mech_system calls
             print('Solving mechanical system using parallel processing...')
             
@@ -532,7 +549,7 @@ class BaseSolverMixin:
                     ]
                     
                     # Place results directly in their final position
-                    for future in concurrent.futures.as_completed(futures, timeout=60):
+                    for future in concurrent.futures.as_completed(futures, timeout=None):
                         idx = futures.index(future)
                         try:
                             result = future.result()
@@ -758,14 +775,15 @@ class BaseSolverMixin:
         # Plot the particle positions over time
         coords = self.y[:, :self.nosc].reshape(-1, self.nosc//3, 3)
         for i in range(coords.shape[1]):
-            ax_pp.plot(coords[:, i, 0], coords[:, i, 1], coords[:, i, 2], 'k-')  # plot the trajectory of each particle
-            ax_pp.scatter(coords[-1, i, 0], coords[-1, i, 1], coords[-1, i, 2], s=20)  # plot the final position of each particle
+            ax_pp.scatter(coords[0, i, 0], coords[0, i, 1], coords[0, i, 2], s=20, c='teal')  # plot initial configuration
+            ax_pp.plot(coords[:, i, 0], coords[:, i, 1], coords[:, i, 2], 'k-')  # plot system evolution
 
         # Set the axes' labels and title
         ax_pp.set_xlabel('x')
         ax_pp.set_ylabel('y')
         ax_pp.set_zlabel('z')
         ax_pp.set_title('Phase portrait')
+        ax_pp.view_init(elev=0, azim=45)  # Front-ish view
 
         for ax in [ax0, ax1, ax2, ax3, ax4]:
             ax.label_outer()
@@ -792,14 +810,32 @@ class ConformalStormerVerletSolver(BaseSolverMixin, ConformalStormerVerlet):
     def __init__(self, kwds):
         super().__init__(kwds)
         self.g = self.g__
-        self.g_prime = self.g_prime__
+        self.g_prime = [self.g_prime__, self.block_diag_matrix]
+
+    def block_diag_matrix(self, y):
+        """Compute g_prime using the original method"""
+        _g_prime_shape = self.g_prime__(y[0]).shape
+        result = np.block([
+            [self.g_prime__(y[0])[:_g_prime_shape[0]//2, :_g_prime_shape[1]//2], np.zeros((_g_prime_shape[0]//2, _g_prime_shape[1]//2))],
+            [np.zeros((_g_prime_shape[0]//2, _g_prime_shape[1]//2)), self.g_prime__(y[1])[:_g_prime_shape[0]//2, :_g_prime_shape[1]//2]]
+        ])
+        return result
 
 class ConformalImplicitMidpointSolver(BaseSolverMixin, ConformalImplicitMidpoint):
     """CIMSolver with Hamiltonian capabilities"""
     def __init__(self, kwds):
         super().__init__(kwds)
         self.g = self.g__
-        self.g_prime = self.g_prime__
+        self.g_prime = [self.g_prime__, self.block_diag_matrix]
+
+    def block_diag_matrix(self, y):
+        """Compute g_prime using the original method"""
+        _g_prime_shape = self.g_prime__(y[0]).shape
+        result = np.block([
+            [self.g_prime__(y[0])[:_g_prime_shape[0]//2, :_g_prime_shape[1]//2], np.zeros((_g_prime_shape[0]//2, _g_prime_shape[1]//2))],
+            [np.zeros((_g_prime_shape[0]//2, _g_prime_shape[1]//2)), self.g_prime__(y[1])[:_g_prime_shape[0]//2, :_g_prime_shape[1]//2]]
+        ])
+        return result
 
 #%% Main driver
 if __name__ == '__main__':

@@ -16,7 +16,7 @@ from functools import wraps
 from PlotScript import timing
 
 # Set and print random seed
-rng = np.random.default_rng(seed=208394104)  # Create RNG with fixed seed
+rng = np.random.default_rng(seed=408394104)  # Create RNG with fixed seed
 
 # Safely get and print seed
 state = rng.__getstate__()
@@ -68,6 +68,7 @@ class SymbolicComputer:
         ham_expr = kin_expr + pot_expr
         ham_z_expr = smp.Matrix([ham_expr]).jacobian(self.y).T
         ham_zz_expr = ham_z_expr.jacobian(self.y)
+        ham_zz_nonzero_indices = np.where(np.array(ham_zz_expr.tolist()).flatten() != 0)[0]
 
         # Generate a numerical function for the Hamiltonian expression
         # This function takes the symbolic variables y, omega2, and beta as input
@@ -87,6 +88,7 @@ class SymbolicComputer:
             'ham_': ham_,
             'ham_z_': ham_z_,
             'ham_zz_': ham_zz_,
+            'ham_zz_nonzero_indices': ham_zz_nonzero_indices,
             'pi': pi,
             'pot_expr_vec': pot_expr_vec
         }
@@ -151,17 +153,17 @@ class SymbolicComputer:
         
         lag_dg_expr = smp.Matrix.vstack(ham_exprs['ham_z_expr'][self.nosc:,:].subs(self.y05_repl), -DG_V_expr)
         lag_dg_ = smp.lambdify((self.y, self.y1, ham_exprs['omega2']), lag_dg_expr, 'numpy')
-        # lag_dg_ = lambda y, omega2: _lag_dg_(*y, omega2).squeeze()
         
         lag_dg_z_expr = lag_dg_expr.jacobian(self.y1)
+        lag_dg_z_nonzero_indices = np.where(np.array(lag_dg_z_expr.tolist()).flatten() != 0)[0]
         lag_dg_z_ = smp.lambdify((self.y, self.y1, ham_exprs['omega2']), lag_dg_z_expr, 'numpy')
-        # lag_dg_z_ = lambda y, omega2: _lag_dg_z_(*y, omega2)
 
         return {
             'lag_dg_expr': lag_dg_expr,
             'lag_dg_': lag_dg_,
             'lag_dg_z_expr': lag_dg_z_expr,
-            'lag_dg_z_': lag_dg_z_
+            'lag_dg_z_': lag_dg_z_,
+            'lag_dg_z_nonzero_indices': lag_dg_z_nonzero_indices
         }
 
     def compute_constraints(self):
@@ -178,16 +180,17 @@ class SymbolicComputer:
 
         g_expr = smp.Matrix(row_norms + ddt_row_norms)
         g_prime_expr = g_expr.jacobian(self.y)
+        g_prime_nonzero_indices = np.where(np.array(g_prime_expr.tolist()).flatten() != 0)[0]
 
         g_lam = smp.lambdify((self.y,), g_expr, modules=['numpy'])
         g_prime_lam = smp.lambdify((self.y,), g_prime_expr, modules=['numpy'])
-        # g_lam = lambda x: _g_lam(x).squeeze()
         
         return {
             'g_expr': g_expr,
             'g_prime_expr': g_prime_expr,
             'g_': g_lam,
-            'g_prime_': g_prime_lam
+            'g_prime_': g_prime_lam,
+            'g_prime_nonzero_indices': g_prime_nonzero_indices
         }
     
     @timing
@@ -207,6 +210,14 @@ def load_symbolic_expressions(cls):
         expressions_file = os.path.join('data', f"symbolic_expr_{cls.nosc}.pickle")
         with open(expressions_file, 'rb') as f:
             expressions = pickle.load(f)
+
+        # if expressions does not contain nonzero indices, compute them
+        if 'ham_zz_nonzero_indices' not in expressions:
+            expressions['ham_zz_nonzero_indices'] = np.where(np.array(expressions['ham_zz_expr'].tolist()).flatten() != 0)[0]
+        if 'lag_dg_z_nonzero_indices' not in expressions:
+            expressions['lag_dg_z_nonzero_indices'] = np.where(np.array(expressions['lag_dg_z_expr'].tolist()).flatten() != 0)[0]
+        if 'g_prime_nonzero_indices' not in expressions:
+            expressions['g_prime_nonzero_indices'] = np.where(np.array(expressions['g_prime_expr'].tolist()).flatten() != 0)[0]
         print("Loaded symbolic expressions from disk.")
     except (FileNotFoundError, pickle.UnpicklingError):
         # Compute and save if loading fails
@@ -235,7 +246,7 @@ class MechSystem:
     """Class of MechSystem methods"""
     
     # Load or compute expressions once at module level
-    keep_time = datetime.now().strftime('%Y-%m-%d_')  #_%H-%M_')
+    keep_time = datetime.now().strftime('%Y-%m-%d_%H')  #_%H-%M_')
     data_folder = os.path.join('data', keep_time)
     if not os.path.exists(data_folder):
         os.makedirs(data_folder)
@@ -248,28 +259,56 @@ class MechSystem:
     w_values = [1]
     assert np.isclose(sum(w_values), 1), 'sum_i w_i must be 1'
 
-    dt_space_dim = 2
+    dt_space_dim = 3
     dt_space = np.logspace(-2.5, -2, num=dt_space_dim)
-    T_final = 1
+    T_final = 0.1
 
     "Fixed-point nonliner equations solver properties"
-    tol, M, var, store = 1.0E-10, 100, True, False
+    tol, M, var, store = 1.0E-12, 100, True, False
 
     # parameter space: frequency of the oscillators -- omega^2
-    # TODO: seed random generators
     nosc = 16*3
-    _Omega2_space_dim = 4
+    assert nosc%6 == 0, 'nosc is not exactly divisible by 6'
+    _Omega2_space_dim = 1
     _Omega2_space = np.sort(10 * (1 - rng.random((_Omega2_space_dim, nosc // 3 - 2))))
-    # _Omega2_space[:, 2*_Omega2_space_dim-1:] = _Omega2_space[0, 2*_Omega2_space_dim-1:] # Only first _Omega2_space_dim-1 columns are random
+    # _Omega2_space[:, 1*_Omega2_space_dim-1:] = _Omega2_space[0, 1*_Omega2_space_dim-1:] # Only first _Omega2_space_dim-1 columns are random
 
     JJ = lambda self, d=nosc: r_[c_[zeros((d, d)), eye(d)], c_[-eye(d), zeros((d, d))]]
 
     "Initial conditions satisfying the constraints"
     # Create a tensor to store the positions
-    i = np.arange(nosc//3)
-    positions = np.stack((i % 2 + 0*(i // 2 % 2) * 1e-1, 
-                          i // 2 + 0*(-1)**(i // 2) * 1e-1, 
-                          np.zeros_like(i)), axis=1)
+    _i = np.arange(nosc//3//2)
+    # positions = np.stack((_i % 2 + 0*(_i // 2 % 2) * 1e-1, 
+    #                       _i // 2 + 0*(-1)**(_i // 2) * 1e-1, 
+    #                       np.zeros_like(_i)), axis=1)
+    
+    # Calculate helix positions
+    _radius = 0.5
+    _pitch = 0.5 * nosc/18  # Scale pitch with number of particles
+    _t = _i * 2 * np.pi / (nosc//3)
+    _phase = np.pi
+
+    positions_1 = np.stack((
+        _radius * np.cos(_t),
+        _radius * np.sin(_t),
+        _pitch * _t / (2*np.pi)
+    ), axis=1)
+
+    positions_2 = np.stack((
+        _radius * np.cos(_t + _phase),
+        _radius * np.sin(_t + _phase),
+        _pitch * _t / (2*np.pi)
+    ), axis=1)
+
+    # Combine the two helices, interleaving their positions
+    positions = np.zeros((nosc//3, 3))
+    positions[::2] = positions_1
+    positions[1::2] = positions_2
+
+    # Assert that the corresponding coordinates of positions_1 and positions_2 are distant 1 apart
+    distances = np.linalg.norm(positions[::2] - positions[1::2], axis=1)
+    assert np.allclose(distances, 1), "The corresponding coordinates of positions_1 and positions_2 are not distant 1 apart."
+
     positions = positions.flatten().reshape(-1, 1)
 
     momenta = np.zeros((nosc//3, 3))
@@ -526,5 +565,5 @@ class MechSystem:
 #%% main
 if __name__ == '__main__':
     pass
-    # system = MechSystem({'nosc': 16*3})
-    # print(f"Shape of g_prime_expr: {system.g_prime_expr.flatten().shape}")
+    system = MechSystem({'nosc': 16*3})
+    print(f"Shape of g_prime_expr: {system.g_prime_expr.tolist().flatten().shape}")

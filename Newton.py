@@ -73,8 +73,10 @@ def fixed_point(g, x, dgdx, tol, M, store):
     
     if isinstance(dgdx, tuple):
         dgdx_0, dgdx_1 = dgdx[0], lambda x: dgdx[1](0.5 * (x[0]+x[1]))
+    elif isinstance(dgdx, list):
+        dgdx_0, dgdx_1 = dgdx[0], lambda x: dgdx[1](x)
     else:
-        dgdx_0, dgdx_1 = dgdx, lambda x: dgdx(x[0])
+        raise TypeError("dgdx must be a tuple or list")
 
     if store:
         info = [(m, x[1])]
@@ -95,7 +97,7 @@ def fixed_point(g, x, dgdx, tol, M, store):
             
         # Update m and x[0]
         m += 1
-        x[0] = x[1]
+        # x[0] = x[1]
 
         # Store iteration history
         if store:

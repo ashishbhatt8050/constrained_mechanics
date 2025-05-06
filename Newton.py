@@ -51,7 +51,7 @@ def Newton(f, x, dfdx, tol, M, store):
     else:
         return x, m, f_value
     
-def fixed_point(g, x, dgdx, tol, M, store):
+def fixed_point(g, x, dgdx, tol, M, Lambda):
     """
     Fixed point iteration method.
 
@@ -61,7 +61,7 @@ def fixed_point(g, x, dgdx, tol, M, store):
     dgdx (function): The derivative of the function.
     tol (float): The tolerance for convergence.
     M (int): The maximum number of iterations.
-    store (bool): Whether to store the iteration history.
+    Lambda (array): The initial value for Lambda.
 
     Returns:
     x (array): The fixed point.
@@ -78,9 +78,6 @@ def fixed_point(g, x, dgdx, tol, M, store):
     else:
         raise TypeError("dgdx must be a tuple or list")
 
-    if store:
-        info = [(m, x[1])]
-
     # Fixed point iteration
     while LA.norm(g(x[1])) > tol and m < M:
         try:
@@ -90,6 +87,7 @@ def fixed_point(g, x, dgdx, tol, M, store):
 
             x[1] -= dgdx_1(x).T @ Delta_Lambda
         except (TypeError, AttributeError):
+            raise NotImplementedError("fixed point iteration not implemented for scalar g")
             # Handle the case when g is a scalar
             R = dgdx_0(x[1]) * dgdx_1(x)
             Delta_Lambda = g(x[1]) / R
@@ -98,10 +96,6 @@ def fixed_point(g, x, dgdx, tol, M, store):
         # Update m and x[0]
         m += 1
         # x[0] = x[1]
-
-        # Store iteration history
-        if store:
-            info.append((m, x[1], Delta_Lambda))
         
     # Check convergence
     if m >= M:

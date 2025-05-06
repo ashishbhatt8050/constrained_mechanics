@@ -35,6 +35,7 @@ from pylab import  log, r_, c_, sqrt, reshape, linspace, roll, figure
 import concurrent.futures
 
 import os
+import sys
 import gc
 from joblib import dump, load
 from functools import partial, wraps
@@ -47,7 +48,7 @@ rc('text.latex', preamble=r'\usepackage{amsfonts}')  # Load AMSFonts for Fraktur
 
 from ODESolver import (ConformalStormerVerlet, ConformalImplicitMidpoint, 
                       DiscreteGradient)
-from Newton import fixed_point
+# from Newton import fixed_point
 from System import MechSystem  # Keep for static properties
 from podDEIM import POD, PSD, DEIM
 from PlotScript import plot_data, tex_table, logplot, timing
@@ -57,9 +58,9 @@ def compose_solver_solves(func):
     @wraps(func)
     def wrapper(self, y_, k):
         for w_val in self.w_values:
-            y_, y_full_ = func(self, w_val, y_, k)
+            y_, y_full_, Lambda = func(self, w_val, y_, k)
                 
-        return y_, y_full_
+        return y_, y_full_, Lambda
     return wrapper
 
 class ReduceMechSystem(MechSystem):
@@ -409,10 +410,10 @@ class BaseSolverMixin:
         if self.store: self.info.append(np.array(info_[0::1]))
 
         if self.constraint_type:
-            fixed_point(self.g, y_, self.g_prime, self.tol, self.M, False)
-            # temp = self.g(y_)
+            Lambda = np.zeros_like(self.g(y_[0]))
+            self.fixed_point(y_, Lambda)
 
-        return (y_, y_ @ self.RB.T) if self.RB is not None else (y_, y_)
+        return (y_, y_ @ self.RB.T, Lambda) if self.RB is not None else (y_, y_, Lambda)
 
     @timing
     def solve_trajectory(self):
@@ -426,6 +427,7 @@ class BaseSolverMixin:
 
         self.y[0] = self.y_init
         if self.store: self.info = []
+        self.Lambda = np.zeros((self.n+1, self.g(self.y_init).shape[0]))
     
         # Calculate update frequency (10% of iterations)
         update_freq = max(1, self.n // 10)  
@@ -442,7 +444,7 @@ class BaseSolverMixin:
                 if self.store: self.info.append(self.y[k])
                 y_ = np.array([self.y[k], self.y[k]])
                 
-                y_, y_full_ = self.solve_for_w(y_, k)
+                y_, y_full_, self.Lambda[k+1] = self.solve_for_w(y_, k)
                 
                 self.y[k+1] = y_[-1]
                 
@@ -464,8 +466,10 @@ class BaseSolverMixin:
             self.info = np.vstack(self.info)
 
         if self.RB is not None:
-            self.y_red = self.y
-            self.y = self.y_full
+            self.y_red = self.y.copy()
+            self.y = self.y_full.copy()
+            del self.y_full
+            gc.collect()
 
     @staticmethod
     def solve_mech_system(solver_class, dt, Omega2, kwds):
@@ -588,7 +592,7 @@ class BaseSolverMixin:
         kwds_file = os.path.join(checkpoint_path, 'kwds_r.joblib')
         solvers_file = os.path.join(checkpoint_path, 'solvers_r.joblib')
 
-        if os.path.exists(checkpoint_path) and os.path.exists(kwds_file) and os.path.exists(solvers_file):
+        if False and os.path.exists(checkpoint_path) and os.path.exists(kwds_file) and os.path.exists(solvers_file):
             try:
                 print("Loading from checkpoint...")
                 kwds = load(kwds_file)
@@ -728,12 +732,8 @@ class BaseSolverMixin:
                 ax0.set_ylim([-1e-15, 1e-15])
 
         if hasattr(self, 'g__lambda'):
-            if self.RB is None:
-                temp = np.vstack([self.g__lambda(y) for y in self.y])
-            else:
-                temp = np.vstack([self.g__lambda(y) for y in self.y_full])
+            g_norm = [LA.norm(self.g__lambda(y)) for y in self.y]
 
-            g_norm = LA.norm(temp, axis=1)
             plot_data(ax1, self.t_points, g_norm, xlims=(0, self.T_final), \
                     ylabel=r'$\Delta \mathfrak{P}$', margins=1)
 
@@ -778,13 +778,20 @@ class BaseSolverMixin:
             ax_pp.scatter(coords[0, i, 0], coords[0, i, 1], coords[0, i, 2], s=20, c='teal')  # plot initial configuration
             ax_pp.plot(coords[:, i, 0], coords[:, i, 1], coords[:, i, 2], 'k-')  # plot system evolution
 
+            # Plot projection onto x-y plane (z=0)
+            ax_pp.plot(coords[:, i, 0], coords[:, i, 1], np.zeros_like(coords[:, i, 2]), 'r--', alpha=0.7)
+
         # Set the axes' labels and title
         ax_pp.set_xlabel('x')
         ax_pp.set_ylabel('y')
         ax_pp.set_zlabel('z')
         ax_pp.set_title('Phase portrait')
-        ax_pp.view_init(elev=0, azim=45)  # Front-ish view
-
+        # ax_pp.set_xlim([coords[:, :, 0].min(), coords[:, :, 0].max()])
+        # ax_pp.set_ylim([coords[:, :, 1].min(), coords[:, :, 1].max()])        
+        # ax_pp.set_zlim([coords[:, :, 2].min(), coords[:, :, 2].max()])    
+        ax_pp.view_init(elev=15, azim=45)
+        
+        # Hide inner labels
         for ax in [ax0, ax1, ax2, ax3, ax4]:
             ax.label_outer()
 
@@ -805,21 +812,164 @@ class DiscreteGradientSolver(BaseSolverMixin, DiscreteGradient):
     def _g_prime_with_JJ(self, y): #New class method
         return self.g_prime__(y) @ self.JJ.T
         
+    def fixed_point(self, x, Lambda):
+        """
+        Fixed point iteration method.
+
+        Parameters:
+        x (array): The initial guess.
+        Lambda (array): The initial value for Lambda.
+        """
+
+        # Initialize counter
+        m = 0
+        dgdx_0, dgdx_1 = self.g_prime[0], lambda x: self.g_prime[1](0.5 * (x[0]+x[1]))
+
+        i0, i1 = (dim // 2 for dim in dgdx_0(x[0]).shape)
+
+        # Fixed point iteration
+        while LA.norm(self.g(x[1])) > self.tol and m < self.M:
+
+            # Update R and Delta_Lambda
+            R = self.dt * dgdx_0(x[0]) @ dgdx_1(x).T
+            R[i0:, i0:] = 0
+            Delta_Lambda = -LA.solve(R, self.g(x[1]))
+
+            x[1] += self.dt * dgdx_1(x).T @ Delta_Lambda
+            Lambda += Delta_Lambda
+
+            # Update m
+            m += 1
+            
+        # Check convergence
+        if m >= self.M:
+            raise RuntimeError("Nonlinear solver did not converge")
+
+        '''
+        x1 = x[1]
+
+        while LA.norm(self.g(x[1])[i0:]) > self.tol and m < self.M:
+
+            _g_prime = self.g_prime(x[1])
+            G11 = _g_prime[:i0, :i1]
+            G22 = _g_prime[i0:, i1:]
+
+            _g_prime = self.g_prime((x[0]+x[1]) * 0.5)
+            G11_dg = _g_prime[:i0, :i1]
+            G22_dg = _g_prime[i0:, i1:]
+
+            # Update R and Delta_Lambda
+            R = self.dt * np.block([
+                [G11 @ G22_dg.T, np.zeros((i0, i0))],
+                [np.zeros((i0, i0)), - G22 @ G11_dg.T]
+            ])
+            
+            Delta_Lambda = LA.solve(R, self.g(x[1]))
+            Lambda_v -= Delta_Lambda
+            Lambda_v[:i0] = Lambda_r[:i0]
+
+            x[1, self.neq//2:] = (x1 + self.dt * self.JJ @ _g_prime.T @ permute @ Lambda_v)[self.neq//2:]
+                
+            # Update m
+            m += 1
+
+            print(f"Iteration {m}: norm(g(x[1])) = {LA.norm(self.g(x[1]))}")
+            
+        # Check convergence
+        if m >= self.M:
+            raise RuntimeError("Nonlinear solver did not converge")
+        '''
+        
+        
 class ConformalStormerVerletSolver(BaseSolverMixin, ConformalStormerVerlet):
     """CSVSolver with Hamiltonian capabilities"""
     def __init__(self, kwds):
         super().__init__(kwds)
         self.g = self.g__
-        self.g_prime = [self.g_prime__, self.block_diag_matrix]
+        self.g_prime = (self.g_prime_diag, self.block_diag_matrix)
 
     def block_diag_matrix(self, y):
         """Compute g_prime using the original method"""
-        _g_prime_shape = self.g_prime__(y[0]).shape
+
+        ham_zz_y3 = self.ham_zz(y[3])
+        i0, i1 = ham_zz_y3.shape
+        i0, i1 = i0//2, i1//2
+        ham_zz_y3_22 = ham_zz_y3[i0:, i1:]
+        
+        i0, i1 = self.g_prime__(y[0]).shape
+        i0, i1 = i0//2, i1//2
+
         result = np.block([
-            [self.g_prime__(y[0])[:_g_prime_shape[0]//2, :_g_prime_shape[1]//2], np.zeros((_g_prime_shape[0]//2, _g_prime_shape[1]//2))],
-            [np.zeros((_g_prime_shape[0]//2, _g_prime_shape[1]//2)), self.g_prime__(y[1])[:_g_prime_shape[0]//2, :_g_prime_shape[1]//2]]
+            [-0.25 * self.dt**2 * (self.g_prime__(y[2])[i0:, i1:] + self.g_prime__(y[0])[:i0, :i1] @ ham_zz_y3_22), np.zeros((i0, i1))],
+            [np.zeros((i0, i1)), -0.5 * self.dt * self.g_prime__(y[1])[i0:, i1:]]
         ])
         return result
+    
+    def g_prime_diag(self, y):
+        """Compute g_prime using the original method"""
+        _g_prime = self.g_prime__(y)
+        i0, i1 = _g_prime.shape
+        _g_prime_11 = _g_prime[:i0//2, :i1//2]
+        result = np.block([
+            [_g_prime_11, np.zeros(_g_prime_11.shape)],
+            [np.zeros(_g_prime_11.shape), _g_prime_11]
+        ])
+        return result
+        
+    def fixed_point(self, x, Lambda):
+        """
+        Fixed point iteration method.
+
+        Parameters:
+        x (array): The initial guess.
+        Lambda (array): The initial value for Lambda.
+        """
+
+        # Initialize counter
+        m = 0
+        g, dgdx = self.g, self.g_prime
+
+        if isinstance(dgdx, tuple):
+            dgdx_0, dgdx_1 = dgdx[0], lambda x: dgdx[1](x)
+        else:
+            raise TypeError("dgdx must be a tuple of functions")
+        
+        # Split u into two parts for easier manipulation
+        f, neq, dt = self.f, self.neq//2, self.dt
+        q0, p0 = np.split(x[0], 2)
+
+        # Calculate intermediate values
+        p_half = p0 + 0.5 * dt * f(x[0], None)[neq:]
+        x_23 = np.array([np.concatenate([q0, p_half]), np.concatenate([x[1, :neq], p_half])])
+
+        g_prime_x0 = dgdx_0(x[0])
+        i0, i1 = g_prime_x0.shape
+        i0, i1 = i0//2, i1//2
+        _g_prime_x0_11 = g_prime_x0[:i0, :i1].T
+
+        # Fixed point iteration
+        while LA.norm(g(x[1])) > self.tol and m < self.M:
+            # Update R and Delta_Lambda
+            R = dgdx_0(x[1]) @ dgdx_1(r_[x, x_23]).T
+            Delta_Lambda = LA.solve(R, g(x[1]))
+            Lambda -= Delta_Lambda
+
+            Lambda_1, Lambda_2 = np.split(Lambda, 2)
+            p_half1 = p_half - 0.5 * dt * _g_prime_x0_11 @ Lambda_1
+            x[1, :neq] = q0 + dt * f(np.concatenate([q0, p_half1]), None)[:neq]
+
+            _g_prime_x1_11 = dgdx_0(x[1])[:i0, :i1].T
+            x[1, neq:] = p_half1 + 0.5 * dt * f(r_[x[1, :neq], p_half1], None)[neq:] - 0.5 * dt * _g_prime_x1_11 @ Lambda_2
+            x_23 = np.array([np.concatenate([q0, p_half1]), np.concatenate([x[1, :neq], p_half1])])
+                
+            # Update m
+            m += 1
+            # x[0] = x[1]
+            
+        # Check convergence
+        if m >= self.M:
+            raise RuntimeError("Nonlinear solver did not converge")
+
 
 class ConformalImplicitMidpointSolver(BaseSolverMixin, ConformalImplicitMidpoint):
     """CIMSolver with Hamiltonian capabilities"""
@@ -846,7 +996,7 @@ if __name__ == '__main__':
     #%% Full order solution
     kwds = {
         'registered_solver_classes': [
-            ConformalImplicitMidpointSolver,
+            # ConformalImplicitMidpointSolver,
             DiscreteGradientSolver,
             ConformalStormerVerletSolver,
         ]
@@ -867,7 +1017,7 @@ if __name__ == '__main__':
     kwds_file = os.path.join(checkpoint_path, 'kwds.joblib')
     solvers_file = os.path.join(checkpoint_path, 'solvers.joblib')
 
-    if os.path.exists(checkpoint_path) and os.path.exists(kwds_file) and os.path.exists(solvers_file):
+    if False and os.path.exists(checkpoint_path) and os.path.exists(kwds_file) and os.path.exists(solvers_file):
         try:
             print("Loading from checkpoint...")
             kwds = load(kwds_file)

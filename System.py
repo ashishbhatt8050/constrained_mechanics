@@ -246,7 +246,7 @@ class MechSystem:
     """Class of MechSystem methods"""
     
     # Load or compute expressions once at module level
-    keep_time = datetime.now().strftime('%Y-%m-%d_%H')  #_%H-%M_')
+    keep_time = datetime.now().strftime('%Y-%m-%d')  #_%H-%M_')
     data_folder = os.path.join('data', keep_time)
     if not os.path.exists(data_folder):
         os.makedirs(data_folder)
@@ -259,17 +259,16 @@ class MechSystem:
     w_values = [1]
     assert np.isclose(sum(w_values), 1), 'sum_i w_i must be 1'
 
-    dt_space_dim = 3
-    dt_space = np.logspace(-2.5, -2, num=dt_space_dim)
-    T_final = 0.1
-
+    dt_space_dim = 1
+    dt_space = np.round(np.logspace(-2.5, -2, num=dt_space_dim), 5)
+    T_final = 1
     "Fixed-point nonliner equations solver properties"
     tol, M, var, store = 1.0E-12, 100, True, False
 
     # parameter space: frequency of the oscillators -- omega^2
     nosc = 16*3
     assert nosc%6 == 0, 'nosc is not exactly divisible by 6'
-    _Omega2_space_dim = 1
+    _Omega2_space_dim = 3
     _Omega2_space = np.sort(10 * (1 - rng.random((_Omega2_space_dim, nosc // 3 - 2))))
     # _Omega2_space[:, 1*_Omega2_space_dim-1:] = _Omega2_space[0, 1*_Omega2_space_dim-1:] # Only first _Omega2_space_dim-1 columns are random
 

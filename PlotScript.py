@@ -17,6 +17,8 @@ import os
 import pickle
 from functools import wraps
 from time import time
+import math
+import numpy as np
 
 # Set up plot parameters
 bmap = brewer2mpl.get_map('Set2', 'qualitative', 7)
@@ -85,28 +87,50 @@ def plot_data(ax, x_data, y_data, xlims=None, ylabel=None, margins=None):
 
 def logplot(y_data, xlabel=None, xlims=None):
     """
-    Create a log plot.
+    Create log plots for each element in y_data, arranged in a square grid.
+    Backward compatible: if y_data is a 1D array, plot it as a single subplot.
 
     Parameters:
-    y_data (numpy array): The y-coordinates of the data.
+    y_data (list or numpy array): Each element is the y-coordinates for a subplot,
+                                  or a single 1D array for one plot.
     xlabel (str, optional): The x-axis label. Defaults to None.
     xlims (list, optional): The x-axis limits. Defaults to None.
 
     Returns:
     fig (matplotlib figure): The figure.
-    ax (matplotlib axis): The axis.
+    axes (numpy array of matplotlib axes): The axes.
     """
-    fig, ax = plt.subplots()
-    configure_axis(ax)
-    ax.semilogy(y_data, linewidth=2)
-    if xlabel is not None: ax.set_xlabel(xlabel)
-    if xlims is not None:
-        # Set the x-axis ticks to include both min and max values
-        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-        ax.set_xticks([xlims[0]] + list(ax.get_xticks()) + [xlims[1]])
-        ax.set_xlim(xlims)  # Extend the x-axis slightly beyond the max value
-    ax.margins(0.1)
-    return fig, ax
+
+    # If y_data is a single 1D array, wrap it in a list for compatibility
+    if isinstance(y_data, np.ndarray) and y_data.ndim == 1:
+        y_data = [y_data]
+        xlims = [xlims]
+    elif isinstance(y_data, list) and (len(y_data) > 0) and isinstance(y_data[0], (np.ndarray, list)):
+        # Already a list of arrays
+        pass
+    else:
+        # Try to convert to list of arrays
+        y_data = [np.array(y_data)]
+
+    n = len(y_data)
+    grid_size = math.ceil(math.sqrt(n))
+    fig, axes = plt.subplots(grid_size, grid_size, figsize=(5*grid_size, 4*grid_size))
+    axes = np.array(axes).flatten()
+    for i, yd in enumerate(y_data):
+        ax = axes[i]
+        configure_axis(ax)
+        ax.semilogy(yd, linewidth=2)
+        if xlabel is not None:
+            ax.set_xlabel(xlabel)
+        if xlims[i] is not None:
+            ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+            ax.set_xticks([xlims[i][0]] + list(ax.get_xticks()) + [xlims[i][1]])
+            ax.set_xlim(xlims[i])
+        ax.margins(0.1)
+    # Hide unused subplots
+    for j in range(n, grid_size*grid_size):
+        fig.delaxes(axes[j])
+    return fig, axes[:n]
 
 def save_figure(fig, filename):
     """
@@ -148,7 +172,7 @@ def tex_table(solver_name, array2print):
     solver_name (str): The name of the solver.
     array2print (list of lists): The data to print.
     """
-    print(solver_name, "\n", " \\\\\n".join([" & ".join(map('{0:.3f}'.format, line)) \
+    print(solver_name, "\n", " \\\\\n".join([" & ".join(map('{0:.6f}'.format, line)) \
                                              for line in array2print]))
     
     

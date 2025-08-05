@@ -180,6 +180,20 @@ class SymbolicComputer:
 
         g_expr = smp.Matrix(row_norms + ddt_row_norms)
         g_prime_expr = g_expr.jacobian(self.y)
+
+        g_expr_len = g_expr.rows
+
+        lag_mult = smp.Matrix(smp.symbols('gamma_:{}'.format(g_expr_len), real=True))
+
+        g_prime_x_lambda_expr = g_prime_expr.T @ lag_mult
+        g_prime_x_lambda_y_expr = g_prime_x_lambda_expr.jacobian(self.y)
+        g_prime_x_lambda_lambda_expr = g_prime_x_lambda_expr.jacobian(lag_mult)
+        g_prime_x_lambda_y_nonzero_indices = np.where(np.array(g_prime_x_lambda_y_expr.tolist()).flatten() != 0)[0]
+        g_prime_x_lambda_lambda_nonzero_indices = np.where(np.array(g_prime_x_lambda_lambda_expr.tolist()).flatten() != 0)[0]
+
+        g_prime_x_lambda_y_lam = smp.lambdify((self.y, lag_mult), g_prime_x_lambda_y_expr, modules=['numpy'])
+        g_prime_x_lambda_lambda_lam = smp.lambdify((self.y, lag_mult), g_prime_x_lambda_lambda_expr, modules=['numpy'])
+
         g_prime_nonzero_indices = np.where(np.array(g_prime_expr.tolist()).flatten() != 0)[0]
 
         g_lam = smp.lambdify((self.y,), g_expr, modules=['numpy'])
@@ -190,7 +204,15 @@ class SymbolicComputer:
             'g_prime_expr': g_prime_expr,
             'g_': g_lam,
             'g_prime_': g_prime_lam,
-            'g_prime_nonzero_indices': g_prime_nonzero_indices
+            'g_prime_nonzero_indices': g_prime_nonzero_indices,
+            'lag_mult': lag_mult,
+            'g_prime_x_lambda_expr': g_prime_x_lambda_expr,
+            'g_prime_x_lambda_y_expr': g_prime_x_lambda_y_expr,
+            'g_prime_x_lambda_lambda_expr': g_prime_x_lambda_lambda_expr,
+            'g_prime_x_lambda_y_': g_prime_x_lambda_y_lam,
+            'g_prime_x_lambda_lambda_': g_prime_x_lambda_lambda_lam,
+            'g_prime_x_lambda_y_nonzero_indices': g_prime_x_lambda_y_nonzero_indices,
+            'g_prime_x_lambda_lambda_nonzero_indices': g_prime_x_lambda_lambda_nonzero_indices,
         }
     
     @timing
@@ -201,6 +223,26 @@ class SymbolicComputer:
         expressions.update(ham_exprs)
         expressions.update(self.compute_lagrangian(ham_exprs))
         expressions.update(self.compute_constraints())
+
+        g_expr_len = expressions['g_expr'].rows
+
+        lambda_expr = smp.Matrix(smp.symbols('lambda_:{}'.format(g_expr_len), real=True))
+        lambda_expr[g_expr_len//2:, :] = smp.Matrix.zeros(g_expr_len//2, lambda_expr.shape[1])
+
+        g_expr_x_lambda = expressions['g_expr'].T @ lambda_expr
+        expressions['ham_aug_expr'] = expressions['ham_expr'] + (g_expr_x_lambda)[0,0]
+
+        g_prime_expr_x_lambda = expressions['g_prime_expr'].T @ lambda_expr
+        expressions['ham_aug_z_expr'] = expressions['ham_z_expr'] + g_prime_expr_x_lambda
+
+        expressions['ham_aug_zz_expr'] = expressions['ham_zz_expr'] + g_prime_expr_x_lambda.jacobian(self.y)
+        expressions['ham_aug_zz_nonzero_indices'] = np.where(np.array(expressions['ham_aug_zz_expr'].tolist()).flatten() != 0)[0]
+
+        lambda_expr[g_expr_len//2:, :] = lambda_expr[:g_expr_len//2, :]
+        expressions['lambda_expr'] = lambda_expr
+        expressions['ham_aug_'] = smp.lambdify((self.y, lambda_expr, expressions['omega2']), expressions['ham_aug_expr'], 'numpy')
+        expressions['ham_aug_z_'] = smp.lambdify((self.y, lambda_expr, expressions['omega2']), expressions['ham_aug_z_expr'], 'numpy')
+        expressions['ham_aug_zz_'] = smp.lambdify((self.y, lambda_expr, expressions['omega2']), expressions['ham_aug_zz_expr'], 'numpy')
         # return expressions
 
 def load_symbolic_expressions(cls):
@@ -211,13 +253,6 @@ def load_symbolic_expressions(cls):
         with open(expressions_file, 'rb') as f:
             expressions = pickle.load(f)
 
-        # if expressions does not contain nonzero indices, compute them
-        if 'ham_zz_nonzero_indices' not in expressions:
-            expressions['ham_zz_nonzero_indices'] = np.where(np.array(expressions['ham_zz_expr'].tolist()).flatten() != 0)[0]
-        if 'lag_dg_z_nonzero_indices' not in expressions:
-            expressions['lag_dg_z_nonzero_indices'] = np.where(np.array(expressions['lag_dg_z_expr'].tolist()).flatten() != 0)[0]
-        if 'g_prime_nonzero_indices' not in expressions:
-            expressions['g_prime_nonzero_indices'] = np.where(np.array(expressions['g_prime_expr'].tolist()).flatten() != 0)[0]
         print("Loaded symbolic expressions from disk.")
     except (FileNotFoundError, pickle.UnpicklingError):
         # Compute and save if loading fails
@@ -259,16 +294,16 @@ class MechSystem:
     w_values = [1]
     assert np.isclose(sum(w_values), 1), 'sum_i w_i must be 1'
 
-    dt_space_dim = 1
-    dt_space = np.round(np.logspace(-2.5, -2, num=dt_space_dim), 5)
-    T_final = 1
+    dt_space_dim = 3
+    dt_space = np.round(np.logspace(-3, -2, num=dt_space_dim), 10)
+    T_final = dt_space[-1]*50
     "Fixed-point nonliner equations solver properties"
     tol, M, var, store = 1.0E-12, 100, True, False
 
     # parameter space: frequency of the oscillators -- omega^2
     nosc = 16*3
     assert nosc%6 == 0, 'nosc is not exactly divisible by 6'
-    _Omega2_space_dim = 3
+    _Omega2_space_dim = 2
     _Omega2_space = np.sort(10 * (1 - rng.random((_Omega2_space_dim, nosc // 3 - 2))))
     # _Omega2_space[:, 1*_Omega2_space_dim-1:] = _Omega2_space[0, 1*_Omega2_space_dim-1:] # Only first _Omega2_space_dim-1 columns are random
 
@@ -349,6 +384,15 @@ class MechSystem:
 
     def ham_zz_lambda(self, y, beta=0):
         return self.ham_zz_(y, self.Omega2, beta)
+
+    def ham_aug_lambda(self, y):
+        return self.ham_aug_(*y, self.Omega2)
+
+    def ham_aug_z_lambda(self, y):
+        return self.ham_aug_z_(*y, self.Omega2).squeeze()
+
+    def ham_aug_zz_lambda(self, y):
+        return self.ham_aug_zz_(*y, self.Omega2)
 
     def lag_dg_lambda(self, y):
         return self.lag_dg_(*y, self.Omega2).squeeze()
@@ -447,6 +491,16 @@ class MechSystem:
             final += g_prime_result[:, start:end] @ self.RB[start:end, :]
         
         return final
+    
+    def g_prime_x_lambda_y_reduced(self, y, lag_mult):
+        """Compute g_prime_x_lambda_y for reduced order system"""
+        # Compute g_prime_x_lambda_y using the reduced order system
+        return self.RB.T @ self.g_prime_x_lambda_y_(y @ self.RB.T, lag_mult) @ self.RB
+    
+    def g_prime_x_lambda_lambda_reduced(self, y, lag_mult):
+        """Compute g_prime_x_lambda_lambda for reduced order system"""
+        # Compute g_prime_x_lambda_lambda using the reduced order system
+        return self.RB.T @ self.g_prime_x_lambda_lambda_(y @ self.RB.T, lag_mult)
 
     def ham_z_hyperreduced(self, y, beta=0):
         return self.RBxUx_inv_PxU @ self.ham_z_deim(y @ self.RB.T, self.Omega2, beta)
@@ -480,12 +534,21 @@ class MechSystem:
             self._IP_Ux_inv_PxU @ self.g_prime_mdeim(y @ self.RB.T),
             self.g_prime_shape
         ) @ self.RB
+    
+    def g_prime_x_lambda_y_hyperreduced(self, y, lag_mult):
+        """Compute g_prime_x_lambda_y for hyperreduced system"""
+        return self.RB.T @ np.reshape(self.IP_g_prime_x_lambda_y @ self.g_prime_x_lambda_y_mdeim(y @ self.RB.T, lag_mult),
+                                      self.g_prime_x_lambda_y_shape) @ self.RB
+
+    def g_prime_x_lambda_lambda_hyperreduced(self, y, lag_mult):
+        """Compute g_prime_x_lambda_lambda for hyperreduced system"""
+        return self.RB.T @ np.reshape(self.IP_g_prime_x_lambda_lambda @ self.g_prime_x_lambda_lambda_mdeim(y @ self.RB.T, lag_mult),
+                                       self.g_prime_x_lambda_lambda_shape)
 
     def __init__(self, kwds):        
         self.__dict__.update(kwds)        
         if 'pool' in kwds:
             self.__dict__.update(kwds['pool'])
-            
         
         self.beta = (max(1e-2, 0 * rng.random() / 10)) * 0
         
@@ -501,6 +564,14 @@ class MechSystem:
             self.g__ = self.g__lambda
             self.g_prime__ = self.g_prime__lambda
 
+            if self.solver_class.__name__ == 'DiscreteGradientSolver':
+                self.g_prime_x_lambda_y = self.g_prime_x_lambda_y_
+                self.g_prime_x_lambda_lambda = self.g_prime_x_lambda_lambda_
+
+            self.ham_aug = self.ham_aug_lambda
+            self.ham_aug_z = self.ham_aug_z_lambda
+            self.ham_aug_zz = self.ham_aug_zz_lambda
+
         elif (not hasattr(MechSystem, 'RBxUx_inv_PxU')) and (not hasattr(MechSystem, '_RBxUx_inv_PxU_')) and (not hasattr(MechSystem, '_Ux_inv_PxU_dg')) and (not hasattr(MechSystem, '_Ux_inv_PxU')):
             print('Setting reduced order functions...')
             if self.solver_class.__name__ == 'DiscreteGradientSolver':
@@ -508,6 +579,9 @@ class MechSystem:
                 print('Setting RB to RB_dg...')
                 self.RB = self.RB_dg
                 self.nosc_r = self.nosc_r_dg
+
+                self.g_prime_x_lambda_y = self.g_prime_x_lambda_y_reduced
+                self.g_prime_x_lambda_lambda = self.g_prime_x_lambda_lambda_reduced
 
             self.lag_dg = self.lag_dg_reduced
             self.lag_dg_z = self.lag_dg_z_reduced
@@ -527,11 +601,15 @@ class MechSystem:
                 if self.hyperreducer == 'MDEIM':
                     self.IP_Ux_inv_PxU = self._IP_Ux_inv_PxU_
 
-                self._Ux_inv_PxU, self._IP_Ux_inv_PxU = self._Ux_inv_PxU_dg, self._IP_Ux_inv_PxU_dg
+                if self.constraints_reduce:
+                    self._Ux_inv_PxU, self._IP_Ux_inv_PxU = self._Ux_inv_PxU_dg, self._IP_Ux_inv_PxU_dg
 
-                self.g_deim = self.g_deim_dg
-                self.g_prime_mdeim = self.g_prime_mdeim_dg
-                self.g_prime_shape = self.g_prime_shape_dg
+                    self.g_deim = self.g_deim_dg
+                    self.g_prime_mdeim = self.g_prime_mdeim_dg
+                    self.g_prime_shape = self.g_prime_shape_dg
+
+                    self.g_prime_x_lambda_y = self.g_prime_x_lambda_y_hyperreduced
+                    self.g_prime_x_lambda_lambda = self.g_prime_x_lambda_lambda_hyperreduced
                 
             self.lag_dg = self.lag_dg_hyperreduced
             self.lag_dg_z = self.lag_dg_z_hyperreduced
@@ -565,4 +643,4 @@ class MechSystem:
 if __name__ == '__main__':
     pass
     system = MechSystem({'nosc': 16*3})
-    print(f"Shape of g_prime_expr: {system.g_prime_expr.tolist().flatten().shape}")
+    print(f"Shape of g_prime_expr: {system.g_prime_expr.shape}")

@@ -30,6 +30,7 @@ Main driver:
 import numpy as np
 import sympy as smp
 from numpy import linalg as LA
+from scipy import linalg as scipyLA
 from pylab import  log, r_, c_, sqrt, reshape, linspace, roll, figure
 
 import concurrent.futures
@@ -40,7 +41,6 @@ import gc
 from joblib import dump, load
 from functools import partial, wraps
 from tqdm.auto import tqdm  # Use tqdm.auto for better process handling
-import psutil
 
 from matplotlib import rc
 rc('text', usetex=True)  # Enable LaTeX rendering
@@ -152,12 +152,21 @@ class ReduceMechSystem(MechSystem):
             compute_reduced_basis("DiscreteGradient", solvers[0].lag_dg, ["RB_dg", "nosc_r_dg"])
 
     @classmethod
-    def setup_hyperreduction(cls, solvers):
+    def setup_hyperreduction(cls):
         """Setup hyperreduction as classmethod"""
         print('Setting up hyperreduction...')
         
         def compute_hyperreduction_basis(solver_type, expr, attr, deim_attr_name, deim_func_name, expr_z=None, mdeim_func_name=None):
-            P, _ = DEIM(attr, plot_deim=False)
+            attr_11 = attr[:cls.nosc, :cls.nosc_r] if solver_type == "Hamiltonian" else attr[:cls.nosc, :cls.nosc_r_dg]
+            P11, _ = DEIM(attr_11, plot_deim=False)
+
+            attr_22 = attr[cls.nosc:, cls.nosc_r:] if solver_type == "Hamiltonian" else attr[cls.nosc:, cls.nosc_r_dg:]
+            P22, _ = DEIM(attr_22, plot_deim=False)
+
+            P = np.block([
+                [P11, np.zeros((P11.shape[0], P22.shape[1]))],
+                [np.zeros((P22.shape[0], P11.shape[1])), P22]
+            ])
             setattr(MechSystem, deim_attr_name, attr.T @ attr @ LA.inv(P.T @ attr))
             print(f'{P.shape = }')
             
@@ -321,75 +330,105 @@ class ReduceMechSystem(MechSystem):
         print('Computing constraints reduction...')
         
         def compute_constraint_basis(func_name, expr, is_g_prime=False):
-            """Helper function to compute MDEIM basis for constraints"""
+            """
+            Helper function to compute MDEIM basis for constraints.
+            Supports g, g_prime, g_prime_x_lambda_y, and g_prime_x_lambda_lambda.
+            """
             print(f'Computing {func_name} reduction...')
-            
-            # Handle g_prime specific setup
-            if is_g_prime:
-                g_prime_shape = solvers[0].g_prime__(solvers[0].y[0]).shape
-                setattr(MechSystem, 'g_prime_shape' if solver_type == "Hamiltonian" else 'g_prime_shape_dg', g_prime_shape)
 
-                non_zero_indices = getattr(cls, func_name + "_nonzero_indices")
+            # Determine if this is a "prime" type (g_prime, g_prime_x_lambda_y, g_prime_x_lambda_lambda)
+            prime_types = ['g_prime_', 'g_prime_x_lambda_y_', 'g_prime_x_lambda_lambda_']
+            is_prime_type = is_g_prime or func_name in prime_types
+
+            if is_prime_type:
+                # Get shape for the prime constraint
+                if func_name in ['g_prime_x_lambda_y_', 'g_prime_x_lambda_lambda_']:
+                    g_prime_shape = solvers[0].__getattribute__(func_name)(solvers[0].y[0], solvers[0].Lambda[0]).shape
+                else:
+                    g_prime_shape = solvers[0].__getattribute__(func_name)(solvers[0].y[0]).shape
+                setattr(MechSystem, func_name + 'shape' if solver_type == "Hamiltonian" else func_name + 'shape_dg', g_prime_shape)
+
+                non_zero_indices = getattr(cls, func_name + "nonzero_indices")
                 IP = np.zeros((len(non_zero_indices), np.prod(g_prime_shape)), dtype=np.int8)
                 IP[np.arange(len(non_zero_indices)), non_zero_indices] = 1
-                
-                # Create snapshot matrix for g_prime
-                F = np.hstack([np.array([IP @ solver.g_prime__(y).flatten() 
-                            for y in solver.y[indices]]).T 
-                            for solver, indices in zip(solvers, indices_list)])
+
+                # Create snapshot matrix for prime constraints
+                F = np.hstack([
+                    np.array([
+                    IP @ (
+                        solver.__getattribute__(func_name)(y, Lambda).flatten()
+                        if func_name in ['g_prime_x_lambda_y_', 'g_prime_x_lambda_lambda_']
+                        else solver.g_prime__(y).flatten()
+                    )
+                    for y, Lambda in zip(solver.y[indices], solver.Lambda[indices])
+                    ]).T
+                    for solver, indices in zip(solvers, indices_list)
+                ])
             else:
                 # Create snapshot matrix for g
-                F = np.hstack([np.array([solver.g(y) + 0 
-                            for y in solver.y[indices]]).T 
-                            for solver, indices in zip(solvers, indices_list)])
-            
+                F = np.hstack([
+                    np.array([solver.g(y) for y in solver.y[indices]]).T
+                    for solver, indices in zip(solvers, indices_list)
+                ])
+
             # Compute POD basis and plot singular values
             Uj, sv, _ = POD(F, np.eye(F.shape[0]), cls.tol)
             del F
-            
-            # Plot singular values
-            fig, ax = logplot(sv, xlabel=f'index of singular values of {func_name}', xlims=(1, len(sv)))
-            
+
             # Compute DEIM points and interpolation matrix
             Pj, _ = DEIM(Uj, plot_deim=False)
-            
-            if is_g_prime:
+
+            if is_prime_type:
                 basis = IP.T @ Uj @ LA.inv(Pj.T @ Uj)
                 # Create lambdified function
                 col = Pj.T @ IP @ expr.reshape(np.prod(g_prime_shape), 1)
             else:
                 basis = Uj @ LA.inv(Pj.T @ Uj)
-                # Create lambdified function
                 col = Pj.T @ expr
-                
+
             print(f'{basis.shape = }')
-            
+
             # Create and wrap lambdified function
-            mdeim_func = smp.lambdify((cls.y,), col, modules=['scipy'])
-            
+            # Handle argument signature for g_prime_x_lambda_y and g_prime_x_lambda_lambda
+            if func_name in ['g_prime_x_lambda_y_', 'g_prime_x_lambda_lambda_']:
+                mdeim_func = smp.lambdify((cls.y, cls.lag_mult), col, modules=['scipy'])
+            else:
+                mdeim_func = smp.lambdify((cls.y,), col, modules=['scipy'])
+
             if callable(mdeim_func) and not isinstance(mdeim_func, type):
                 wrapped = (lambda f: lambda self, *args, **kwargs: f(*args, **kwargs))(mdeim_func)
                 # Set attributes based on solver type
                 if solver_type == "Hamiltonian":
-                    setattr(MechSystem, f'{func_name}_{"mdeim" if is_g_prime else "deim"}', wrapped)
+                    setattr(MechSystem, f'{func_name}{"mdeim" if is_prime_type else "deim"}', wrapped)
                 else:  # DiscreteGradient
-                    setattr(MechSystem, f'{func_name}_{"mdeim" if is_g_prime else "deim"}_dg', wrapped)
+                    setattr(MechSystem, f'{func_name}{"mdeim" if is_prime_type else "deim"}_dg', wrapped)
             else:
-                print(f"Memory address of {func_name}_{'mdeim' if is_g_prime else 'deim'}: {hex(id(mdeim_func))}")
-                
-            return basis
+                print(f"Memory address of {func_name}{'mdeim' if is_prime_type else 'deim'}: {hex(id(mdeim_func))}")
+
+            return basis, sv
         
         # Compute bases for g and g_prime
-        _Ux_inv_PxU = compute_constraint_basis('g', cls.g_expr)
-        _IP_Ux_inv_PxU = compute_constraint_basis('g_prime', cls.g_prime_expr, is_g_prime=True)
-        
+        _Ux_inv_PxU, sv_g = compute_constraint_basis('g_', cls.g_expr)
+        _IP_Ux_inv_PxU, sv_g_prime = compute_constraint_basis('g_prime_', cls.g_prime_expr, is_g_prime=True)
+
+        # Also compute bases for cls.g_prime_x_lambda_y and cls.g_prime_x_lambda_lambda
+        IP_g_prime_x_lambda_y, sv_g_prime_x_lambda_y = compute_constraint_basis('g_prime_x_lambda_y_', cls.g_prime_x_lambda_y_expr, is_g_prime=True)
+        IP_g_prime_x_lambda_lambda, sv_g_prime_x_lambda_lambda = compute_constraint_basis('g_prime_x_lambda_lambda_', cls.g_prime_x_lambda_lambda_expr, is_g_prime=True)
+
+        # Plot singular values for g, g_prime, g_prime_x_lambda_y and g_prime_x_lambda_lambda using logplot, pass the singular values and xlims as a list
+        fig, ax = logplot([sv_g, sv_g_prime, sv_g_prime_x_lambda_y, sv_g_prime_x_lambda_lambda], xlabel=f'index of singular values', xlims=[(1, len(sv_g)), (1, len(sv_g_prime)), (1, len(sv_g_prime_x_lambda_y)), (1, len(sv_g_prime_x_lambda_lambda))])
+
         # Set attributes based on solver type
         if solver_type == "Hamiltonian":
             setattr(MechSystem, '_Ux_inv_PxU', _Ux_inv_PxU)
             setattr(MechSystem, '_IP_Ux_inv_PxU', _IP_Ux_inv_PxU)
+            setattr(MechSystem, 'IP_g_prime_x_lambda_y', IP_g_prime_x_lambda_y)
+            setattr(MechSystem, 'IP_g_prime_x_lambda_lambda', IP_g_prime_x_lambda_lambda)
         elif solver_type == "DiscreteGradient":
             setattr(MechSystem, '_Ux_inv_PxU_dg', _Ux_inv_PxU)
             setattr(MechSystem, '_IP_Ux_inv_PxU_dg', _IP_Ux_inv_PxU)
+            setattr(MechSystem, 'IP_g_prime_x_lambda_y_dg', IP_g_prime_x_lambda_y)
+            setattr(MechSystem, 'IP_g_prime_x_lambda_lambda_dg', IP_g_prime_x_lambda_lambda)
         else:
             raise ValueError(f"Invalid solver type: {solver_type}")
     
@@ -409,8 +448,9 @@ class BaseSolverMixin:
         y_, _, info_ = super().solve(w_val*self.t_points[k:k+2])
         if self.store: self.info.append(np.array(info_[0::1]))
 
+        Lambda = np.zeros_like(self.g_(np.zeros(2*self.nosc))).squeeze()
+        
         if self.constraint_type:
-            Lambda = np.zeros_like(self.g(y_[0]))
             self.fixed_point(y_, Lambda)
 
         return (y_, y_ @ self.RB.T, Lambda) if self.RB is not None else (y_, y_, Lambda)
@@ -427,7 +467,7 @@ class BaseSolverMixin:
 
         self.y[0] = self.y_init
         if self.store: self.info = []
-        self.Lambda = np.zeros((self.n+1, self.g(self.y_init).shape[0]))
+        self.Lambda = np.zeros((self.n+1, self.g_(np.zeros(2*self.nosc)).shape[0]))
     
         # Calculate update frequency (10% of iterations)
         update_freq = max(1, self.n // 10)  
@@ -679,14 +719,71 @@ class BaseSolverMixin:
         """
         r_form = lambda numer, denom: r_[float('nan'), 
                 (log(roll(numer, -1)/numer)/log(roll(denom, -1)/denom))[:-1]]
-        en_error = [solver.en_error for solver in solvers]
 
-        for i in range(0, len(solvers), MechSystem.dt_space_dim * kwds['Omega2_space_dim']):
-            if len(en_error) > 1 and en_error[0] is not None and MechSystem.dt_space_dim > 1 and not MechSystem.predict:
-                r_values = r_form(en_error[i:i+MechSystem.dt_space_dim*kwds['Omega2_space_dim']:kwds['Omega2_space_dim']], MechSystem.dt_space)
+        # Compute en_error using a list comprehension and reshape it into a 2D array: rows = dt values, columns = Omega2 values for each solver class in kwds['registered_solver_classes']
+        # For each solver_class, filter solvers and compute en_error separately
+        for solver_class in kwds['registered_solver_classes']:
+            filtered_solvers = [solver for solver in solvers if solver.solver_class == solver_class]
+            # For numbers of magnitude much less than 1, you can use np.isclose with a smaller atol/rtol,
+            # or compare rounded values, or use relative error.
+            # Example using np.isclose with tighter tolerances:
+            en_error = [
+                [solver.en_error for solver in filtered_solvers
+                 if np.isclose(solver.dt, dt) and
+                    np.isclose(solver.Omega2, omega2).all()]
+                for dt in MechSystem.dt_space
+                for omega2 in kwds['Omega2_space']
+            ]
+            # Other approaches:
+            # - Compare rounded values: round(solver.dt, N) == round(dt, N)
+            # - Use relative error: abs(solver.dt - dt) / max(abs(dt), 1e-15) < threshold
+            # - Use np.allclose for arrays
+            # Reshape to (dt_space_dim, Omega2_space_dim)
+            en_error = np.array(en_error).reshape(MechSystem.dt_space_dim, kwds['Omega2_space_dim'])
+
+            if en_error.shape[0] > 1 and en_error[0, 0] is not None and MechSystem.dt_space_dim > 1 and not MechSystem.predict:
+                for col in range(en_error.shape[1]):
+                    r_values = r_form(en_error[:, col], MechSystem.dt_space)
+                    temp = c_[MechSystem.dt_space, r_values].T
+                    tex_table(f'{solver_class.__name__} (Omega2_{col})', temp)
+
+            filtered_solvers[-1].plot()
+
+        # recompute energy error of conformal stormer verlet solvers by substracting the solver Hamiltonian from the Hamiltonian of DiscreteGradientSolver
+
+        # initialize energy error array
+        eng_error = np.zeros((MechSystem.dt_space_dim * kwds['Omega2_space_dim']))
+
+        # Create a dictionary mapping solver classes to their respective solver lists
+        solver_lists = {
+            solver_class: [
+                solver for solver in solvers if solver.solver_class == solver_class
+            ]
+            for solver_class in kwds['registered_solver_classes']
+        }
+        for i, solver in enumerate(solver_lists[ConformalStormerVerletSolver], start=0):
+            # Compute energy error by subtracting the Hamiltonian of DiscreteGradientSolver
+            # Find the corresponding DiscreteGradientSolver instance with matching dt and Omega2
+            dg_solver = next(
+                (s for s in solver_lists[DiscreteGradientSolver]
+                    if np.isclose(s.dt, solver.dt)
+                    and np.isclose(s.Omega2, solver.Omega2).all()),
+                None
+            )
+            if dg_solver is not None:
+                _eng_error = np.array([solver.ham(y) for y in solver.y]) - dg_solver.ham(dg_solver.y[-1])
+                eng_error[i] = sqrt(solver.dt) * LA.norm(_eng_error)
+            else:
+                print("Warning: No matching DiscreteGradientSolver found for energy error computation.")
+                    
+        eng_error = eng_error.reshape(MechSystem.dt_space_dim, kwds['Omega2_space_dim'])
+
+        if eng_error.shape[0] > 1 and eng_error[0, 0] is not None and MechSystem.dt_space_dim > 1 and not MechSystem.predict:
+            for col in range(eng_error.shape[1]):
+                r_values = r_form(eng_error[:, col], MechSystem.dt_space)
                 temp = c_[MechSystem.dt_space, r_values].T
-                tex_table(solvers[i].solver_class.__name__, temp)
-            solvers[i].plot()
+                tex_table(f'ConformalStormerVerletSolver (Omega2_{col})', temp)
+
 
     def plot(self):
         """
@@ -718,7 +815,7 @@ class BaseSolverMixin:
 
         fig = figure()
         fig.tight_layout(pad=0)
-        fig.suptitle(f'integrator = {self.solver_class.__name__}, dt = {self.dt}')
+        fig.suptitle(rf'integrator = {self.solver_class.__name__}, $\Delta t = {self.dt}$')
 
         gs = fig.add_gridspec(5, 2, hspace=1)
         ax0, ax1, ax2, ax3, ax4 = [fig.add_subplot(gs[i, 0]) for i in [0, 1, 2, 3, 4]]
@@ -811,7 +908,17 @@ class DiscreteGradientSolver(BaseSolverMixin, DiscreteGradient):
 
     def _g_prime_with_JJ(self, y): #New class method
         return self.g_prime__(y) @ self.JJ.T
-        
+    
+    def residual(self, x, x1, Lambda):
+
+        g_x1 = self.g(x1)
+        resi = r_[x1 - x - self.dt*self.f(c_[x, x1].T, None) - self.dt*self._g_prime_with_JJ(0.5 *(x + x1)).T @ Lambda,\
+                g_x1]
+        tang = r_[c_[np.eye(x1.shape[0]) - self.dt * self.dfdu(c_[x, x1].T, None) - 0.5 * self.dt * self.JJ @ self.g_prime_x_lambda_y(0.5 *(x + x1), Lambda), -self.dt * self.JJ @ self.g_prime_x_lambda_lambda(0.5 *(x + x1), Lambda)],\
+                  c_[self.g_prime__(x1), np.zeros((g_x1.shape[0],)*2)]]
+
+        return resi, tang
+    
     def fixed_point(self, x, Lambda):
         """
         Fixed point iteration method.
@@ -821,66 +928,27 @@ class DiscreteGradientSolver(BaseSolverMixin, DiscreteGradient):
         Lambda (array): The initial value for Lambda.
         """
 
-        # Initialize counter
         m = 0
-        dgdx_0, dgdx_1 = self.g_prime[0], lambda x: self.g_prime[1](0.5 * (x[0]+x[1]))
+        residual = self.tol * 10
 
-        i0, i1 = (dim // 2 for dim in dgdx_0(x[0]).shape)
+        while residual > self.tol and m < self.M:
 
-        # Fixed point iteration
-        while LA.norm(self.g(x[1])) > self.tol and m < self.M:
+            # Update residual and tangent
+            resi, tang = self.residual(x[0], x[1], Lambda)
 
-            # Update R and Delta_Lambda
-            R = self.dt * dgdx_0(x[0]) @ dgdx_1(x).T
-            R[i0:, i0:] = 0
-            Delta_Lambda = -LA.solve(R, self.g(x[1]))
+            Delta_z = -LA.solve(tang, resi)
+            x[1] = x[1] + Delta_z[:x[1].shape[0]]
+            Lambda += Delta_z[x[1].shape[0]:]
 
-            x[1] += self.dt * dgdx_1(x).T @ Delta_Lambda
-            Lambda += Delta_Lambda
-
-            # Update m
+            # Update iteration counter and residual
             m += 1
-            
+            residual = LA.norm(r_[resi, Delta_z], np.inf)
+
         # Check convergence
         if m >= self.M:
             raise RuntimeError("Nonlinear solver did not converge")
-
-        '''
-        x1 = x[1]
-
-        while LA.norm(self.g(x[1])[i0:]) > self.tol and m < self.M:
-
-            _g_prime = self.g_prime(x[1])
-            G11 = _g_prime[:i0, :i1]
-            G22 = _g_prime[i0:, i1:]
-
-            _g_prime = self.g_prime((x[0]+x[1]) * 0.5)
-            G11_dg = _g_prime[:i0, :i1]
-            G22_dg = _g_prime[i0:, i1:]
-
-            # Update R and Delta_Lambda
-            R = self.dt * np.block([
-                [G11 @ G22_dg.T, np.zeros((i0, i0))],
-                [np.zeros((i0, i0)), - G22 @ G11_dg.T]
-            ])
-            
-            Delta_Lambda = LA.solve(R, self.g(x[1]))
-            Lambda_v -= Delta_Lambda
-            Lambda_v[:i0] = Lambda_r[:i0]
-
-            x[1, self.neq//2:] = (x1 + self.dt * self.JJ @ _g_prime.T @ permute @ Lambda_v)[self.neq//2:]
-                
-            # Update m
-            m += 1
-
-            print(f"Iteration {m}: norm(g(x[1])) = {LA.norm(self.g(x[1]))}")
-            
-        # Check convergence
-        if m >= self.M:
-            raise RuntimeError("Nonlinear solver did not converge")
-        '''
         
-        
+
 class ConformalStormerVerletSolver(BaseSolverMixin, ConformalStormerVerlet):
     """CSVSolver with Hamiltonian capabilities"""
     def __init__(self, kwds):
@@ -951,7 +1019,7 @@ class ConformalStormerVerletSolver(BaseSolverMixin, ConformalStormerVerlet):
         while LA.norm(g(x[1])) > self.tol and m < self.M:
             # Update R and Delta_Lambda
             R = dgdx_0(x[1]) @ dgdx_1(r_[x, x_23]).T
-            Delta_Lambda = LA.solve(R, g(x[1]))
+            Delta_Lambda = LA.solve(R, g(x[1])) #, overwrite_a=True, overwrite_b=True, assume_a='pos')
             Lambda -= Delta_Lambda
 
             Lambda_1, Lambda_2 = np.split(Lambda, 2)
@@ -965,6 +1033,9 @@ class ConformalStormerVerletSolver(BaseSolverMixin, ConformalStormerVerlet):
             # Update m
             m += 1
             # x[0] = x[1]
+
+        Lambda[:i0] = (Lambda_1 + Lambda_2) * 0.5
+        Lambda[i0:] = Lambda[:i0]
             
         # Check convergence
         if m >= self.M:
@@ -1037,6 +1108,7 @@ if __name__ == '__main__':
 
     BaseSolverMixin.measures(kwds, solvers)
 
+
     #%% Reduced order solution
     print('Computing reduced bases...')
 
@@ -1057,9 +1129,6 @@ if __name__ == '__main__':
     
     # Solve for each solver type
     solvers_r = BaseSolverMixin.setup_and_solve_reduced_system(kwds, solvers)
-
-    # Merge solver lists
-    # solvers_r = solvers_r_dg + solvers_r_ham
                 
     #%% Hyper-reduced model
     print('Computing hyper-reduction bases...')

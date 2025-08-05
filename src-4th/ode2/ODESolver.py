@@ -89,7 +89,7 @@ class ODESolver(MechSystem):
         # Time loop
         for k in range(n-1):
             self.k = k
-            self.dt = self.t[k+1] -self.t[k]
+            # self.dt = self.t[k+1] -self.t[k]
             self.u[k+1], info_ = self.advance()
             if terminate(self.u, self.t, self.k+1):
                 break  # terminate loop over k
@@ -122,7 +122,7 @@ class ODESolver(MechSystem):
         self.du[0] = self.I_mat
 
         # Time loop
-        self.dt = self.t[1] - self.t[0]
+        # self.dt = self.t[1] - self.t[0]
         for k in range(n):
             self.k = k
             self.du[k + 1] = self.var_advance()
@@ -359,10 +359,19 @@ class DiscreteGradient(ODESolver):
             return w - u[k] - dt*f(c_[u[k], w].T, t[k])
 
         def dFdw(w):
-            return np.eye(self.neq) - self.dt * self.dfdu(c_[u[k], w].T, t[k])
+            return np.eye(self.neq) - dt * self.dfdu(c_[u[k], w].T, t[k]) # TODO: check 0.5 * dt
 
         if w_start is None:
-            w_start = u[k] + dt*f(c_[u[k], u[k]].T, t[k])  # Forward Euler step
+            # w_start = u[k] + dt*f(c_[u[k], u[k]].T, t[k])  # Forward Euler step
+
+            # uk1 = u[k] + 0.5 * dt * f(c_[u[k], u[k]].T, t[k])
+            # w_start = u[k] + dt * f(c_[uk1, uk1].T, t[k] + 0.5 * dt) # Heun's method
+
+            # RK2 method
+            k1 = f(c_[u[k], u[k]].T, t[k])
+            k2 = f(c_[u[k] + dt * k1, u[k] + dt * k1].T, t[k] + dt)
+            w_start = u[k] + 0.5 * dt * (k1 + k2)
+
             # w_start[self.neq//2:] = u[k, self.neq//2:] + dt*f(u[k], t[k], r_[w_start[:self.neq//2], u[k, self.neq//2:]])[self.neq//2:]
             
             # uk = u[k] if self.RB is None else u[k] @ self.RB.T
@@ -376,7 +385,7 @@ class DiscreteGradient(ODESolver):
         u, k, t, I_mat = self.u, self.k, self.t, self.I_mat
         dt = self.dt
 
-        temp = dt*self.dfdu(u[k:k+2], (t[k+1] +t[k])/2.0)
+        temp = dt * self.dfdu(u[k:k+2], (t[k+1] +t[k])/2.0) # TODO: check 0.5 * dt
         du_new = LA.solve((I_mat -temp), (I_mat +temp))
         return du_new
 

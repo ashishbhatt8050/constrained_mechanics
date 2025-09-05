@@ -51,7 +51,7 @@ from ODESolver import (ConformalStormerVerlet, ConformalImplicitMidpoint,
 # from Newton import fixed_point
 from System import MechSystem  # Keep for static properties
 from podDEIM import POD, PSD, DEIM
-from PlotScript import plot_data, tex_table, logplot, timing
+from PlotScript import plot_data, tex_table, logplot, timing, save_figure
 
 #%%
 def compose_solver_solves(func):
@@ -139,8 +139,8 @@ class ReduceMechSystem(MechSystem):
             print(f'{RB.shape = }')
 
             fig, ax = logplot(sv, xlabel=f'index of singular values of [F2, y_list]', xlims=(1, len(sv)))
-            # filename = MechSystem.keep_time +'osc_sv' + '.pdf'
-            # save_figure(fig, filename)
+            filename = os.path.join(MechSystem.data_folder, 'osc_sv.pdf')
+            save_figure(fig, filename, fig_data=None)
 
         # Compute reduced basis for Hamiltonian solvers
         if ConformalStormerVerletSolver in kwds['registered_solver_classes'] \
@@ -246,7 +246,7 @@ class ReduceMechSystem(MechSystem):
                 gc.collect()
         
         return result
-            
+                
     @classmethod
     def update_mdeim_hyperreduction(cls, solvers):
         """Update methods with MDEIM hyperreduction"""
@@ -278,11 +278,21 @@ class ReduceMechSystem(MechSystem):
                 result = worker_func(solver, indices)
                 results.append(result)
 
+            # # Use a ProcessPoolExecutor for parallelism
+            # with concurrent.futures.ProcessPoolExecutor() as executor:
+            #     futures = [
+            #         executor.submit(worker_func, solver, indices)
+            #         for solver, indices in zip(filtered_solvers, filtered_indices)
+            #     ]
+            #     results = [f.result() for f in concurrent.futures.as_completed(futures)]
+
             F3 = np.hstack([np.array(result).T for result in results])
 
             # Compute POD basis and plot singular values
             Uj, sv, _ = POD(F3, np.eye(F3.shape[0]), cls.tol)
             fig, ax = logplot(sv, xlabel=f'index of singular values of {func_name}', xlims=(1, len(sv)))
+            filename = os.path.join(MechSystem.data_folder, 'osc_sv.pdf')
+            save_figure(fig, filename, fig_data=None)
             
             # Compute DEIM points and interpolation matrix
             Pj, _ = DEIM(Uj, plot_deim=False)
@@ -417,6 +427,8 @@ class ReduceMechSystem(MechSystem):
 
         # Plot singular values for g, g_prime, g_prime_x_lambda_y and g_prime_x_lambda_lambda using logplot, pass the singular values and xlims as a list
         fig, ax = logplot([sv_g, sv_g_prime, sv_g_prime_x_lambda_y, sv_g_prime_x_lambda_lambda], xlabel=f'index of singular values', xlims=[(1, len(sv_g)), (1, len(sv_g_prime)), (1, len(sv_g_prime_x_lambda_y)), (1, len(sv_g_prime_x_lambda_lambda))])
+        filename = os.path.join(MechSystem.data_folder, 'osc_sv.pdf')
+        save_figure(fig, filename, fig_data=None)
 
         # Set attributes based on solver type
         if solver_type == "Hamiltonian":
@@ -474,9 +486,9 @@ class BaseSolverMixin:
         
         # Create progress bar that updates less frequently
         with tqdm(total=self.n, desc='Solving trajectory', 
-                mininterval=1.0,  # Minimum time between updates in seconds
-                maxinterval=10.0,  # Maximum time between updates
-                position=0,  # Prevent multiple bars overlapping
+                miniters=update_freq,  # Minimum iterations between updates
+                maxinterval=5.0,  # Maximum seconds between updates
+                position=0, 
                 leave=True) as pbar:
 
             for k in range(self.n):
@@ -578,7 +590,7 @@ class BaseSolverMixin:
               args.append((x, y, z, process_kwds))
 
         # Check the length of args
-        if False and len(args) > 1 and not hasattr(MechSystem, 'RB') and not hasattr(MechSystem, 'RB_dg'):
+        if len(args) > 1 and not hasattr(MechSystem, 'RB'):
             # Use ProcessPoolExecutor to parallelize the solve_mech_system calls
             print('Solving mechanical system using parallel processing...')
             
@@ -660,7 +672,7 @@ class BaseSolverMixin:
         print(f'Setting up hyper-reduced system...')
         
         # Setup hyperreduction using classmethod
-        ReduceMechSystem.setup_hyperreduction(solvers)
+        ReduceMechSystem.setup_hyperreduction()
 
         if ReduceMechSystem.hyperreducer == 'MDEIM':
             ReduceMechSystem.update_mdeim_hyperreduction(solvers)
@@ -724,9 +736,6 @@ class BaseSolverMixin:
         # For each solver_class, filter solvers and compute en_error separately
         for solver_class in kwds['registered_solver_classes']:
             filtered_solvers = [solver for solver in solvers if solver.solver_class == solver_class]
-            # For numbers of magnitude much less than 1, you can use np.isclose with a smaller atol/rtol,
-            # or compare rounded values, or use relative error.
-            # Example using np.isclose with tighter tolerances:
             en_error = [
                 [solver.en_error for solver in filtered_solvers
                  if np.isclose(solver.dt, dt) and
@@ -734,10 +743,6 @@ class BaseSolverMixin:
                 for dt in MechSystem.dt_space
                 for omega2 in kwds['Omega2_space']
             ]
-            # Other approaches:
-            # - Compare rounded values: round(solver.dt, N) == round(dt, N)
-            # - Use relative error: abs(solver.dt - dt) / max(abs(dt), 1e-15) < threshold
-            # - Use np.allclose for arrays
             # Reshape to (dt_space_dim, Omega2_space_dim)
             en_error = np.array(en_error).reshape(MechSystem.dt_space_dim, kwds['Omega2_space_dim'])
 
@@ -813,9 +818,9 @@ class BaseSolverMixin:
         - The method includes commented-out code for plotting matrix condition number.
         """
 
-        fig = figure()
-        fig.tight_layout(pad=0)
-        fig.suptitle(rf'integrator = {self.solver_class.__name__}, $\Delta t = {self.dt}$')
+        fig = figure(figsize=(10, 10))  # Make figure taller
+        # fig.tight_layout(pad=0)
+        fig.suptitle(rf'integrator = {self.solver_class.__name__}, $\Delta t = {self.dt}$', y=1)
 
         gs = fig.add_gridspec(5, 2, hspace=1)
         ax0, ax1, ax2, ax3, ax4 = [fig.add_subplot(gs[i, 0]) for i in [0, 1, 2, 3, 4]]
@@ -823,20 +828,22 @@ class BaseSolverMixin:
 
         if hasattr(self, 'sym_error'):
             plot_data(ax0, self.t_points, self.sym_error, xlims=(0, self.T_final), \
-                    ylabel=r'$\Delta Sp$', margins=1)
+                    ylabel=r'$\Delta Sp$', margins=10)
                 
             if max(abs(self.sym_error)) < 1e-15:
                 ax0.set_ylim([-1e-15, 1e-15])
 
+        g_norm = None
         if hasattr(self, 'g__lambda'):
             g_norm = [LA.norm(self.g__lambda(y)) for y in self.y]
 
             plot_data(ax1, self.t_points, g_norm, xlims=(0, self.T_final), \
-                    ylabel=r'$\Delta \mathfrak{P}$', margins=1)
+                    ylabel=r'$\Delta \mathfrak{P}$', margins=10)
+
 
         if hasattr(self, 'eng_error'):
             plot_data(ax2, self.t_points, self.eng_error, xlims=(0, self.T_final), \
-                    ylabel=r'$\Delta H$', margins=1)
+                    ylabel=r'$\Delta H$', margins=10)
 
         lin_momentum = np.sum(self.y[:, self.nosc:].reshape(-1, self.nosc//3, 3), axis=1)
         lim_momentum_err = r_[0, LA.norm(lin_momentum[1:] - lin_momentum[0], axis=1)]
@@ -848,10 +855,10 @@ class BaseSolverMixin:
                                 LA.norm(angular_momentum_sum[1:] - angular_momentum_sum[0], axis=1)]
 
         plot_data(ax3, self.t_points, lim_momentum_err, xlims=(0, self.T_final), \
-                ylabel=r'$\Delta L$', margins=0.5)
+                ylabel=r'$\Delta L$', margins=10)
 
         plot_data(ax4, self.t_points, angular_momentum_err, xlims=(0, self.T_final), \
-                ylabel=r'$\Delta J$', margins=1)
+                ylabel=r'$\Delta J$', margins=10)
 
         # # Plot matrix condition number
         # if self.RB is not None:
@@ -868,7 +875,6 @@ class BaseSolverMixin:
         #           ylabel=r'$\kappa$', margins=0.5)
 
         ax4.set_xlabel('time')
-
         # Plot the particle positions over time
         coords = self.y[:, :self.nosc].reshape(-1, self.nosc//3, 3)
         for i in range(coords.shape[1]):
@@ -876,12 +882,12 @@ class BaseSolverMixin:
             ax_pp.plot(coords[:, i, 0], coords[:, i, 1], coords[:, i, 2], 'k-')  # plot system evolution
 
             # Plot projection onto x-y plane (z=0)
-            ax_pp.plot(coords[:, i, 0], coords[:, i, 1], np.zeros_like(coords[:, i, 2]), 'r--', alpha=0.7)
+            ax_pp.plot(coords[:, i, 0], coords[:, i, 1], np.zeros_like(coords[:, i, 2]), 'r-', alpha=0.7)
 
         # Set the axes' labels and title
-        ax_pp.set_xlabel('x')
-        ax_pp.set_ylabel('y')
-        ax_pp.set_zlabel('z')
+        ax_pp.set_xlabel('x', labelpad=10)
+        ax_pp.set_ylabel('y', labelpad=10)
+        ax_pp.set_zlabel('z', labelpad=10)
         ax_pp.set_title('Phase portrait')
         # ax_pp.set_xlim([coords[:, :, 0].min(), coords[:, :, 0].max()])
         # ax_pp.set_ylim([coords[:, :, 1].min(), coords[:, :, 1].max()])        
@@ -892,11 +898,24 @@ class BaseSolverMixin:
         for ax in [ax0, ax1, ax2, ax3, ax4]:
             ax.label_outer()
 
-        # fig.show()
-            
-        # string = '_full' if self.RB is None else '_predict' if self.predict else '_repro'
-        # filename = os.path.join(MechSystem.data_folder, f"osc_{self.solver_class.__name__}{string}.pdf")
-        # save_figure(fig, filename)
+        fig.show()            
+
+        fig_data = {
+            't_points': self.t_points,
+            'lim_momentum_err': lim_momentum_err,
+            'angular_momentum_err': angular_momentum_err,
+            'coords': coords
+        }
+        if hasattr(self, 'sym_error'):
+            fig_data['sym_error'] = self.sym_error
+        if g_norm is not None:
+            fig_data['g_norm'] = g_norm
+        if hasattr(self, 'eng_error'):
+            fig_data['eng_error'] = self.eng_error
+
+        string = '_full' if self.RB is None else '_predict' if self.predict else '_repro'
+        filename = os.path.join(MechSystem.data_folder, f"osc_{self.solver_class.__name__}{string}.pdf")
+        save_figure(fig, filename, fig_data=None)
 
 #%% Concrete solver classes
 class DiscreteGradientSolver(BaseSolverMixin, DiscreteGradient):
@@ -1088,7 +1107,7 @@ if __name__ == '__main__':
     kwds_file = os.path.join(checkpoint_path, 'kwds.joblib')
     solvers_file = os.path.join(checkpoint_path, 'solvers.joblib')
 
-    if False and os.path.exists(checkpoint_path) and os.path.exists(kwds_file) and os.path.exists(solvers_file):
+    if os.path.exists(checkpoint_path) and os.path.exists(kwds_file) and os.path.exists(solvers_file):
         try:
             print("Loading from checkpoint...")
             kwds = load(kwds_file)
@@ -1176,15 +1195,10 @@ if __name__ == '__main__':
             - and symplecitc with sparse MDEIM
             - and not demonstrably symplectic with DEIM
             - order of numerical methods is not verified
-        - All solvers shows 4th order convergence for constrained full and reduced models
-        - Convergence order of methods not observable under constraints
+        - All solvers show 2nd order convergence for constrained full and reduced models
         - Parallel computation is unpredictable for reduced and hyperreduced models, specially for larger nosc
-        - DiscreteGradientSolver in kwds somehow causes other solvers to overflow during runtime.
 
     # TODO:
         # Implement elastic beam deformation
-        # Something's messing up the order of ConformalImplicitMidpointSolver (isolate the method and retry)
-        # Consolidate reduction and hyperreduction methods in BaseSolverMixin
-        # Remove unnecessary kwds from function calls
         # Pretty print the terminal output
     '''

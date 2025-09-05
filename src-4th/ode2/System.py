@@ -49,20 +49,21 @@ class SymbolicComputer:
         self.y1 = smp.Matrix(smp.symbols('y1_:{}_:{}'.format(nosc*2//3,3), real=True))
         self.y05_repl = dict(zip(self.y, (self.y + self.y1) / 2))
         self.y1_repl = dict(zip(self.y, self.y1))
-        
+
+        self.omega2 = smp.Matrix(smp.symbols('omega^2_:{}'.format(self.nosc//3-2), real=True))
+        self.beta = smp.symbols('beta', real=True)
+
+        self.pi = smp.Matrix([(self.q.row(i+2) - self.q.row(i)).norm(2)**2 
+                         for i in range(self.nosc//3-2)])
+
     def compute_hamiltonian(self):
         """Compute Hamiltonian expressions"""
         print("Computing Hamiltonian expressions...")
-        
-        omega2 = smp.Matrix(smp.symbols('omega^2_:{}'.format(self.nosc//3-2), real=True))
-        beta = smp.symbols('beta', real=True)
 
         kin_expr = 0.5 * self._p.dot(self._p)
-        
-        pi = smp.Matrix([(self.q.row(i+2) - self.q.row(i)).norm(2)**2 
-                         for i in range(self.nosc//3-2)])
-        pot_expr_vec = 0.5 * omega2.multiply_elementwise(
-            (pi - smp.ones(*pi.shape)).applyfunc(lambda x: x**2))
+
+        pot_expr_vec = 0.5 * self.omega2.multiply_elementwise(
+            (self.pi - smp.ones(*self.pi.shape)).applyfunc(lambda x: x**2))
         pot_expr = sum(pot_expr_vec)
 
         ham_expr = kin_expr + pot_expr
@@ -73,15 +74,15 @@ class SymbolicComputer:
         # Generate a numerical function for the Hamiltonian expression
         # This function takes the symbolic variables y, omega2, and beta as input
         # and returns the evaluated Hamiltonian expression as a numpy array.
-        ham_ = smp.lambdify((self.y, omega2, beta), ham_expr, 'numpy')
-        ham_z_ = smp.lambdify((self.y, omega2, beta), ham_z_expr, 'numpy')
-        ham_zz_ = smp.lambdify((self.y, omega2, beta), ham_zz_expr, 'numpy')
+        ham_ = smp.lambdify((self.y, self.omega2, self.beta), ham_expr, 'numpy')
+        ham_z_ = smp.lambdify((self.y, self.omega2, self.beta), ham_z_expr, 'numpy')
+        ham_zz_ = smp.lambdify((self.y, self.omega2, self.beta), ham_zz_expr, 'numpy')
         # ham_z_ = lambda y, omega2, beta: _ham_z_(y, omega2, beta).squeeze()
 
         return {
             'y': self.y, 'y1': self.y1,
-            'omega2': omega2,
-            'beta': beta,
+            'omega2': self.omega2,
+            'beta': self.beta,
             'ham_expr': ham_expr,
             'ham_z_expr': ham_z_expr,
             'ham_zz_expr': ham_zz_expr,
@@ -89,20 +90,20 @@ class SymbolicComputer:
             'ham_z_': ham_z_,
             'ham_zz_': ham_zz_,
             'ham_zz_nonzero_indices': ham_zz_nonzero_indices,
-            'pi': pi,
+            'pi': self.pi,
             'pot_expr_vec': pot_expr_vec
         }
 
-    def compute_lagrangian(self, ham_exprs):
+    def compute_lagrangian(self, ham_z_expr):
         """Compute Lagrangian expressions"""
         print("Computing Lagrangian expressions...")
         
         # Discrete derivatives
-        dpi_dq = ham_exprs['pi'].jacobian(self._q).subs(self.y05_repl)
+        dpi_dq = self.pi.jacobian(self._q).subs(self.y05_repl)
 
 
-        dV_dpi = 0.5 * ham_exprs['omega2'].multiply_elementwise(
-                ham_exprs['pi'].subs(self.y1_repl) + ham_exprs['pi'] - 2 * smp.ones(*ham_exprs['pi'].shape)
+        dV_dpi = 0.5 * self.omega2.multiply_elementwise(
+                self.pi.subs(self.y1_repl) + self.pi - 2 * smp.ones(*self.pi.shape)
                 )
         
         '''
@@ -150,13 +151,13 @@ class SymbolicComputer:
         '''
         
         DG_V_expr = dpi_dq.T @ dV_dpi
-        
-        lag_dg_expr = smp.Matrix.vstack(ham_exprs['ham_z_expr'][self.nosc:,:].subs(self.y05_repl), -DG_V_expr)
-        lag_dg_ = smp.lambdify((self.y, self.y1, ham_exprs['omega2']), lag_dg_expr, 'numpy')
-        
+
+        lag_dg_expr = smp.Matrix.vstack(ham_z_expr[self.nosc:,:].subs(self.y05_repl), -DG_V_expr)
+        lag_dg_ = smp.lambdify((self.y, self.y1, self.omega2), lag_dg_expr, 'numpy')
+
         lag_dg_z_expr = lag_dg_expr.jacobian(self.y1)
         lag_dg_z_nonzero_indices = np.where(np.array(lag_dg_z_expr.tolist()).flatten() != 0)[0]
-        lag_dg_z_ = smp.lambdify((self.y, self.y1, ham_exprs['omega2']), lag_dg_z_expr, 'numpy')
+        lag_dg_z_ = smp.lambdify((self.y, self.y1, self.omega2), lag_dg_z_expr, 'numpy')
 
         return {
             'lag_dg_expr': lag_dg_expr,
@@ -221,9 +222,25 @@ class SymbolicComputer:
         # expressions = {}
         ham_exprs = self.compute_hamiltonian()
         expressions.update(ham_exprs)
-        expressions.update(self.compute_lagrangian(ham_exprs))
+        expressions.update(self.compute_lagrangian(ham_exprs['ham_z_expr']))
         expressions.update(self.compute_constraints())
 
+        # """Parallel computation of symbolic expressions"""
+        # with concurrent.futures.ProcessPoolExecutor() as executor:
+        #     # Compute Hamiltonian expressions
+        #     ham_future = executor.submit(self.compute_hamiltonian)
+            
+        #     # While Hamiltonian computes, prepare other computations
+        #     lag_future = executor.submit(self.compute_lagrangian)
+        #     # Compute constraints
+        #     con_future = executor.submit(self.compute_constraints)
+            
+        #     # Update expressions as results complete
+        #     expressions.update(ham_future.result())
+        #     expressions.update(lag_future.result())
+        #     expressions.update(con_future.result())
+
+        '''
         g_expr_len = expressions['g_expr'].rows
 
         lambda_expr = smp.Matrix(smp.symbols('lambda_:{}'.format(g_expr_len), real=True))
@@ -244,6 +261,7 @@ class SymbolicComputer:
         expressions['ham_aug_z_'] = smp.lambdify((self.y, lambda_expr, expressions['omega2']), expressions['ham_aug_z_expr'], 'numpy')
         expressions['ham_aug_zz_'] = smp.lambdify((self.y, lambda_expr, expressions['omega2']), expressions['ham_aug_zz_expr'], 'numpy')
         # return expressions
+        '''
 
 def load_symbolic_expressions(cls):
     """Decorator to handle loading/saving of symbolic expressions"""
@@ -385,6 +403,7 @@ class MechSystem:
     def ham_zz_lambda(self, y, beta=0):
         return self.ham_zz_(y, self.Omega2, beta)
 
+    '''
     def ham_aug_lambda(self, y):
         return self.ham_aug_(*y, self.Omega2)
 
@@ -393,7 +412,8 @@ class MechSystem:
 
     def ham_aug_zz_lambda(self, y):
         return self.ham_aug_zz_(*y, self.Omega2)
-
+    '''
+        
     def lag_dg_lambda(self, y):
         return self.lag_dg_(*y, self.Omega2).squeeze()
 
@@ -405,6 +425,16 @@ class MechSystem:
 
     def g_prime__lambda(self, y):
         return self.g_prime_(y)
+    
+    def g_prime_x_lambda_y__(self, y, lag_mult):
+        """Compute g_prime_x_lambda_y for full order system"""
+        # Compute g_prime_x_lambda_y using the full order system
+        return self.g_prime_x_lambda_y_(y, lag_mult)
+    
+    def g_prime_x_lambda_lambda__(self, y, lag_mult):
+        """Compute g_prime_x_lambda_lambda for full order system"""
+        # Compute g_prime_x_lambda_lambda using the full order system
+        return self.g_prime_x_lambda_lambda_(y, lag_mult)
 
     def ham_z_reduced(self, y, beta=0):
         return self.RB.T @ self.ham_z_(y @ self.RB.T, self.Omega2, beta).squeeze()
@@ -564,13 +594,15 @@ class MechSystem:
             self.g__ = self.g__lambda
             self.g_prime__ = self.g_prime__lambda
 
-            if self.solver_class.__name__ == 'DiscreteGradientSolver':
-                self.g_prime_x_lambda_y = self.g_prime_x_lambda_y_
-                self.g_prime_x_lambda_lambda = self.g_prime_x_lambda_lambda_
+            # if self.solver_class.__name__ == 'DiscreteGradientSolver':
+            self.g_prime_x_lambda_y = self.g_prime_x_lambda_y__
+            self.g_prime_x_lambda_lambda = self.g_prime_x_lambda_lambda__
 
+            '''
             self.ham_aug = self.ham_aug_lambda
             self.ham_aug_z = self.ham_aug_z_lambda
             self.ham_aug_zz = self.ham_aug_zz_lambda
+            '''
 
         elif (not hasattr(MechSystem, 'RBxUx_inv_PxU')) and (not hasattr(MechSystem, '_RBxUx_inv_PxU_')) and (not hasattr(MechSystem, '_Ux_inv_PxU_dg')) and (not hasattr(MechSystem, '_Ux_inv_PxU')):
             print('Setting reduced order functions...')

@@ -22,6 +22,7 @@ from time import process_time
 import numpy as np
 import scipy as sp
 import pylab as pl
+from scipy.linalg import qr
 
 # %% POD
 
@@ -107,6 +108,18 @@ def PSD(F2, y_list, MechSystem):
 
 def DEIM(Ub, plot_deim=False):
     'Function for discrete empirical interpolation of the basis Ub'
+
+    # QR with column pivoting on Ub^T
+    _, _, qdeim_indices = qr(Ub.T, pivoting=True)
+
+    # Construct permutation matrix E
+    # P is shape (n, m) where n=Ub.shape[0], m=Ub.shape[1]
+    n, m = Ub.shape
+    P = np.zeros((n, m), dtype=np.int8)
+    P[qdeim_indices[:m], np.arange(m)] = 1
+
+    return P, qdeim_indices
+
     p = abs(Ub[:, 0]).argmax()
     idx_list = [p]
     P = np.zeros((Ub.shape[0], 1), dtype=np.int8)
@@ -136,7 +149,7 @@ def DEIM(Ub, plot_deim=False):
 
     return P, idx_list
 
-#%%
+# %%
 def orthogonalize(W, V, X=None):
     """Orthogonalize W with respect to V such that V.T @ W = I
 

@@ -3,11 +3,6 @@ from pylab import r_, c_
 from numpy import linalg as LA
 import os
 
-import torch
-import torch.linalg as torchLA
-torch.set_grad_enabled(False)
-# torch.cuda.empty_cache()
-
 from System import MechSystem
 from Newton import Newton
 
@@ -115,56 +110,36 @@ class ODESolver(MechSystem):
         if self.neq % 2 == 1:  # odd number of equations
             raise ValueError('ODESolver.var_solve requires even number of equations')
         else:  # systems of ODEs
-            self.du = np.zeros((n + 1, self.neq, self.neq))
+            # self.du = np.zeros((n + 1, self.neq, self.neq))
             self.I_mat = np.eye(self.neq)
+            symp_errors = [0]
+            self.I_mat_norm = LA.norm(self.I_mat)
+            self.Ecoeff_dt_inv = self.Ecoeff(self.dt)**4
 
-        # Initialize du[0] with identity matrix
-        self.du[0] = self.I_mat
+            if hasattr(self, 'JJ_r'):
+                self.J_mat = self.JJ_r
+            elif hasattr(self, 'JJ'):
+                self.J_mat = self.JJ
+            else:
+                raise ValueError
 
         # Time loop
         # self.dt = self.t[1] - self.t[0]
         for k in range(n):
             self.k = k
-            self.du[k + 1] = self.var_advance()
-            if terminate(self.u, self.t, self.k + 1):
-                break  # terminate loop over k
-        return self.du, self.t
+            du = self.var_advance()
+            symp_error = self.symplectic_error(du)
+            symp_errors.append(symp_error)
+        return np.array(symp_errors)
 
     def symplectic_error(self, du):
         '''
         Compute Symplectic error for the method
         '''
-        # n = t.size
-        #du = self.du
-        Ecoeff_dt = self.Ecoeff(-(self.t_points[1] - self.t_points[0]))**4
-
-        if hasattr(self, 'JJ_r'):
-            J_mat = self.JJ_r
-        elif hasattr(self, 'JJ'):
-            J_mat = self.JJ
-        else:
-            raise ValueError
-            
-        # TODO: Convert the numpy arrays to PyTorch tensors
-        du = torch.from_numpy(du)
-        J_mat = torch.from_numpy(J_mat)
-        
-        # Move the tensors to the desired device (e.g. CUDA or CPU)
-        device = torch.device('cpu') # if torch.cuda.is_available() else 'cpu')
-        # print(f'{device = }')
-        du = du.to(device)
-        J_mat = J_mat.to(device)
-        Ecoeff_dt = torch.tensor(Ecoeff_dt, device=device)
         
         # Perform the operation
-        du_transpose = du.transpose(1, 2)
-        du_solve = torchLA.solve(J_mat, du)
-        du_solve_transpose = torchLA.solve(J_mat, torch.eye(J_mat.shape[0], device=device, dtype=J_mat.dtype))
-        symp_error = torch.log(torchLA.norm(du_transpose @ du_solve, dim=(1, 2)) / torchLA.norm(Ecoeff_dt * du_solve_transpose))
-        
-        # Move the result back to CPU
-        symp_error = symp_error.cpu().numpy()
-        
+        symp_error = np.log(self.Ecoeff_dt_inv * LA.norm(self.J_mat @ du.T @ LA.solve(self.J_mat, du)) / self.I_mat_norm)
+
         return symp_error
 
     def Ecoeff(self, dt):

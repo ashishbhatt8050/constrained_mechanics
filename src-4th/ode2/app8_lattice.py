@@ -53,7 +53,7 @@ from System import MechSystem  # Keep for static properties
 from podDEIM import POD, PSD, DEIM
 from PlotScript import plot_data, tex_table, logplot, timing, save_figure
 
-#%%
+# %%
 def compose_solver_solves(func):
     @wraps(func)
     def wrapper(self, y_, k):
@@ -87,10 +87,10 @@ class ReduceMechSystem(MechSystem):
             filtered_solvers = [s for s in solvers if isinstance(s, DiscreteGradient)]
         else:
             raise ValueError(f"Invalid solver type: {solver_type}")
-        
+
         # Create a mapping from solvers to their indices
         solver_to_indices = {solver: indices for solver, indices in zip(solvers, cls.indices_list)}
-        
+
         # Filter indices_list based on filtered_solvers
         filtered_indices = [solver_to_indices[solver] for solver in filtered_solvers]
         return filtered_solvers, filtered_indices
@@ -113,9 +113,9 @@ class ReduceMechSystem(MechSystem):
                 result.extend(batch_results)
                 if (i + batch_size) % 100 == 0:
                     gc.collect()
-                    
+
             return np.array(result).T
-        
+
         def compute_reduced_basis(solver_type, expr, attr_name):
             filtered_solvers, filtered_indices = cls.filter_solvers(solvers, solver_type)
 
@@ -124,7 +124,7 @@ class ReduceMechSystem(MechSystem):
             for solver, indices in zip(filtered_solvers, filtered_indices):
                 batch_result = compute_batch_snapshots(solver, indices, expr)
                 F2_list.append(batch_result)
-            
+
             F2 = np.hstack(F2_list)
             del F2_list
             gc.collect()
@@ -132,14 +132,27 @@ class ReduceMechSystem(MechSystem):
             # Create snapshot list
             y_list = np.hstack([solver.y[indices].T for solver, indices 
                                 in zip(filtered_solvers, filtered_indices)])
-            
+
+            # Create snapshots of g_prime_x_lambda
+            # g_prime_x_lambda_list = np.hstack([
+            #                             solver.g_prime_x_lambda_(y, Lambda)
+            #                             for solver, indices in zip(filtered_solvers, filtered_indices)
+            #                             for y, Lambda in zip(solver.y[indices], solver.Lambda[indices])
+            #                         ])
+
+            # _, _sv, _ = POD(c_[F2[:cls.nosc, :], F2[cls.nosc:, :]], np.eye(cls.nosc), cls.tol)
+
+            # fig, ax = logplot(_sv, xlabel=f'index of singular values of F2', xlims=(1, len(_sv)))
+
             RB, sv, nosc_r = PSD(F2, y_list, cls)
             setattr(MechSystem, attr_name[0], RB)
             setattr(MechSystem, attr_name[1], nosc_r)
             print(f'{RB.shape = }')
 
             fig, ax = logplot(sv, xlabel=f'index of singular values of [F2, y_list]', xlims=(1, len(sv)))
-            filename = os.path.join(MechSystem.data_folder, 'osc_sv.pdf')
+            filename = os.path.join(
+                MechSystem.data_folder, "osc_sv_rb" + solver_type + ".pdf"
+            )
             save_figure(fig, filename, fig_data=None)
 
         # Compute reduced basis for Hamiltonian solvers
@@ -152,10 +165,45 @@ class ReduceMechSystem(MechSystem):
             compute_reduced_basis("DiscreteGradient", solvers[0].lag_dg, ["RB_dg", "nosc_r_dg"])
 
     @classmethod
+    def _create_indexed_deim_func(cls, expr, P, solver_type):
+        """
+        Helper method to create a lambdified function with IndexedBase symbols.
+        """
+        # 1. Define IndexedBase symbols
+        y_base = smp.IndexedBase("y")
+        y1_base = smp.IndexedBase("y1")
+        omega2_base = smp.IndexedBase("omega2")
+
+        # 2. Create substitution dictionary from the class's standard symbols
+        subs_dict = {s: y_base[i] for i, s in enumerate(cls.y)}
+        subs_dict.update({s: y1_base[i] for i, s in enumerate(cls.y1)})
+        subs_dict.update({s: omega2_base[i] for i, s in enumerate(cls.omega2)})
+
+        # 3. Substitute the expression to use IndexedBase symbols
+        expr_to_lambdify = P.T @ expr.flat()
+        expr_indexed = smp.Matrix(expr_to_lambdify).subs(subs_dict)
+
+        # 4. Define arguments for lambdify and create the function
+        y_symbols = set(cls.y)
+        is_y_only = all(s in y_symbols for s in expr.free_symbols)
+
+        if is_y_only:
+            args = (y_base,)
+        else:
+            args = (
+                (y_base, omega2_base, cls.beta)
+                if solver_type == "Hamiltonian"
+                else (y_base, y1_base, omega2_base)
+            )
+        deim_func = smp.lambdify(args, expr_indexed, modules=["scipy"])
+
+        return lambda *args, **kwargs: np.squeeze(deim_func(*args, **kwargs))
+
+    @classmethod
     def setup_hyperreduction(cls):
         """Setup hyperreduction as classmethod"""
         print('Setting up hyperreduction...')
-        
+
         def compute_hyperreduction_basis(solver_type, expr, attr, deim_attr_name, deim_func_name, expr_z=None, mdeim_func_name=None):
             attr_11 = attr[:cls.nosc, :cls.nosc_r] if solver_type == "Hamiltonian" else attr[:cls.nosc, :cls.nosc_r_dg]
             P11, _ = DEIM(attr_11, plot_deim=False)
@@ -169,8 +217,14 @@ class ReduceMechSystem(MechSystem):
             ])
             setattr(MechSystem, deim_attr_name, attr.T @ attr @ LA.inv(P.T @ attr))
             print(f'{P.shape = }')
-            
-            deim_func = smp.lambdify((cls.y, cls.omega2, cls.beta) if solver_type == "Hamiltonian" else (cls.y, cls.y1, cls.omega2), P.T @ expr.flat(), modules=['scipy'])
+
+            # if solver_type == "Hamiltonian":
+            #     cls._IP_Ux_inv_PxU = np.block([
+            #         [attr_11 @ LA.inv(P11.T @ attr_11), np.zeros((attr_11.shape[0], attr_22.shape[1]))],
+            #         [np.zeros((attr_22.shape[0], attr_11.shape[1])), attr_22 @ LA.inv(P22.T @ attr_22)]
+            #     ])
+
+            deim_func = cls._create_indexed_deim_func(expr, P, solver_type)
 
             if callable(deim_func) and not isinstance(deim_func, type):
                 # Wrap lambda functions to include self parameter
@@ -220,11 +274,11 @@ class ReduceMechSystem(MechSystem):
         """Memory efficient batch processing of matrix multiplications"""
         result = []
         batch_size = len(indices)
-        
+
         # Process indices in batches
         for i in range(0, len(indices), batch_size):
             batch_indices = indices[i:i+batch_size]
-            
+
             # Pre-allocate batch matrices
             if is_dg:
                 batch_mats = np.vstack([
@@ -236,34 +290,34 @@ class ReduceMechSystem(MechSystem):
                     solver.ham_zz(solver.y[idx]).flatten().astype(np.float32)
                     for idx in batch_indices
                 ])
-                
+
             # Compute batch matrix multiplication
             batch_results = IP @ batch_mats.T  # More efficient than multiple small multiplications
             result.extend(batch_results.T)
-            
+
             # Force garbage collection after each batch
             if (i + batch_size) % 100 == 0:
                 gc.collect()
-        
+
         return result
-                
+
     @classmethod
     def update_mdeim_hyperreduction(cls, solvers):
         """Update methods with MDEIM hyperreduction"""
-        
+
         def compute_mdeim_basis(solver_type, func_name, expr, attr_name, deim_func_name):
             """Helper function to compute MDEIM basis and create lambdified functions"""
             # NOTE: symbolic matrix multiplication in high-precision arithmetic can become expensive
             # and may cause memory overflow. This can lead to a program crash.
             # Though _IP_Ux_inv_PxU_ @ lag_dg_z_col can be done here once and for all solvers.
             print(f'Computing {func_name} reduction...')
-            
+
             # Collect snapshots, load non-zero indices stored in func_name_nonzero_indices
             # and create interpolation matrix IP
             non_zero_indices = getattr(cls, func_name + "_nonzero_indices")
             IP = np.zeros((len(non_zero_indices), (2*cls.nosc)**2), dtype=np.int8)
             IP[np.arange(len(non_zero_indices)), non_zero_indices] = 1
-            
+
             # Filter solvers and collect snapshots
             filtered_solvers, filtered_indices = cls.filter_solvers(solvers, solver_type)
 
@@ -291,9 +345,11 @@ class ReduceMechSystem(MechSystem):
             # Compute POD basis and plot singular values
             Uj, sv, _ = POD(F3, np.eye(F3.shape[0]), cls.tol)
             fig, ax = logplot(sv, xlabel=f'index of singular values of {func_name}', xlims=(1, len(sv)))
-            filename = os.path.join(MechSystem.data_folder, 'osc_sv.pdf')
+            filename = os.path.join(
+                MechSystem.data_folder, "osc_sv_mdeim" + solver_type + ".pdf"
+            )
             save_figure(fig, filename, fig_data=None)
-            
+
             # Compute DEIM points and interpolation matrix
             Pj, _ = DEIM(Uj, plot_deim=False)
             setattr(MechSystem, attr_name, IP.T @ Uj @ LA.inv(Pj.T @ Uj))
@@ -304,7 +360,7 @@ class ReduceMechSystem(MechSystem):
             mdeim_func = smp.lambdify((cls.y, cls.y1, cls.omega2) if solver_type == "DiscreteGradient" 
                                     else (cls.y, cls.omega2, cls.beta),
                                     mdeim_col, modules=['scipy'])
-            
+
             if callable(mdeim_func) and not isinstance(mdeim_func, type):
                 wrapped = (lambda f: lambda self, *args, **kwargs: f(*args, **kwargs))(mdeim_func)
                 setattr(MechSystem, deim_func_name, wrapped)
@@ -338,7 +394,7 @@ class ReduceMechSystem(MechSystem):
     def hyperreduce_constraints(cls, solvers, indices_list, solver_type):
         """Hyper-reduce constraints using MDEIM."""
         print('Computing constraints reduction...')
-        
+
         def compute_constraint_basis(func_name, expr, is_g_prime=False):
             """
             Helper function to compute MDEIM basis for constraints.
@@ -402,6 +458,9 @@ class ReduceMechSystem(MechSystem):
             # Handle argument signature for g_prime_x_lambda_y and g_prime_x_lambda_lambda
             if func_name in ['g_prime_x_lambda_y_', 'g_prime_x_lambda_lambda_']:
                 mdeim_func = smp.lambdify((cls.y, cls.lag_mult), col, modules=['scipy'])
+            elif func_name in ["g_"]:
+                # mdeim_func = smp.lambdify((cls.y,), col, modules=['scipy'])
+                mdeim_func = cls._create_indexed_deim_func(expr, Pj, solver_type)
             else:
                 mdeim_func = smp.lambdify((cls.y,), col, modules=['scipy'])
 
@@ -416,34 +475,59 @@ class ReduceMechSystem(MechSystem):
                 print(f"Memory address of {func_name}{'mdeim' if is_prime_type else 'deim'}: {hex(id(mdeim_func))}")
 
             return basis, sv
-        
+
         # Compute bases for g and g_prime
         _Ux_inv_PxU, sv_g = compute_constraint_basis('g_', cls.g_expr)
         _IP_Ux_inv_PxU, sv_g_prime = compute_constraint_basis('g_prime_', cls.g_prime_expr, is_g_prime=True)
 
-        # Also compute bases for cls.g_prime_x_lambda_y and cls.g_prime_x_lambda_lambda
-        IP_g_prime_x_lambda_y, sv_g_prime_x_lambda_y = compute_constraint_basis('g_prime_x_lambda_y_', cls.g_prime_x_lambda_y_expr, is_g_prime=True)
-        IP_g_prime_x_lambda_lambda, sv_g_prime_x_lambda_lambda = compute_constraint_basis('g_prime_x_lambda_lambda_', cls.g_prime_x_lambda_lambda_expr, is_g_prime=True)
-
-        # Plot singular values for g, g_prime, g_prime_x_lambda_y and g_prime_x_lambda_lambda using logplot, pass the singular values and xlims as a list
-        fig, ax = logplot([sv_g, sv_g_prime, sv_g_prime_x_lambda_y, sv_g_prime_x_lambda_lambda], xlabel=f'index of singular values', xlims=[(1, len(sv_g)), (1, len(sv_g_prime)), (1, len(sv_g_prime_x_lambda_y)), (1, len(sv_g_prime_x_lambda_lambda))])
-        filename = os.path.join(MechSystem.data_folder, 'osc_sv.pdf')
-        save_figure(fig, filename, fig_data=None)
-
         # Set attributes based on solver type
         if solver_type == "Hamiltonian":
             setattr(MechSystem, '_Ux_inv_PxU', _Ux_inv_PxU)
+            # setattr(MechSystem, 'g_prime_mdeim', cls.g_prime_)
             setattr(MechSystem, '_IP_Ux_inv_PxU', _IP_Ux_inv_PxU)
-            setattr(MechSystem, 'IP_g_prime_x_lambda_y', IP_g_prime_x_lambda_y)
-            setattr(MechSystem, 'IP_g_prime_x_lambda_lambda', IP_g_prime_x_lambda_lambda)
+            # setattr(MechSystem, 'IP_g_prime_x_lambda_y', IP_g_prime_x_lambda_y)
+            # setattr(MechSystem, 'IP_g_prime_x_lambda_lambda', IP_g_prime_x_lambda_lambda)
         elif solver_type == "DiscreteGradient":
+            # Also compute bases for cls.g_prime_x_lambda_y and cls.g_prime_x_lambda_lambda
+            IP_g_prime_x_lambda_y, sv_g_prime_x_lambda_y = compute_constraint_basis(
+                "g_prime_x_lambda_y_", cls.g_prime_x_lambda_y_expr, is_g_prime=True
+            )
+            IP_g_prime_x_lambda_lambda, sv_g_prime_x_lambda_lambda = (
+                compute_constraint_basis(
+                    "g_prime_x_lambda_lambda_",
+                    cls.g_prime_x_lambda_lambda_expr,
+                    is_g_prime=True,
+                )
+            )
+
             setattr(MechSystem, '_Ux_inv_PxU_dg', _Ux_inv_PxU)
             setattr(MechSystem, '_IP_Ux_inv_PxU_dg', _IP_Ux_inv_PxU)
             setattr(MechSystem, 'IP_g_prime_x_lambda_y_dg', IP_g_prime_x_lambda_y)
             setattr(MechSystem, 'IP_g_prime_x_lambda_lambda_dg', IP_g_prime_x_lambda_lambda)
         else:
             raise ValueError(f"Invalid solver type: {solver_type}")
-    
+
+        # Plot singular values for g, g_prime, g_prime_x_lambda_y and g_prime_x_lambda_lambda using logplot, pass the singular values and xlims as a list
+        if "sv_g_prime" in locals():
+            sv_list = [sv_g, sv_g_prime]
+            xlims_list = [(1, len(sv_g)), (1, len(sv_g_prime))]
+        else:
+            sv_list = [sv_g]
+            xlims_list = [(1, len(sv_g))]
+
+        # Add additional singular values if solver type is DiscreteGradient
+        if solver_type == "DiscreteGradient":
+            sv_list.extend([sv_g_prime_x_lambda_y, sv_g_prime_x_lambda_lambda])
+            xlims_list.extend(
+                [(1, len(sv_g_prime_x_lambda_y)), (1, len(sv_g_prime_x_lambda_lambda))]
+            )
+
+        fig, ax = logplot(sv_list, xlabel=f"index of singular values", xlims=xlims_list)
+        filename = os.path.join(
+            MechSystem.data_folder, "osc_sv_constraints" + solver_type + ".pdf"
+        )
+        save_figure(fig, filename, fig_data=None)
+
         print('Constraints reduction complete.')
 
 class BaseSolverMixin:
@@ -461,7 +545,7 @@ class BaseSolverMixin:
         if self.store: self.info.append(np.array(info_[0::1]))
 
         Lambda = np.zeros_like(self.g_(np.zeros(2*self.nosc))).squeeze()
-        
+
         if self.constraint_type:
             self.fixed_point(y_, Lambda)
 
@@ -480,10 +564,10 @@ class BaseSolverMixin:
         self.y[0] = self.y_init
         if self.store: self.info = []
         self.Lambda = np.zeros((self.n+1, self.g_(np.zeros(2*self.nosc)).shape[0]))
-    
+
         # Calculate update frequency (10% of iterations)
         update_freq = max(1, self.n // 10)  
-        
+
         # Create progress bar that updates less frequently
         with tqdm(total=self.n, desc='Solving trajectory', 
                 miniters=update_freq,  # Minimum iterations between updates
@@ -495,11 +579,11 @@ class BaseSolverMixin:
 
                 if self.store: self.info.append(self.y[k])
                 y_ = np.array([self.y[k], self.y[k]])
-                
+
                 y_, y_full_, self.Lambda[k+1] = self.solve_for_w(y_, k)
-                
+
                 self.y[k+1] = y_[-1]
-                
+
                 if self.RB is not None:
                     self.y_full[k+1] = y_full_[-1]
 
@@ -507,12 +591,12 @@ class BaseSolverMixin:
                 if (k + 1) % update_freq == 0:
                     pbar.update(update_freq)
                     pbar.set_postfix({'step': k+1, 'total': self.n})
-        
+
             # Update any remaining iterations
             remaining = self.n % update_freq
             if remaining:
                 pbar.update(remaining)
-        
+
         if self.store:
             self.info.append(self.y[k+1])
             self.info = np.vstack(self.info)
@@ -566,12 +650,12 @@ class BaseSolverMixin:
                     y = solver.y_red
                 else:
                     y = solver.y
-                    
-                dpsi, _ = solver.var_solve(y)
-                solver.sym_error = solver.symplectic_error(dpsi)
+
+                solver.sym_error = solver.var_solve(y)
+                # solver.sym_error = solver.symplectic_error(dpsi)
 
             return solver
-        
+
         except Exception as e:
             print(f"Error in solve_mech_system: {str(e)}")
             print(f"Error type: {type(e)}")
@@ -583,27 +667,31 @@ class BaseSolverMixin:
         # Prepare the arguments for solve_mech_system
         args = []
         for x in kwds['registered_solver_classes']:
-          for y in MechSystem.dt_space:
-            for z in kwds['Omega2_space']:
-              # Create a deep copy of kwds for each process
-              process_kwds = kwds.copy()
-              args.append((x, y, z, process_kwds))
+            for y in MechSystem.dt_space:
+                for z in kwds["Omega2_space"]:
+                    # Create a deep copy of kwds for each process
+                    process_kwds = kwds.copy()
+                    args.append((x, y, z, process_kwds))
 
         # Check the length of args
-        if len(args) > 1 and not hasattr(MechSystem, 'RB'):
+        if (
+            len(args) > 1
+            and not hasattr(MechSystem, "RB")
+            and not hasattr(MechSystem, "RB_dg")
+        ):
             # Use ProcessPoolExecutor to parallelize the solve_mech_system calls
             print('Solving mechanical system using parallel processing...')
-            
+
             # Pre-allocate MSsolvers with None values
             MSsolvers.extend([None] * len(args))
-            
+
             with concurrent.futures.ProcessPoolExecutor() as executor:
                 try:
                     futures = [
                         executor.submit(BaseSolverMixin.solve_mech_system, *arg)
                         for arg in args
                     ]
-                    
+
                     # Place results directly in their final position
                     for future in concurrent.futures.as_completed(futures, timeout=None):
                         idx = futures.index(future)
@@ -611,11 +699,17 @@ class BaseSolverMixin:
                             result = future.result()
                             print(f"Completed task {idx+1}/{len(args)}")
                             MSsolvers[idx] = result  # Store directly in correct position
+                        except RuntimeError as e:
+                            if str(e) == "Nonlinear solver did not converge":
+                                print(
+                                    f"Task {idx+1}/{len(args)} failed to converge, continuing with other tasks"
+                                )
+                                MSsolvers[idx] = None  # Mark failed task
+                            else:
+                                raise  # Re-raise other RuntimeErrors
                         except Exception as e:
                             print(f"Error in task {idx}: {str(e)}")
-                            executor.shutdown(wait=False)
                             raise
-                            
                 except (concurrent.futures.TimeoutError, KeyboardInterrupt, Exception) as e:
                     print(f"\nReceived {type(e).__name__}, cancelling tasks...")
                     for f in futures:
@@ -663,20 +757,20 @@ class BaseSolverMixin:
             dump(solvers_r, solvers_file)
 
         BaseSolverMixin.measures(kwds, solvers_r)
-        
+
         return solvers_r
 
     @staticmethod
     def setup_and_solve_hyperreduced_system(kwds, solvers):
         """Setup and solve hyper-reduced system for a specific solver type"""
         print(f'Setting up hyper-reduced system...')
-        
+
         # Setup hyperreduction using classmethod
         ReduceMechSystem.setup_hyperreduction()
 
         if ReduceMechSystem.hyperreducer == 'MDEIM':
             ReduceMechSystem.update_mdeim_hyperreduction(solvers)
-                    
+
         if ReduceMechSystem.constraints_reduce:
             if ConformalStormerVerletSolver in kwds['registered_solver_classes'] \
                 or ConformalImplicitMidpointSolver in kwds['registered_solver_classes']:
@@ -712,9 +806,9 @@ class BaseSolverMixin:
             print("Creating new checkpoint...")
             dump(kwds, kwds_file)
             dump(solvers_dr, solvers_file)
-            
+
         BaseSolverMixin.measures(kwds, solvers_dr)
-        
+
         return solvers_dr
 
     @staticmethod
@@ -754,41 +848,40 @@ class BaseSolverMixin:
 
             filtered_solvers[-1].plot()
 
-        # recompute energy error of conformal stormer verlet solvers by substracting the solver Hamiltonian from the Hamiltonian of DiscreteGradientSolver
+        # # recompute energy error of conformal stormer verlet solvers by substracting the solver Hamiltonian from the Hamiltonian of DiscreteGradientSolver
 
-        # initialize energy error array
-        eng_error = np.zeros((MechSystem.dt_space_dim * kwds['Omega2_space_dim']))
+        # # initialize energy error array
+        # eng_error = np.zeros((MechSystem.dt_space_dim * kwds['Omega2_space_dim']))
 
-        # Create a dictionary mapping solver classes to their respective solver lists
-        solver_lists = {
-            solver_class: [
-                solver for solver in solvers if solver.solver_class == solver_class
-            ]
-            for solver_class in kwds['registered_solver_classes']
-        }
-        for i, solver in enumerate(solver_lists[ConformalStormerVerletSolver], start=0):
-            # Compute energy error by subtracting the Hamiltonian of DiscreteGradientSolver
-            # Find the corresponding DiscreteGradientSolver instance with matching dt and Omega2
-            dg_solver = next(
-                (s for s in solver_lists[DiscreteGradientSolver]
-                    if np.isclose(s.dt, solver.dt)
-                    and np.isclose(s.Omega2, solver.Omega2).all()),
-                None
-            )
-            if dg_solver is not None:
-                _eng_error = np.array([solver.ham(y) for y in solver.y]) - dg_solver.ham(dg_solver.y[-1])
-                eng_error[i] = sqrt(solver.dt) * LA.norm(_eng_error)
-            else:
-                print("Warning: No matching DiscreteGradientSolver found for energy error computation.")
-                    
-        eng_error = eng_error.reshape(MechSystem.dt_space_dim, kwds['Omega2_space_dim'])
+        # # Create a dictionary mapping solver classes to their respective solver lists
+        # solver_lists = {
+        #     solver_class: [
+        #         solver for solver in solvers if solver.solver_class == solver_class
+        #     ]
+        #     for solver_class in kwds['registered_solver_classes']
+        # }
+        # for i, solver in enumerate(solver_lists[ConformalStormerVerletSolver], start=0):
+        #     # Compute energy error by subtracting the Hamiltonian of DiscreteGradientSolver
+        #     # Find the corresponding DiscreteGradientSolver instance with matching dt and Omega2
+        #     dg_solver = next(
+        #         (s for s in solver_lists[DiscreteGradientSolver]
+        #             if np.isclose(s.dt, solver.dt)
+        #             and np.isclose(s.Omega2, solver.Omega2).all()),
+        #         None
+        #     )
+        #     if dg_solver is not None:
+        #         _eng_error = np.array([solver.ham(y) for y in solver.y]) - dg_solver.ham(dg_solver.y[-1])
+        #         eng_error[i] = sqrt(solver.dt) * LA.norm(_eng_error)
+        #     else:
+        #         print("Warning: No matching DiscreteGradientSolver found for energy error computation.")
 
-        if eng_error.shape[0] > 1 and eng_error[0, 0] is not None and MechSystem.dt_space_dim > 1 and not MechSystem.predict:
-            for col in range(eng_error.shape[1]):
-                r_values = r_form(eng_error[:, col], MechSystem.dt_space)
-                temp = c_[MechSystem.dt_space, r_values].T
-                tex_table(f'ConformalStormerVerletSolver (Omega2_{col})', temp)
+        # eng_error = eng_error.reshape(MechSystem.dt_space_dim, kwds['Omega2_space_dim'])
 
+        # if eng_error.shape[0] > 1 and eng_error[0, 0] is not None and MechSystem.dt_space_dim > 1 and not MechSystem.predict:
+        #     for col in range(eng_error.shape[1]):
+        #         r_values = r_form(eng_error[:, col], MechSystem.dt_space)
+        #         temp = c_[MechSystem.dt_space, r_values].T
+        #         tex_table(f'ConformalStormerVerletSolver (Omega2_{col})', temp)
 
     def plot(self):
         """
@@ -825,11 +918,12 @@ class BaseSolverMixin:
         gs = fig.add_gridspec(5, 2, hspace=1)
         ax0, ax1, ax2, ax3, ax4 = [fig.add_subplot(gs[i, 0]) for i in [0, 1, 2, 3, 4]]
         ax_pp = fig.add_subplot(gs[:5, -1], projection='3d')
+        ax_pp.set_box_aspect([1, 1, 1])  # Set aspect ratio to be equal for all axes
 
         if hasattr(self, 'sym_error'):
             plot_data(ax0, self.t_points, self.sym_error, xlims=(0, self.T_final), \
                     ylabel=r'$\Delta Sp$', margins=10)
-                
+
             if max(abs(self.sym_error)) < 1e-15:
                 ax0.set_ylim([-1e-15, 1e-15])
 
@@ -837,9 +931,14 @@ class BaseSolverMixin:
         if hasattr(self, 'g__lambda'):
             g_norm = [LA.norm(self.g__lambda(y)) for y in self.y]
 
-            plot_data(ax1, self.t_points, g_norm, xlims=(0, self.T_final), \
-                    ylabel=r'$\Delta \mathfrak{P}$', margins=10)
-
+            plot_data(
+                ax1,
+                self.t_points,
+                g_norm,
+                xlims=(0, self.T_final),
+                ylabel=r"$\Delta \mathcal{S}$",
+                margins=10,
+            )
 
         if hasattr(self, 'eng_error'):
             plot_data(ax2, self.t_points, self.eng_error, xlims=(0, self.T_final), \
@@ -890,10 +989,11 @@ class BaseSolverMixin:
         ax_pp.set_zlabel('z', labelpad=10)
         ax_pp.set_title('Phase portrait')
         # ax_pp.set_xlim([coords[:, :, 0].min(), coords[:, :, 0].max()])
-        # ax_pp.set_ylim([coords[:, :, 1].min(), coords[:, :, 1].max()])        
-        # ax_pp.set_zlim([coords[:, :, 2].min(), coords[:, :, 2].max()])    
+        # ax_pp.set_ylim([coords[:, :, 1].min(), coords[:, :, 1].max()])
+        # ax_pp.set_zlim([coords[:, :, 2].min(), coords[:, :, 2].max()])
+        ax_pp.set_box_aspect([1, 1, 1])  # Set aspect ratio to be equal for all axes
         ax_pp.view_init(elev=15, azim=45)
-        
+
         # Hide inner labels
         for ax in [ax0, ax1, ax2, ax3, ax4]:
             ax.label_outer()
@@ -917,7 +1017,7 @@ class BaseSolverMixin:
         filename = os.path.join(MechSystem.data_folder, f"osc_{self.solver_class.__name__}{string}.pdf")
         save_figure(fig, filename, fig_data=None)
 
-#%% Concrete solver classes
+# %% Concrete solver classes
 class DiscreteGradientSolver(BaseSolverMixin, DiscreteGradient):
     """DiscreteGradient solver with DG-specific capabilities"""
     def __init__(self, kwds):
@@ -927,7 +1027,7 @@ class DiscreteGradientSolver(BaseSolverMixin, DiscreteGradient):
 
     def _g_prime_with_JJ(self, y): #New class method
         return self.g_prime__(y) @ self.JJ.T
-    
+
     def residual(self, x, x1, Lambda):
 
         g_x1 = self.g(x1)
@@ -937,7 +1037,7 @@ class DiscreteGradientSolver(BaseSolverMixin, DiscreteGradient):
                   c_[self.g_prime__(x1), np.zeros((g_x1.shape[0],)*2)]]
 
         return resi, tang
-    
+
     def fixed_point(self, x, Lambda):
         """
         Fixed point iteration method.
@@ -966,7 +1066,7 @@ class DiscreteGradientSolver(BaseSolverMixin, DiscreteGradient):
         # Check convergence
         if m >= self.M:
             raise RuntimeError("Nonlinear solver did not converge")
-        
+
 
 class ConformalStormerVerletSolver(BaseSolverMixin, ConformalStormerVerlet):
     """CSVSolver with Hamiltonian capabilities"""
@@ -1077,15 +1177,15 @@ class ConformalImplicitMidpointSolver(BaseSolverMixin, ConformalImplicitMidpoint
         ])
         return result
 
-#%% Main driver
+# %% Main driver
 if __name__ == '__main__':
     """
     Model order reduction of the MechSystem using concrete solvers
     """
 
-    #%% Full order solution
+    # %% Full order solution
     kwds = {
-        'registered_solver_classes': [
+        "registered_solver_classes": [
             # ConformalImplicitMidpointSolver,
             DiscreteGradientSolver,
             ConformalStormerVerletSolver,
@@ -1114,7 +1214,7 @@ if __name__ == '__main__':
             solvers = load(solvers_file)
             print("Checkpoint loaded successfully")
         except Exception as e:
-                raise Exception(f"Error loading checkpoint: {str(e)}")
+            raise Exception(f"Error loading checkpoint: {str(e)}")
     else:
         # Execute parallel solve
         BaseSolverMixin.parallel_solve_mech_system(kwds, solvers)
@@ -1127,8 +1227,7 @@ if __name__ == '__main__':
 
     BaseSolverMixin.measures(kwds, solvers)
 
-
-    #%% Reduced order solution
+    # %% Reduced order solution
     print('Computing reduced bases...')
 
     # Calculate samples and indices
@@ -1137,7 +1236,7 @@ if __name__ == '__main__':
         np.concatenate(([0], np.random.choice(np.arange(1, solver.n), n_samples - 1, replace=False)))
         for solver, n_samples in zip(solvers, n_samples_list)
         ]
-    
+
     Omega2_space_ = (MechSystem._Omega2_space[-1:] if MechSystem.predict
                 else MechSystem._Omega2_space)        
     Omega2_space_dim_ = len(Omega2_space_)
@@ -1145,23 +1244,23 @@ if __name__ == '__main__':
         'Omega2_space': Omega2_space_,
         'Omega2_space_dim': Omega2_space_dim_,
         })
-    
+
     # Solve for each solver type
     solvers_r = BaseSolverMixin.setup_and_solve_reduced_system(kwds, solvers)
-                
-    #%% Hyper-reduced model
+
+    # %% Hyper-reduced model
     print('Computing hyper-reduction bases...')
 
     # Setup and solve for each solver type
     solvers_dr = BaseSolverMixin.setup_and_solve_hyperreduced_system(kwds, solvers)
-            
-    #%% Compute and display metrics
+
+    # %% Compute and display metrics
     array_shape = (len(kwds['registered_solver_classes']), 
                   MechSystem.dt_space_dim, 
                   Omega2_space_dim)
-    
+
     time_lapsed = [reshape([x.time_lapsed for x in solvers], array_shape)]
-    
+
     if not MechSystem.predict:
         print('Solution errors:')
         print(reshape([np.amax(abs(y1 - y2)) 
@@ -1172,14 +1271,14 @@ if __name__ == '__main__':
             for y1, y2 in zip([x.y for x in solvers], 
             [x.y for x in solvers_dr])], 
             array_shape))
-    
+
         time_lapsed.append(reshape([x.time_lapsed for x in solvers_r], array_shape))
-                                        # time_lapsed[0].shape) / time_lapsed[0] * 100)
+        # time_lapsed[0].shape) / time_lapsed[0] * 100)
         time_lapsed.append(reshape([x.time_lapsed for x in solvers_dr], array_shape))
-                                        # time_lapsed[0].shape) / time_lapsed[0] * 100)
+        # time_lapsed[0].shape) / time_lapsed[0] * 100)
         time_lapsed[1] = time_lapsed[1] / time_lapsed[0] * 100
         time_lapsed[2] = time_lapsed[2] / time_lapsed[0] * 100
-    
+
     else:
         time_lapsed.extend([
             reshape([x.time_lapsed for x in solvers_r], (*array_shape[:2], 1)),

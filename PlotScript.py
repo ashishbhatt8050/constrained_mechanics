@@ -31,7 +31,7 @@ params = {
     'legend.fontsize': 20,
     'xtick.labelsize': 20,
     'ytick.labelsize': 20,
-    'text.usetex': True,
+    'text.usetex': False,
     'figure.figsize': [14, 6],
     'figure.autolayout': True
 }
@@ -212,18 +212,20 @@ def save_figure(fig, filename, fig_data=None):
 
 #%% # edit the figure later
 # import pickle
+# import matplotlib as mpl
+# mpl.rcParams['text.latex.preamble'] = r'\usepackage{amsfonts}'
 
-# with open('data/2024-10-04_13-39_osc_ConformalStormerVerlet_full.fig.pickle', 'rb') as file:
+# with open('data/2025-09-11/osc_ConformalStormerVerletSolver_full.fig.pickle', 'rb') as file:
     
 #     figx = pickle.load(file)
 
 #     figx.show() # Show the figure, edit it, etc.!
 #     ax = figx.axes
-#     # ax[0].set_xlabel('time')
+#     ax[0].set_xlabel('time')
 #     ax[0].set_ylim([-1e-15, 1e-15])
 #     # ax[2].set_xlim([1,6])
-#     figx.savefig('data/2024-10-04_13-39_osc_ConformalStormerVerlet_full_2.pdf')
-#     figx.savefig('data/2024-10-04_13-39_osc_ConformalStormerVerlet_full_2.eps')
+#     figx.savefig('data/2025-09-11/osc_ConformalStormerVerletSolver_full_2.pdf')
+#     figx.savefig('data/2025-09-11/osc_ConformalStormerVerletSolver_full_2.eps')
 
 #%%
 def tex_table(solver_name, array2print):

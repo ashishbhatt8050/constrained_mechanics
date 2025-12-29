@@ -22,7 +22,7 @@ from time import process_time
 import numpy as np
 import scipy as sp
 import pylab as pl
-from scipy.linalg import qr
+from scipy.linalg import qr, sqrtm
 
 # %% POD
 
@@ -54,9 +54,6 @@ def POD(S, Xh, eps=None):
     # Get the dimensions of the input matrix
     Nh, ns = S.shape
 
-    # Compute the square root of the weighting matrix
-    Xh_half = sp.linalg.sqrtm(Xh) if np.allclose(Xh, np.eye(Xh.shape[0])) else np.eye(Xh.shape[0])
-    
     if ns <= Nh:
         C_ = S.T @ Xh @ S
         Sigma2, Psi = np.linalg.eigh(C_)
@@ -67,6 +64,12 @@ def POD(S, Xh, eps=None):
         
         Chi = S @ Psi/np.sqrt(Sigma2)
     else:
+        # Compute the square root of the weighting matrix
+        if np.allclose(Xh, np.eye(Xh.shape[0])):
+            Xh_half = np.eye(Xh.shape[0])
+        else:
+            Xh_half = sqrtm(Xh)
+
         K_ = Xh_half @ S @ S.T @ Xh_half
         Sigma2, Chi_ = np.linalg.eigh(K_)
         Sigma2, Chi_ = np.flip(Sigma2), np.flip(Chi_, axis=1)
@@ -96,10 +99,14 @@ def POD(S, Xh, eps=None):
         
     return Chi, np.sqrt(Sigma2), N
 
-def PSD(F2, y_list, MechSystem):
+def PSD(F2, y_list, MechSystem, weights=None):
     
     nosc, tol = MechSystem.nosc, MechSystem.tol
-    rb, sv, nosc_r = POD(pl.c_[y_list[:nosc, :], y_list[nosc:, :], F2[:nosc, :], F2[nosc:, :]], np.eye(nosc), tol)
+    if weights is None:
+        weights = np.eye(nosc)
+        
+    # Pass the weights (Xh) to POD instead of hardcoded identity
+    rb, sv, nosc_r = POD(pl.c_[y_list[:nosc, :], y_list[nosc:, :], F2[:nosc, :], F2[nosc:, :]], weights, tol)
     RB = np.block([[rb[:, :nosc_r], np.zeros_like(rb[:, :nosc_r])], [np.zeros_like(rb[:, :nosc_r]), rb[:, :nosc_r]]])
     
     return RB, sv, nosc_r

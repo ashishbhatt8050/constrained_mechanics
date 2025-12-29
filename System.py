@@ -14,6 +14,7 @@ import dill as pickle
 import sympy as smp
 from functools import wraps
 from PlotScript import timing
+import sys
 
 import timeit
 
@@ -322,7 +323,7 @@ class IndexedBaseSymbolicComputer:
         expr_indexed = expr.subs(subs_dict)
 
         # The actual lambdified function
-        _func = smp.lambdify(args, expr_indexed, "numpy")
+        _func = smp.lambdify(args, expr_indexed, "numpy", cse=True)
 
         # Wrapper to handle input shapes
         @wraps(_func)
@@ -360,7 +361,7 @@ class IndexedBaseSymbolicComputer:
             (self.y_base, self.omega2_base, self.beta), ham_z_expr
         )
         ham_zz_ = smp.lambdify(
-            (self.y, self.omega2, self.beta), ham_zz_expr, modules=["numpy"]
+            (self.y, self.omega2, self.beta), ham_zz_expr, modules=["numpy"], cse=True
         )
 
         return {
@@ -429,7 +430,7 @@ class IndexedBaseSymbolicComputer:
             (self.y_base, self.y1_base, self.omega2_base), lag_dg_expr
         )
         lag_dg_z_ = smp.lambdify(
-            (self.y, self.y1, self.omega2), lag_dg_z_expr, modules=["numpy"]
+            (self.y, self.y1, self.omega2), lag_dg_z_expr, modules=["numpy"], cse=True
         )
 
         return {
@@ -471,10 +472,10 @@ class IndexedBaseSymbolicComputer:
 
         # Lambdify for these expressions requires custom substitutions
         g_prime_x_lambda_y_lam = smp.lambdify(
-            (self.y, lag_mult_syms), g_prime_x_lambda_y_expr, modules=["numpy"]
+            (self.y, lag_mult_syms), g_prime_x_lambda_y_expr, modules=["numpy"], cse=True
         )
         g_prime_x_lambda_lambda_lam = smp.lambdify(
-            (self.y, lag_mult_syms), g_prime_x_lambda_lambda_expr, modules=["numpy"]
+            (self.y, lag_mult_syms), g_prime_x_lambda_lambda_expr, modules=["numpy"], cse=True
         )
 
         g_prime_nonzero_indices = np.where(
@@ -482,7 +483,7 @@ class IndexedBaseSymbolicComputer:
         )[0]
 
         g_lam = self._lambdify_hybrid((self.y_base,), g_expr)
-        g_prime_lam = smp.lambdify((self.y,), g_prime_expr, modules=["numpy"])
+        g_prime_lam = smp.lambdify((self.y,), g_prime_expr, modules=["numpy"], cse=True)
 
         g_prime_x_lambda_ = self._lambdify_hybrid(
             (self.y_base, self.lag_mult_base), g_prime_x_lambda_expr
@@ -518,13 +519,14 @@ def load_symbolic_expressions(cls):
     """Decorator to handle loading/saving of symbolic expressions"""
     try:
         # Try to load expressions
-        expressions_file = os.path.join('data', f"symbolic_expr_{cls.nosc}.pickle")
+        expressions_file = os.path.join('data', f"symbolic_expr_{cls.nosc}_cse.pickle")
         with open(expressions_file, 'rb') as f:
             expressions = pickle.load(f)
 
         print("Loaded symbolic expressions from disk.")
     except (FileNotFoundError, pickle.UnpicklingError):
         # Compute and save if loading fails
+        sys.setrecursionlimit(50000)
         computer = IndexedBaseSymbolicComputer(cls.nosc)
         expressions = {}
         tl = computer.compute_all(expressions)
@@ -550,7 +552,11 @@ class MechSystem:
     """Class of MechSystem methods"""
 
     # Load or compute expressions once at module level
-    keep_time = datetime.now().strftime("%Y-%m-%d_%H-%M_")
+    if 'SLURM_JOB_ID' in os.environ and False:
+        keep_time = f"{os.environ.get('SLURM_JOB_NAME', 'slurm')}-{os.environ['SLURM_JOB_ID']}"
+        # keep_time = f"{os.environ.get('SLURM_JOB_NAME', 'slurm')}-1642"
+    else:
+        keep_time = datetime.now().strftime("%Y-%m-%d_%H-%M")
     data_folder = os.path.join('data', keep_time)
     if not os.path.exists(data_folder):
         os.makedirs(data_folder)
@@ -563,16 +569,16 @@ class MechSystem:
     w_values = [1]
     assert np.isclose(sum(w_values), 1), 'sum_i w_i must be 1'
 
-    dt_space_dim = 3
-    dt_space = np.round(np.logspace(-3, -2, num=dt_space_dim), 10)
-    T_final = dt_space[-1] * 100
+    dt_space_dim = 1
+    dt_space = np.round(np.logspace(-2, -1, num=dt_space_dim), 10)
+    T_final = dt_space[-1] * 1e2
     "Fixed-point nonliner equations solver properties"
-    tol, M, var, store = 1.0E-12, 100, True, False
+    tol, M, var, store = 1.0E-12, 500, True, False
 
     # parameter space: frequency of the oscillators -- omega^2
-    nosc = 180 * 3
+    nosc = 18 * 5 * 3
     assert nosc%6 == 0, 'nosc is not exactly divisible by 6'
-    _Omega2_space_dim = 3
+    _Omega2_space_dim = 10
     _Omega2_space = np.sort(10 * (1 - rng.random((_Omega2_space_dim, nosc // 3 - 2))))
     _Omega2_space[:, 1 * _Omega2_space_dim - 1 :] = _Omega2_space[
         0, 1 * _Omega2_space_dim - 1 :
@@ -625,7 +631,7 @@ class MechSystem:
     y_init = r_[positions, momenta].flatten()
 
     # These two properties only have effect during reduction
-    predict = False  # False = reproduce results of the full model
+    predict = True  # False = reproduce results of the full model
     reducer = 'psd'
     hyperreducer = 'MDEIM'
 
@@ -911,7 +917,7 @@ class MechSystem:
             self.ham_z = self.ham_z_hyperreduced
             self.ham_zz = self.ham_zz_hyperreduced
 
-            self.g__ = self.g_hyperreduced
+            self.g__ = self.g_reduced
             self.g_prime__ = self.g_prime_hyperreduced
 
             if self.hyperreducer == 'MDEIM':
@@ -938,7 +944,7 @@ class MechSystem:
 # %% main
 
 if __name__ == '__main__':
-    nosc = 18 * 3
+    nosc = 18 * 1 * 3
 
     # initialize MechSystem instance
     system = MechSystem({"nosc": nosc})

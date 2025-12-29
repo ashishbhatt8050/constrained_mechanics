@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+import os
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
+
 """
 Created on June 2024
 
@@ -34,17 +42,16 @@ from scipy import linalg as scipyLA
 from pylab import  log, r_, c_, sqrt, reshape, linspace, roll, figure
 
 import concurrent.futures
+import multiprocessing
 
-import os
 import sys
+import shutil
 import gc
 from joblib import dump, load
 from functools import partial, wraps
 from tqdm.auto import tqdm  # Use tqdm.auto for better process handling
 
 from matplotlib import rc
-rc('text', usetex=True)  # Enable LaTeX rendering
-rc('text.latex', preamble=r'\usepackage{amsfonts}')  # Load AMSFonts for Fraktur
 
 from ODESolver import (ConformalStormerVerlet, ConformalImplicitMidpoint, 
                       DiscreteGradient)
@@ -52,6 +59,30 @@ from ODESolver import (ConformalStormerVerlet, ConformalImplicitMidpoint,
 from System import MechSystem  # Keep for static properties
 from podDEIM import POD, PSD, DEIM
 from PlotScript import plot_data, tex_table, logplot, timing, save_figure
+
+# Configure LaTeX rendering based on availability
+if False and shutil.which('latex'):
+    rc('text', usetex=True)
+    rc('text.latex', preamble=r'\usepackage{amsfonts}')  # Load AMSFonts for Fraktur
+else:
+    rc('text', usetex=False)
+    print("LaTeX disabled or not found. Using standard fonts for plots.", flush=True)
+
+def worker(idx, *arg):
+    # pin this process to a specific core (0–23 in this example)
+    print(f"Worker {idx} starting...", flush=True)
+    # try:
+    #     cpus = sorted(os.sched_getaffinity(0))
+    #     core_id = cpus[idx % len(cpus)]
+    #     os.sched_setaffinity(0, {core_id})
+    # except (AttributeError, OSError):
+    #     pass
+    # run your solver
+    try:
+        return BaseSolverMixin.solve_mech_system(*arg)
+    except Exception as e:
+        print(f"Worker {idx} failed with error: {e}", flush=True)
+        raise
 
 # %%
 def compose_solver_solves(func):
@@ -119,32 +150,38 @@ class ReduceMechSystem(MechSystem):
         def compute_reduced_basis(solver_type, expr, attr_name):
             filtered_solvers, filtered_indices = cls.filter_solvers(solvers, solver_type)
 
-            # Create F2 in batches
-            F2_list = []
-            for solver, indices in zip(filtered_solvers, filtered_indices):
-                batch_result = compute_batch_snapshots(solver, indices, expr)
-                F2_list.append(batch_result)
-
-            F2 = np.hstack(F2_list)
-            del F2_list
-            gc.collect()
-
             # Create snapshot list
             y_list = np.hstack([solver.y[indices].T for solver, indices 
                                 in zip(filtered_solvers, filtered_indices)])
 
-            # Create snapshots of g_prime_x_lambda
-            # g_prime_x_lambda_list = np.hstack([
-            #                             solver.g_prime_x_lambda_(y, Lambda)
-            #                             for solver, indices in zip(filtered_solvers, filtered_indices)
-            #                             for y, Lambda in zip(solver.y[indices], solver.Lambda[indices])
-            #                         ])
+            if True or solver_type == "Hamiltonian":
+                # Create F2 in batches
+                F2_list = []
+                for solver, indices in zip(filtered_solvers, filtered_indices):
+                    batch_result = compute_batch_snapshots(solver, indices, expr)
+                    F2_list.append(batch_result)
 
-            # _, _sv, _ = POD(c_[F2[:cls.nosc, :], F2[cls.nosc:, :]], np.eye(cls.nosc), cls.tol)
+                F2 = np.hstack(F2_list)
+                del F2_list
+                gc.collect()
 
-            # fig, ax = logplot(_sv, xlabel=f'index of singular values of F2', xlims=(1, len(_sv)))
+                # Calculate weight ratio based on norms
+                norm_y = LA.norm(y_list)
+                norm_F2 = LA.norm(F2)
+                weight_ratio = (norm_y / norm_F2) if norm_F2 > 1e-12 else 1.0
+                
+                # Create a diagonal weight matrix for the PSD inner product
+                # This implicitly scales the F2 contribution during SVD without altering data
+                weights = np.eye(cls.nosc) * weight_ratio
 
-            RB, sv, nosc_r = PSD(F2, y_list, cls)
+                RB, sv, nosc_r = PSD(F2, y_list, cls) #, weights=weights)
+
+            else:
+                RB, sv, nosc_r = PSD(y_list[:, 0, None], y_list, cls)
+
+            del y_list
+            gc.collect()
+
             setattr(MechSystem, attr_name[0], RB)
             setattr(MechSystem, attr_name[1], nosc_r)
             print(f'{RB.shape = }')
@@ -544,7 +581,12 @@ class BaseSolverMixin:
         y_, _, info_ = super().solve(w_val*self.t_points[k:k+2])
         if self.store: self.info.append(np.array(info_[0::1]))
 
-        Lambda = np.zeros_like(self.g_(np.zeros(2*self.nosc))).squeeze()
+        if k > 0 and hasattr(self, 'Lambda') and self.solver_class == ConformalStormerVerletSolver:
+            Lambda = self.Lambda[k].copy()
+            if k == 1:
+                print(f'Setting initial guess for Lagrange multipliers')
+        else:
+            Lambda = np.zeros_like(self.g_(np.zeros(2*self.nosc))).squeeze()
 
         if self.constraint_type:
             self.fixed_point(y_, Lambda)
@@ -676,46 +718,66 @@ class BaseSolverMixin:
         # Check the length of args
         if (
             len(args) > 1
-            and not hasattr(MechSystem, "RB")
-            and not hasattr(MechSystem, "RB_dg")
+            # and not hasattr(MechSystem, "RB")
+            # and not hasattr(MechSystem, "RB_dg")
+            # and not hasattr(MechSystem, "_Ux_inv_PxU")
+            and not hasattr(MechSystem, "RBxUx_inv_PxU")
         ):
             # Use ProcessPoolExecutor to parallelize the solve_mech_system calls
             print('Solving mechanical system using parallel processing...')
-
+            try:
+                cpu_count = len(os.sched_getaffinity(0))
+            except AttributeError:
+                cpu_count = os.cpu_count()
+            
+            # Respect SLURM allocation if present
+            if 'SLURM_NTASKS' in os.environ:
+                cpu_count = int(os.environ['SLURM_NTASKS'])
+                
+            print(f'CPU count: {cpu_count}')
+            num_workers = min(cpu_count, len(args))
+            
             # Pre-allocate MSsolvers with None values
             MSsolvers.extend([None] * len(args))
 
-            with concurrent.futures.ProcessPoolExecutor() as executor:
-                try:
-                    futures = [
-                        executor.submit(BaseSolverMixin.solve_mech_system, *arg)
-                        for arg in args
-                    ]
+            if num_workers > 1:
+                with concurrent.futures.ProcessPoolExecutor() as executor:
+                    try:
+                        futures = [
+                            executor.submit(worker, i, *arg)
+                            for i, arg in enumerate(args)
+                        ]
 
-                    # Place results directly in their final position
-                    for future in concurrent.futures.as_completed(futures, timeout=None):
-                        idx = futures.index(future)
-                        try:
-                            result = future.result()
-                            print(f"Completed task {idx+1}/{len(args)}")
-                            MSsolvers[idx] = result  # Store directly in correct position
-                        except RuntimeError as e:
-                            if str(e) == "Nonlinear solver did not converge":
-                                print(
-                                    f"Task {idx+1}/{len(args)} failed to converge, continuing with other tasks"
-                                )
-                                MSsolvers[idx] = None  # Mark failed task
-                            else:
-                                raise  # Re-raise other RuntimeErrors
-                        except Exception as e:
-                            print(f"Error in task {idx}: {str(e)}")
-                            raise
-                except (concurrent.futures.TimeoutError, KeyboardInterrupt, Exception) as e:
-                    print(f"\nReceived {type(e).__name__}, cancelling tasks...")
-                    for f in futures:
-                        f.cancel()
-                    executor.shutdown(wait=False)
-                    raise
+                        # Place results directly in their final position
+                        for future in concurrent.futures.as_completed(futures, timeout=None):
+                            idx = futures.index(future)
+                            try:
+                                result = future.result()
+                                print(f"Completed task {idx+1}/{len(args)}", flush=True)
+                                MSsolvers[idx] = result  # Store directly in correct position
+                            except RuntimeError as e:
+                                if str(e) == "Nonlinear solver did not converge":
+                                    print(
+                                        f"Task {idx+1}/{len(args)} failed to converge, continuing with other tasks"
+                                    )
+                                    MSsolvers[idx] = None  # Mark failed task
+                                else:
+                                    raise  # Re-raise other RuntimeErrors
+                            except Exception as e:
+                                print(f"Error in task {idx}: {str(e)}")
+                                raise
+                    except (concurrent.futures.TimeoutError, KeyboardInterrupt, Exception) as e:
+                        print(f"\nReceived {type(e).__name__}, cancelling tasks...")
+                        for f in futures:
+                            f.cancel()
+                        executor.shutdown(wait=False)
+                        raise
+            else:
+                print("Running sequentially due to single worker allocation...")
+                for i, arg in enumerate(args):
+                    print(f"Starting task {i+1}/{len(args)}", flush=True)
+                    MSsolvers[i] = BaseSolverMixin.solve_mech_system(*arg)
+                    print(f"Completed task {i+1}/{len(args)}", flush=True)
         else:
             # Sequentially solve the mechanical system
             print('Solving mechanical system sequentially...')
@@ -841,10 +903,15 @@ class BaseSolverMixin:
             en_error = np.array(en_error).reshape(MechSystem.dt_space_dim, kwds['Omega2_space_dim'])
 
             if en_error.shape[0] > 1 and en_error[0, 0] is not None and MechSystem.dt_space_dim > 1 and not MechSystem.predict:
+                print(f"\nConvergence rates for {solver_class.__name__}:")
+                header = f"{'dt':>12}"
                 for col in range(en_error.shape[1]):
-                    r_values = r_form(en_error[:, col], MechSystem.dt_space)
-                    temp = c_[MechSystem.dt_space, r_values].T
-                    tex_table(f'{solver_class.__name__} (Omega2_{col})', temp)
+                    header += f" | {f'Omega2_{col}':>12}"
+                print(header)
+                print("-" * len(header))
+                all_r_values = np.array([r_form(en_error[:, col], MechSystem.dt_space) for col in range(en_error.shape[1])]).T
+                for i, dt_val in enumerate(MechSystem.dt_space):
+                    print(f"{dt_val:12.6f}" + "".join([f" | {val:12.6f}" for val in all_r_values[i]]))
 
             filtered_solvers[-1].plot()
 
@@ -1013,8 +1080,10 @@ class BaseSolverMixin:
         if hasattr(self, 'eng_error'):
             fig_data['eng_error'] = self.eng_error
 
-        string = '_full' if self.RB is None else '_predict' if self.predict else '_repro'
-        filename = os.path.join(MechSystem.data_folder, f"osc_{self.solver_class.__name__}{string}.pdf")
+        solver_name_short = self.solver_class.__name__.replace('Conformal', 'C').replace('StormerVerlet', 'SV').replace('ImplicitMidpoint', 'IM').replace('DiscreteGradient', 'DG')
+        suffix = '_full' if self.RB is None else '_r' if not hasattr(MechSystem, 'RBxUx_inv_PxU') else '_dr'
+        suffix += '_predict' if self.predict else '' if self.RB is None else '_repro'
+        filename = os.path.join(MechSystem.data_folder, f"osc_{solver_name_short}{suffix}.pdf")
         save_figure(fig, filename, fig_data=None)
 
 # %% Concrete solver classes
@@ -1112,53 +1181,82 @@ class ConformalStormerVerletSolver(BaseSolverMixin, ConformalStormerVerlet):
         Lambda (array): The initial value for Lambda.
         """
 
-        # Initialize counter
-        m = 0
-        g, dgdx = self.g, self.g_prime
-
-        if isinstance(dgdx, tuple):
-            dgdx_0, dgdx_1 = dgdx[0], lambda x: dgdx[1](x)
-        else:
-            raise TypeError("dgdx must be a tuple of functions")
-        
-        # Split u into two parts for easier manipulation
+        # Setup constants
         f, neq, dt = self.f, self.neq//2, self.dt
         q0, p0 = np.split(x[0], 2)
-
-        # Calculate intermediate values
-        p_half = p0 + 0.5 * dt * f(x[0], None)[neq:]
-        x_23 = np.array([np.concatenate([q0, p_half]), np.concatenate([x[1, :neq], p_half])])
-
-        g_prime_x0 = dgdx_0(x[0])
+        
+        # G(q0)
+        g_prime_x0 = self.g_prime[0](x[0])
         i0, i1 = g_prime_x0.shape
         i0, i1 = i0//2, i1//2
-        _g_prime_x0_11 = g_prime_x0[:i0, :i1].T
-
-        # Fixed point iteration
-        while LA.norm(g(x[1])) > self.tol and m < self.M:
-            # Update R and Delta_Lambda
-            R = dgdx_0(x[1]) @ dgdx_1(r_[x, x_23]).T
-            Delta_Lambda = LA.solve(R, g(x[1])) #, overwrite_a=True, overwrite_b=True, assume_a='pos')
-            Lambda -= Delta_Lambda
-
-            Lambda_1, Lambda_2 = np.split(Lambda, 2)
-            p_half1 = p_half - 0.5 * dt * _g_prime_x0_11 @ Lambda_1
-            x[1, :neq] = q0 + dt * f(np.concatenate([q0, p_half1]), None)[:neq]
-
-            _g_prime_x1_11 = dgdx_0(x[1])[:i0, :i1].T
-            x[1, neq:] = p_half1 + 0.5 * dt * f(r_[x[1, :neq], p_half1], None)[neq:] - 0.5 * dt * _g_prime_x1_11 @ Lambda_2
-            x_23 = np.array([np.concatenate([q0, p_half1]), np.concatenate([x[1, :neq], p_half1])])
-                
-            # Update m
-            m += 1
-            # x[0] = x[1]
-
-        Lambda[:i0] = (Lambda_1 + Lambda_2) * 0.5
-        Lambda[i0:] = Lambda[:i0]
+        G_q0 = g_prime_x0[:i0, :i1] # G(q0)
+        
+        # Split Lambda
+        Lambda_1, Lambda_2 = np.split(Lambda, 2)
+        
+        # p_half (unconstrained)
+        p_half_unconstrained = p0 + 0.5 * dt * f(x[0], None)[neq:]
+        
+        # 1. Position Constraints Loop (Solve for Lambda_1)
+        m = 0
+        while m < self.M:
+            # p_{n+1/2}
+            p_half1 = p_half_unconstrained - 0.5 * dt * G_q0.T @ Lambda_1
             
-        # Check convergence
+            # q_{n+1}
+            q_next = q0 + dt * f(np.concatenate([q0, p_half1]), None)[:neq]
+            x[1, :neq] = q_next
+            
+            # Check position constraints
+            g_pos = self.g(x[1])[:i0]
+            if LA.norm(g_pos) < self.tol:
+                break
+                
+            # Jacobian R11 = G(q_{n+1}) @ (-0.5 * dt^2 * G(q0)^T)
+            G_qnext = self.g_prime[0](x[1])[:i0, :i1]
+            R11 = -0.5 * dt**2 * G_qnext @ G_q0.T
+            
+            Delta_Lambda_1 = LA.lstsq(R11, g_pos, rcond=None)[0]
+            Lambda_1 -= Delta_Lambda_1
+            m += 1
+            
         if m >= self.M:
-            raise RuntimeError("Nonlinear solver did not converge")
+             if self.RB is not None and LA.norm(g_pos) < 1e-5 and not m%100:
+                 print(f"Warning: Position constraints not fully satisfied (error={LA.norm(g_pos):.2e}) in reduced model. Continuing.", flush=True)
+             else:
+                 raise RuntimeError(f"Nonlinear solver (position) did not converge. m: {m} -- Error: {LA.norm(g_pos)}")
+
+        # 2. Velocity Constraints Loop (Solve for Lambda_2)
+        m = 0
+        while m < self.M:
+            # p_{n+1}
+            G_qnext = self.g_prime[0](x[1])[:i0, :i1]
+            force_next = f(np.concatenate([x[1, :neq], p_half1]), None)[neq:]
+            p_next = p_half1 + 0.5 * dt * force_next - 0.5 * dt * G_qnext.T @ Lambda_2
+            x[1, neq:] = p_next
+            
+            # Check velocity constraints
+            g_vel = self.g(x[1])[i0:]
+            if LA.norm(g_vel) < self.tol:
+                break
+                
+            # Jacobian R22 = -0.5 * dt * G(p_{n+1}) @ G(q_{n+1})^T
+            G_pnext = self.g_prime__(x[1])[i0:, i1:]
+            R22 = -0.5 * dt * G_pnext @ G_qnext.T
+            
+            Delta_Lambda_2 = LA.lstsq(R22, g_vel, rcond=None)[0]
+            Lambda_2 -= Delta_Lambda_2
+            m += 1
+            
+        if m >= self.M:
+             if self.RB is not None and LA.norm(g_vel) < 1e-5 and not m%100:
+                 print(f"Warning: Velocity constraints not fully satisfied (error={LA.norm(g_vel):.2e}) in reduced model. Continuing.", flush=True)
+             else:
+                 raise RuntimeError(f"Nonlinear solver (velocity) did not converge. m: {m} -- Error: {LA.norm(g_vel)}")
+             
+        # Update Lambda in place
+        Lambda[:i0] = Lambda_1
+        Lambda[i0:] = Lambda_2
 
 
 class ConformalImplicitMidpointSolver(BaseSolverMixin, ConformalImplicitMidpoint):
@@ -1182,7 +1280,7 @@ if __name__ == '__main__':
     """
     Model order reduction of the MechSystem using concrete solvers
     """
-
+    
     # %% Full order solution
     kwds = {
         "registered_solver_classes": [
@@ -1262,15 +1360,31 @@ if __name__ == '__main__':
     time_lapsed = [reshape([x.time_lapsed for x in solvers], array_shape)]
 
     if not MechSystem.predict:
-        print('Solution errors:')
-        print(reshape([np.amax(abs(y1 - y2)) 
+        # Calculate errors
+        errors_r = reshape([np.amax(abs(y1 - y2)) 
             for y1, y2 in zip([x.y for x in solvers], 
             [x.y for x in solvers_r])], 
-            array_shape))
-        print(reshape([np.amax(abs(y1 - y2)) 
+            array_shape)
+        errors_dr = reshape([np.amax(abs(y1 - y2)) 
             for y1, y2 in zip([x.y for x in solvers], 
             [x.y for x in solvers_dr])], 
-            array_shape))
+            array_shape)
+
+        print('\n--- Max Solution Errors (over all frequencies) ---')
+        error_matrices = [np.amax(errors_r, axis=2), np.amax(errors_dr, axis=2)]
+        model_names_err = ["Reduced Model Error", "Hyper-reduced Model Error"]
+
+        for i, error_matrix in enumerate(error_matrices):
+            print(f"\n{model_names_err[i]}:")
+            header = "Solver".ljust(35) + "".join([f"dt={dt:<11.4f}" for dt in MechSystem.dt_space])
+            print(header)
+            print("-" * len(header))
+            for j, solver_class in enumerate(kwds['registered_solver_classes']):
+                row_str = solver_class.__name__.ljust(35)
+                for k in range(MechSystem.dt_space_dim):
+                    val = error_matrix[j, k]
+                    row_str += f"{val:<11.2e}"
+                print(row_str)
 
         time_lapsed.append(reshape([x.time_lapsed for x in solvers_r], array_shape))
         # time_lapsed[0].shape) / time_lapsed[0] * 100)
@@ -1284,8 +1398,37 @@ if __name__ == '__main__':
             reshape([x.time_lapsed for x in solvers_r], (*array_shape[:2], 1)),
             reshape([x.time_lapsed for x in solvers_dr], (*array_shape[:2], 1))
         ])
+        
+        # Calculate average full order time over all training frequencies
+        avg_full_time = np.mean(time_lapsed[0], axis=2, keepdims=True)
+        
+        # Normalize reduced and hyper-reduced times
+        time_lapsed[1] = time_lapsed[1] / avg_full_time * 100
+        time_lapsed[2] = time_lapsed[2] / avg_full_time * 100
 
-    print(f'{time_lapsed = }')
+    print("\n--- Average Time Lapsed ---")
+    if MechSystem.predict:
+        model_names = ["Full Order Model (s)", "Reduced Model (% of Avg Full)", "Hyper-reduced Model (% of Avg Full)"]
+    else:
+        model_names = ["Full Order Model (s)", "Reduced Model (% of Full)", "Hyper-reduced Model (% of Full)"]
+
+    # Average over the Omega2 dimension (axis=2)
+    avg_times = [np.mean(tl, axis=2) for tl in time_lapsed]
+
+    for i, avg_time_matrix in enumerate(avg_times):
+        print(f"\n{model_names[i]}:")
+        
+        # Header
+        header = "Solver".ljust(35) + "".join([f"dt={dt:<11.4f}" for dt in MechSystem.dt_space])
+        print(header)
+        print("-" * len(header))
+        
+        for j, solver_class in enumerate(kwds['registered_solver_classes']):
+            row_str = solver_class.__name__.ljust(35)
+            for k in range(MechSystem.dt_space_dim):
+                val = avg_time_matrix[j, k]
+                row_str += f"{val:<11.2f}"
+            print(row_str)
 
     # tex_table('', time_lapsed)
     '''

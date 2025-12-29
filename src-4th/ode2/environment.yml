@@ -1,0 +1,25 @@
+name: modred-dae-torch
+channels:
+  - https://repo.anaconda.com/pkgs/main
+  - https://repo.anaconda.com/pkgs/r
+dependencies:
+  - cloudpickle
+  - pandas[version='>=1.2.0']
+  - numpy
+  - python
+  - numexpr
+  - sympy
+  - cycler
+  - tqdm
+  - joblib
+  - brewer2mpl
+  - matplotlib
+  - scipy
+  - time
+  - pytorch
+  - dill=0.3.9
+  - psutil
+  - conda-forge::qt-wayland
+  - ipykernel
+  - tectonic
+  - jupyter

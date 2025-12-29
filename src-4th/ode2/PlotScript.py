@@ -210,22 +210,45 @@ def save_figure(fig, filename, fig_data=None):
                     particle_filename = f"{dat_filename_base}_coords_particle{i}.dat"
                     np.savetxt(particle_filename, coords_data[:, i, :], fmt='%f')
 
-#%% # edit the figure later
-# import pickle
+# %% edit the figure later
+import pickle
+import numpy as np
 
-# with open('data/2024-10-04_13-39_osc_ConformalStormerVerlet_full.fig.pickle', 'rb') as file:
-    
-#     figx = pickle.load(file)
+filename = "data/2025-12-26_12-32/osc_sv_rbDiscreteGradient.fig.pickle"
+with open(filename, "rb") as file:
 
-#     figx.show() # Show the figure, edit it, etc.!
-#     ax = figx.axes
-#     # ax[0].set_xlabel('time')
-#     ax[0].set_ylim([-1e-15, 1e-15])
-#     # ax[2].set_xlim([1,6])
-#     figx.savefig('data/2024-10-04_13-39_osc_ConformalStormerVerlet_full_2.pdf')
-#     figx.savefig('data/2024-10-04_13-39_osc_ConformalStormerVerlet_full_2.eps')
+    figx = pickle.load(file)
 
-#%%
+    for ax in figx.axes:
+        lines = ax.get_lines()
+        if lines:
+            x_data = np.concatenate([l.get_xdata() for l in lines])
+            print(f"x_data: min={x_data.min()}, max={x_data.max()}")
+            if x_data.size > 0:
+                xticks = np.append(ax.get_xticks(), [int(x_data.min())])
+                ax.set_xticks(xticks)
+
+            y_data = np.concatenate([l.get_ydata() for l in lines])
+            if y_data.size > 0:
+                y_max = y_data.max()
+                if y_max > 0:
+                    next_pow_10 = 10 ** (np.floor(np.log10(y_max)) + 1)
+                    yticks = np.unique(np.append(ax.get_yticks(), [next_pow_10]))
+                    ax.set_yticks(yticks)
+        ax.set_xlabel("")
+
+        for item in (
+            [ax.title, ax.xaxis.label, ax.yaxis.label]
+            + ax.get_xticklabels()
+            + ax.get_yticklabels()
+        ):
+            item.set_fontsize(item.get_fontsize() - 6)
+
+    figx.show()  # Show the figure, edit it, etc.!
+    figx.savefig(filename.replace(".fig.pickle", ".pdf"), pad_inches=0.5, dpi=300)
+    # figx.savefig("data/2025-12-20_12-43_/osc_ConformalStormerVerletSolver_full_2.eps")
+
+# %%
 def tex_table(solver_name, array2print):
     """
     Print a table in LaTeX format.
@@ -236,8 +259,8 @@ def tex_table(solver_name, array2print):
     """
     print(solver_name, "\n", " \n".join([" & ".join(map('{0:.6f}'.format, line)) 
                                              for line in array2print]))
-    
-    
+
+
 def plot_3dsurface(fig, ax, xx, yy, zz):
     """
     Plot a 3D surface.
@@ -258,7 +281,7 @@ def plot_3dsurface(fig, ax, xx, yy, zz):
     ax.set_yticks([0,1])
     ax.set_zlim3d(-1, abs(zz).max())
 
-#%% Testing
+# %% Testing
 def test_PlotScript():
     raise NotImplementedError
 

@@ -556,7 +556,7 @@ class MechSystem:
         keep_time = f"{os.environ.get('SLURM_JOB_NAME', 'slurm')}-{os.environ['SLURM_JOB_ID']}"
         # keep_time = f"{os.environ.get('SLURM_JOB_NAME', 'slurm')}-1642"
     else:
-        keep_time = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        keep_time = datetime.now().strftime("%Y-%m-%d")
     data_folder = os.path.join('data', keep_time)
     if not os.path.exists(data_folder):
         os.makedirs(data_folder)
@@ -576,7 +576,7 @@ class MechSystem:
     tol, M, var, store = 1.0E-12, 500, True, False
 
     # parameter space: frequency of the oscillators -- omega^2
-    nosc = 18 * 5 * 3
+    nosc = 18 * 1 * 3
     assert nosc%6 == 0, 'nosc is not exactly divisible by 6'
     _Omega2_space_dim = 10
     _Omega2_space = np.sort(10 * (1 - rng.random((_Omega2_space_dim, nosc // 3 - 2))))
@@ -877,7 +877,7 @@ class MechSystem:
             print('Setting reduced order functions...')
             if self.solver_class.__name__ == 'DiscreteGradientSolver':
                 # TODO: move these inside the concrete solvers
-                print('Setting RB to RB_dg...')
+                print('Setting RB to RB_dg...', flush=True)
                 self.RB = self.RB_dg
                 self.nosc_r = self.nosc_r_dg
 
@@ -895,7 +895,7 @@ class MechSystem:
         else:
             print('Setting hyperreduced functions...')
             if self.solver_class.__name__ == 'DiscreteGradientSolver':
-                print('Setting RB to RB_dg...')
+                print('Setting RB to RB_dg...', flush=True)
                 self.RB = self.RB_dg
                 self.nosc_r = self.nosc_r_dg
                 self.RBxUx_inv_PxU = self._RBxUx_inv_PxU_
@@ -950,7 +950,7 @@ if __name__ == '__main__':
     system = MechSystem({"nosc": nosc})
     print(f"Shape of g_prime_expr: {system.g_prime_expr.shape}")
 
-""" 
+    '''
     print("--- Generating expressions for both classes ---")
     
     # Generate expressions from the original class
@@ -988,15 +988,15 @@ if __name__ == '__main__':
     
     # --- Comparison ---
     funcs_to_compare = [
-        ('ham_', (y_num_mat, omega2_num_mat, beta_num), (y_num_mat, omega2_num_mat, beta_num)),
-        ('ham_z_', (y_num_mat, omega2_num_mat, beta_num), (y_num_mat, omega2_num_mat, beta_num)),
-        ('ham_zz_', (y_num, omega2_num, beta_num), (y_num, omega2_num, beta_num)),
-        ('lag_dg_', (y_num_mat, y1_num_mat, omega2_num_mat), (y_num_mat, y1_num_mat, omega2_num_mat)),
-        ('lag_dg_z_', (y_num, y1_num, omega2_num), (y_num, y1_num, omega2_num)),
-        ('g_', (y_num_mat,), (y_num_mat,)),
-        ('g_prime_', (y_num,), (y_num,)),
-        ('g_prime_x_lambda_y_', (y_num, lag_mult_num), (y_num, lag_mult_num)),
-        ('g_prime_x_lambda_lambda_', (y_num, lag_mult_num), (y_num, lag_mult_num)),
+        ('ham_', (y_num_mat, omega2_num_mat, beta_num)),
+        ('ham_z_', (y_num_mat, omega2_num_mat, beta_num)),
+        ('ham_zz_', (y_num, omega2_num, beta_num)),
+        ('lag_dg_', (y_num_mat, y1_num_mat, omega2_num_mat)),
+        ('lag_dg_z_', (y_num, y1_num, omega2_num)),
+        ('g_', (y_num_mat,)),
+        ('g_prime_', (y_num,)),
+        ('g_prime_x_lambda_y_', (y_num, lag_mult_num)),
+        ('g_prime_x_lambda_lambda_', (y_num, lag_mult_num)),
     ]
 
     print(f"Timing {number_of_runs} runs for each function...")
@@ -1004,15 +1004,15 @@ if __name__ == '__main__':
     print(f"{'Function':<28} | {'Original Time (ms)':<20} | {'New Time (ms)':<15} | Speedup")
     print("-" * 70)
 
-    for func_name, args_old, args_new in funcs_to_compare:
+    for func_name, args in funcs_to_compare:
         old_func = expressions_old[func_name]
         new_func = expressions_new[func_name]
 
-        t_old = timeit.timeit(lambda: old_func(*args_old), number=number_of_runs) * 1000
-        t_new = timeit.timeit(lambda: new_func(*args_new), number=number_of_runs) * 1000
+        t_old = timeit.timeit(lambda: old_func(*args), number=number_of_runs) * 1000
+        t_new = timeit.timeit(lambda: new_func(*args), number=number_of_runs) * 1000
         
         speedup = t_old / t_new if t_new > 0 else float('inf')
         print(f"{func_name:<28} | {t_old:<20.4f} | {t_new:<15.4f} | {speedup:.2f}x")
     
     print("-" * 70)
- """
+    '''

@@ -223,7 +223,7 @@ with open(filename, "rb") as file:
         lines = ax.get_lines()
         if lines:
             x_data = np.concatenate([l.get_xdata() for l in lines])
-            print(f"x_data: min={x_data.min()}, max={x_data.max()}")
+            # print(f"x_data: min={x_data.min()}, max={x_data.max()}")
             if x_data.size > 0:
                 xticks = np.append(ax.get_xticks(), [int(x_data.min())])
                 ax.set_xticks(xticks)

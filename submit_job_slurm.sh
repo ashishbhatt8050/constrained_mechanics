@@ -8,8 +8,9 @@
 
 #SBATCH --job-name=app8_lattice
 #SBATCH --nodes=1
-#SBATCH --exclusive
-#SBATCH --mem=128G
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=16G
 #SBATCH --time=1-00:00:00
 #SBATCH --partition=workq
 #SBATCH --account=cpu_users
@@ -41,7 +42,7 @@ source /home/bhattah/miniconda3/etc/profile.d/conda.sh
 conda activate modred-dae-torch
 
 # Set SLURM_NTASKS to all available CPUs so the python script uses the full node
-export SLURM_NTASKS=$(nproc)
+# export SLURM_NTASKS=$(nproc) # No longer needed for Driver
 
 # Set MPLCONFIGDIR to a specific directory to avoid cache locking issues on shared filesystems
 export MPLCONFIGDIR=$SLURM_SUBMIT_DIR/matplotlib_cache

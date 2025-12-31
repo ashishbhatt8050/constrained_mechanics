@@ -1,0 +1,14 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+  - family-names: "Bhatt"
+    given-names: "Ashish"
+title: "Constrained Mechanics Solvers"
+version: 1.0.0
+date-released: 2025-01-01
+url: "https://github.com/ashishbhatt/constrained_mechanics"
+keywords:
+  - "mechanics"
+  - "constraints"
+  - "ode-solver"
+  - "python"

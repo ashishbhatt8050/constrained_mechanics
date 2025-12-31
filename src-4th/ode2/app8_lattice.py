@@ -43,6 +43,8 @@ from pylab import  log, r_, c_, sqrt, reshape, linspace, roll, figure
 
 import concurrent.futures
 import multiprocessing
+from dask_jobqueue import SLURMCluster
+from dask.distributed import Client, wait
 
 import sys
 import shutil
@@ -704,8 +706,8 @@ class BaseSolverMixin:
             raise
 
     @staticmethod
-    def parallel_solve_mech_system(kwds, MSsolvers):
-
+    def parallel_solve_mech_system(kwds, MSsolvers, client=None):
+        """Solve mechanical system in parallel using a Dask client, or sequentially."""
         # Prepare the arguments for solve_mech_system
         args = []
         for x in kwds['registered_solver_classes']:
@@ -715,69 +717,25 @@ class BaseSolverMixin:
                     process_kwds = kwds.copy()
                     args.append((x, y, z, process_kwds))
 
-        # Check the length of args
-        if (
-            len(args) > 1
-            # and not hasattr(MechSystem, "RB")
-            # and not hasattr(MechSystem, "RB_dg")
-            # and not hasattr(MechSystem, "_Ux_inv_PxU")
-            and not hasattr(MechSystem, "RBxUx_inv_PxU")
-        ):
-            # Use ProcessPoolExecutor to parallelize the solve_mech_system calls
-            print('Solving mechanical system using parallel processing...')
-            try:
-                cpu_count = len(os.sched_getaffinity(0))
-            except AttributeError:
-                cpu_count = os.cpu_count()
-            
-            # Respect SLURM allocation if present
-            if 'SLURM_NTASKS' in os.environ:
-                cpu_count = int(os.environ['SLURM_NTASKS'])
-                
-            print(f'CPU count: {cpu_count}')
-            num_workers = min(cpu_count, len(args))
-            
+        if client and len(args) > 0:
+            print(f"Submitting {len(args)} tasks to existing Dask cluster...", flush=True)
             # Pre-allocate MSsolvers with None values
             MSsolvers.extend([None] * len(args))
 
-            if num_workers > 1:
-                with concurrent.futures.ProcessPoolExecutor() as executor:
-                    try:
-                        futures = [
-                            executor.submit(worker, i, *arg)
-                            for i, arg in enumerate(args)
-                        ]
-
-                        # Place results directly in their final position
-                        for future in concurrent.futures.as_completed(futures, timeout=None):
-                            idx = futures.index(future)
-                            try:
-                                result = future.result()
-                                print(f"Completed task {idx+1}/{len(args)}", flush=True)
-                                MSsolvers[idx] = result  # Store directly in correct position
-                            except RuntimeError as e:
-                                if str(e) == "Nonlinear solver did not converge":
-                                    print(
-                                        f"Task {idx+1}/{len(args)} failed to converge, continuing with other tasks"
-                                    )
-                                    MSsolvers[idx] = None  # Mark failed task
-                                else:
-                                    raise  # Re-raise other RuntimeErrors
-                            except Exception as e:
-                                print(f"Error in task {idx}: {str(e)}")
-                                raise
-                    except (concurrent.futures.TimeoutError, KeyboardInterrupt, Exception) as e:
-                        print(f"\nReceived {type(e).__name__}, cancelling tasks...")
-                        for f in futures:
-                            f.cancel()
-                        executor.shutdown(wait=False)
-                        raise
-            else:
-                print("Running sequentially due to single worker allocation...")
-                for i, arg in enumerate(args):
-                    print(f"Starting task {i+1}/{len(args)}", flush=True)
-                    MSsolvers[i] = BaseSolverMixin.solve_mech_system(*arg)
-                    print(f"Completed task {i+1}/{len(args)}", flush=True)
+            # Submit all tasks to the cluster
+            futures = [client.submit(worker, i, *arg) for i, arg in enumerate(args)]
+            
+            # Gather results (blocks until all are done)
+            # client.gather returns results in the same order as futures list
+            results = client.gather(futures, errors='raise')
+            
+            # Store results in correct order
+            for i, res in enumerate(results):
+                MSsolvers[i] = res
+                if (i + 1) % 10 == 0:
+                    print(f"Retrieved {i+1}/{len(args)} results", flush=True)
+            
+            print("Parallel processing complete.", flush=True)
         else:
             # Sequentially solve the mechanical system
             print('Solving mechanical system sequentially...')
@@ -785,7 +743,7 @@ class BaseSolverMixin:
                 MSsolvers.append(BaseSolverMixin.solve_mech_system(*arg))
 
     @staticmethod
-    def setup_and_solve_reduced_system(kwds, solvers):
+    def setup_and_solve_reduced_system(kwds, solvers, client=None):
         """Setup and solve reduced system for a specific solver type"""
         print(f'Setting up reduced system...')
 
@@ -800,7 +758,7 @@ class BaseSolverMixin:
         kwds_file = os.path.join(checkpoint_path, 'kwds_r.joblib')
         solvers_file = os.path.join(checkpoint_path, 'solvers_r.joblib')
 
-        if False and os.path.exists(checkpoint_path) and os.path.exists(kwds_file) and os.path.exists(solvers_file):
+        if os.path.exists(checkpoint_path) and os.path.exists(kwds_file) and os.path.exists(solvers_file):
             try:
                 print("Loading from checkpoint...")
                 kwds = load(kwds_file)
@@ -810,7 +768,7 @@ class BaseSolverMixin:
                 raise Exception(f"Error loading checkpoint: {str(e)}")
         else:
             # Execute parallel solve
-            BaseSolverMixin.parallel_solve_mech_system(kwds, solvers_r)
+            BaseSolverMixin.parallel_solve_mech_system(kwds, solvers_r, client=client)
 
             # Create checkpoint directory and save initial state
             os.makedirs(checkpoint_path, exist_ok=True)
@@ -823,7 +781,7 @@ class BaseSolverMixin:
         return solvers_r
 
     @staticmethod
-    def setup_and_solve_hyperreduced_system(kwds, solvers):
+    def setup_and_solve_hyperreduced_system(kwds, solvers, client=None):
         """Setup and solve hyper-reduced system for a specific solver type"""
         print(f'Setting up hyper-reduced system...')
 
@@ -851,7 +809,7 @@ class BaseSolverMixin:
         kwds_file = os.path.join(checkpoint_path, 'kwds_dr.joblib')
         solvers_file = os.path.join(checkpoint_path, 'solvers_dr.joblib')
 
-        if False and os.path.exists(checkpoint_path) and os.path.exists(kwds_file) and os.path.exists(solvers_file):
+        if os.path.exists(checkpoint_path) and os.path.exists(kwds_file) and os.path.exists(solvers_file):
             try:
                 print("Loading from checkpoint...")
                 kwds = load(kwds_file)
@@ -861,7 +819,7 @@ class BaseSolverMixin:
                 raise Exception(f"Error loading checkpoint: {str(e)}")
         else:
             # Execute parallel solve
-            BaseSolverMixin.parallel_solve_mech_system(kwds, solvers_dr)
+            BaseSolverMixin.parallel_solve_mech_system(kwds, solvers_dr, client=client)
 
             # Create checkpoint directory and save initial state
             os.makedirs(checkpoint_path, exist_ok=True)
@@ -1290,7 +1248,6 @@ if __name__ == '__main__':
         ]
     }
 
-    solvers = []
     Omega2_space = (MechSystem._Omega2_space[:-1] if MechSystem.predict
                 else MechSystem._Omega2_space)        
     Omega2_space_dim = len(Omega2_space)
@@ -1298,59 +1255,76 @@ if __name__ == '__main__':
         'Omega2_space': Omega2_space,
         'Omega2_space_dim': Omega2_space_dim
         })
+    
+    # Dask SLURM Cluster Configuration
+    cluster = SLURMCluster(
+        queue='workq',
+        project='cpu_users',
+        cores=32,
+        processes=32,
+        memory='64GB',
+        walltime='01:00:00',
+        job_extra_directives=['--exclusive', '--output=dask_worker_%j.log', '--qos=cpu_users']
+    )
+    
+    # Determine number of nodes needed for the full simulation
+    num_full_tasks = len(kwds['registered_solver_classes']) * MechSystem.dt_space_dim * kwds['Omega2_space_dim']
+    num_nodes = min(6, (num_full_tasks + 31) // 32) if num_full_tasks > 0 else 0
+    if num_nodes > 0:
+        print(f"Requesting {num_nodes} SLURM nodes for Dask workers...")
+        cluster.scale(jobs=num_nodes)
+    
+    print(f"Dask Dashboard: {cluster.dashboard_link}", flush=True)
 
-    print('Computing full solution ...')
-    # Try to load from checkpoint
-    checkpoint_path = os.path.join('data', f'{MechSystem.keep_time}')
-    kwds_file = os.path.join(checkpoint_path, 'kwds.joblib')
-    solvers_file = os.path.join(checkpoint_path, 'solvers.joblib')
+    client = None
+    try:
+        # Use a client if we have nodes, otherwise run sequentially
+        if num_nodes > 0:
+            client = Client(cluster)
+            print("Waiting for workers to start...", flush=True)
+            client.wait_for_workers(1)
 
-    if os.path.exists(checkpoint_path) and os.path.exists(kwds_file) and os.path.exists(solvers_file):
-        try:
-            print("Loading from checkpoint...")
+        # --- Full order solution ---
+        solvers = []
+        print('Computing full solution ...')
+        checkpoint_path = os.path.join('data', f'{MechSystem.keep_time}')
+        kwds_file = os.path.join(checkpoint_path, 'kwds.joblib')
+        solvers_file = os.path.join(checkpoint_path, 'solvers.joblib')
+
+        if os.path.exists(checkpoint_path) and os.path.exists(kwds_file) and os.path.exists(solvers_file):
+            print("Loading full solution from checkpoint...")
             kwds = load(kwds_file)
             solvers = load(solvers_file)
-            print("Checkpoint loaded successfully")
-        except Exception as e:
-            raise Exception(f"Error loading checkpoint: {str(e)}")
-    else:
-        # Execute parallel solve
-        BaseSolverMixin.parallel_solve_mech_system(kwds, solvers)
+        else:
+            BaseSolverMixin.parallel_solve_mech_system(kwds, solvers, client=client)
+            os.makedirs(checkpoint_path, exist_ok=True)
+            print("Creating new checkpoint for full model...")
+            dump(kwds, kwds_file)
+            dump(solvers, solvers_file)
+        BaseSolverMixin.measures(kwds, solvers)
 
-        # Create checkpoint directory and save initial state
-        os.makedirs(checkpoint_path, exist_ok=True)
-        print("Creating new checkpoint...")
-        dump(kwds, kwds_file)
-        dump(solvers, solvers_file)
-
-    BaseSolverMixin.measures(kwds, solvers)
-
-    # %% Reduced order solution
-    print('Computing reduced bases...')
-
-    # Calculate samples and indices
-    n_samples_list = [int(solver.n // 1) for solver in solvers]
-    MechSystem.indices_list = [
-        np.concatenate(([0], np.random.choice(np.arange(1, solver.n), n_samples - 1, replace=False)))
-        for solver, n_samples in zip(solvers, n_samples_list)
+        # --- Reduced order solution ---
+        print('Computing reduced bases...')
+        n_samples_list = [int(solver.n // 1) for solver in solvers]
+        MechSystem.indices_list = [
+            np.concatenate(([0], np.random.choice(np.arange(1, solver.n), n_samples - 1, replace=False)))
+            for solver, n_samples in zip(solvers, n_samples_list)
         ]
-
-    Omega2_space_ = (MechSystem._Omega2_space[-1:] if MechSystem.predict
-                else MechSystem._Omega2_space)        
-    Omega2_space_dim_ = len(Omega2_space_)
-    kwds.update({
-        'Omega2_space': Omega2_space_,
-        'Omega2_space_dim': Omega2_space_dim_,
+        Omega2_space_ = (MechSystem._Omega2_space[-1:] if MechSystem.predict else MechSystem._Omega2_space)
+        kwds.update({
+            'Omega2_space': Omega2_space_,
+            'Omega2_space_dim': len(Omega2_space_),
         })
+        solvers_r = BaseSolverMixin.setup_and_solve_reduced_system(kwds, solvers, client=None)
 
-    # Solve for each solver type
-    solvers_r = BaseSolverMixin.setup_and_solve_reduced_system(kwds, solvers)
+        # --- Hyper-reduced model ---
+        print('Computing hyper-reduction bases...')
+        solvers_dr = BaseSolverMixin.setup_and_solve_hyperreduced_system(kwds, solvers, client=None)
 
-    # %% Hyper-reduced model
-    print('Computing hyper-reduction bases...')
-
-    # Setup and solve for each solver type
-    solvers_dr = BaseSolverMixin.setup_and_solve_hyperreduced_system(kwds, solvers)
+    finally:
+        if client:
+            client.close()
+        cluster.close()
 
     # %% Compute and display metrics
     array_shape = (len(kwds['registered_solver_classes']), 

@@ -25,12 +25,12 @@ pip install numpy scipy sympy matplotlib dask dask-jobqueue joblib tqdm
 
 ## Usage
 
-The main driver script is located in `src-4th/ode2/app8_lattice.py`.
+The main driver script is located in `app8_lattice.py`.
 
 To run the simulation:
 
 ```bash
-python src-4th/ode2/app8_lattice.py
+python app8_lattice.py
 ```
 
 *Note: The script is configured to use a SLURM cluster by default. If running locally, ensure you adjust the `dask` client configuration in the `__main__` block of the script.*

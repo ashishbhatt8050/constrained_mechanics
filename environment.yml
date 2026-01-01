@@ -1,12 +1,12 @@
 name: modred-dae-torch
 channels:
-  - https://repo.anaconda.com/pkgs/main
-  - https://repo.anaconda.com/pkgs/r
+  - conda-forge
+  - defaults
 dependencies:
-  - cloudpickle
-  - pandas[version='>=1.2.0']
-  - numpy
   - python
+  - cloudpickle
+  - pandas>=1.2.0
+  - numpy
   - numexpr
   - sympy
   - cycler
@@ -15,11 +15,11 @@ dependencies:
   - brewer2mpl
   - matplotlib
   - scipy
-  - time
-  - pytorch
-  - dill=0.3.9
+  - dill>=0.3.9
   - psutil
-  - conda-forge::qt-wayland
+  - dask
+  - distributed
+  - dask-jobqueue
   - ipykernel
   - tectonic
   - jupyter

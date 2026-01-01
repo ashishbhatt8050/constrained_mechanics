@@ -539,9 +539,8 @@ def load_symbolic_expressions(cls):
     # Update class attributes, wrapping lambdas to include self
     for k, v in expressions.items():
         if callable(v) and not isinstance(v, type):
-            # Wrap lambda functions to include self parameter
-            wrapped = (lambda f: lambda self, *args, **kwargs: f(*args, **kwargs))(v)
-            setattr(cls, k, wrapped)
+            # Use staticmethod to make the function available as a class method without passing `self`
+            setattr(cls, k, staticmethod(v))
         else:
             setattr(cls, k, v)
 
@@ -792,7 +791,7 @@ class MechSystem:
         return self.RB.T @ self.g_prime_x_lambda_lambda_(y @ self.RB.T, lag_mult)
 
     def ham_z_hyperreduced(self, y, beta=0):
-        return self.RBxUx_inv_PxU @ self.ham_z_deim(y @ self.RB.T, self.Omega2, beta)
+        return self.RBxUx_inv_PxU @ np.squeeze(self.ham_z_deim(y @ self.RB.T, self.Omega2, beta))
 
     def ham_zz_hyperreduced(self, y, beta=0):
         return self.RBxUx_inv_PxU @ self.ham_zz_deim(y @ self.RB.T, self.Omega2, beta) @ self.RB
@@ -804,7 +803,7 @@ class MechSystem:
         ) @ self.RB
 
     def lag_dg_hyperreduced(self, y):
-        return self.RBxUx_inv_PxU @ self.lag_dg_deim(*(y @ self.RB.T), self.Omega2)
+        return self.RBxUx_inv_PxU @ np.squeeze(self.lag_dg_deim(*(y @ self.RB.T), self.Omega2))
 
     def lag_dg_z_hyperreduced(self, y):
         return self.RBxUx_inv_PxU @ self.lag_dg_z_deim(*(y @ self.RB.T), self.Omega2) @ self.RB

@@ -141,9 +141,6 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
-src-4th/ode2/app8_lattice-*.out
-src-4th/ode2/data
-src-4th/ode2/matplotlib_cache
 app8_lattice-*.out
 data
 matplotlib_cache

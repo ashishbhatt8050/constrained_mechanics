@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "constrained-mechanics"
+version = "0.1.0"
+description = "Structure-preserving solvers and model order reduction for constrained mechanical systems"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+  {name = "Ashish Bhatt", email = "ashish.bhatt@vit.ac.in"}
+]
+keywords = ["model-order-reduction", "geometric-integration", "constrained-mechanics"]
+dependencies = [
+    "numpy",
+    "scipy",
+    "sympy",
+    "matplotlib",
+    "dask",
+    "dask-jobqueue",
+    "distributed",
+    "cloudpickle",
+    "tqdm"
+]
+
+[project.urls]
+Homepage = "https://github.com/ashishbhatt8050/constrained_mechanics"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["*"]
+exclude = ["data*", "tests*"]

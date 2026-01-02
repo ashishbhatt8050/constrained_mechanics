@@ -1,14 +1,16 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 authors:
-  - family-names: "Bhatt"
-    given-names: "Ashish"
-title: "Constrained Mechanics Solvers"
-version: 1.0.0
-date-released: 2025-01-01
-url: "https://github.com/ashishbhatt/constrained_mechanics"
+- family-names: "Bhatt"
+  given-names: "Ashish"
+  affiliation: "Vellore Institute of Technology"
+  email: "ashish.bhatt@vit.ac.in"
+title: "Constrained Mechanics Solvers: Structure-Preserving MOR Framework"
+version: 0.1.0
+date-released: 2024-06-01
+url: "https://github.com/yourusername/constrained_mechanics"
+license: MIT
 keywords:
-  - "mechanics"
-  - "constraints"
-  - "ode-solver"
-  - "python"
+  - model order reduction
+  - constrained mechanics
+  - structure-preserving integrators

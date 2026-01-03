@@ -304,7 +304,7 @@ class SysConfig:
     w_values.append(1.0 - 2.0 * (sum(w_values)))
     w_values.append(w_values[1])
     w_values.append(w_values[0])
-    w_values = [1]
+    # w_values = [1]
     assert np.isclose(sum(w_values), 1), 'sum_i w_i must be 1'
     
     # Solver and reduction settings
@@ -313,8 +313,8 @@ class SysConfig:
     predict = False  # False = reproduce results of the full model
     reducer = 'psd'
     hyperreducer = 'MDEIM'
-    constraint_type = 'spherical'
-    constraints_reduce = True
+    constraint_type = None # 'spherical'
+    constraints_reduce = False
     
     # System parameters
     nosc = 54  # Number of oscillators
@@ -340,8 +340,12 @@ class SysConfig:
     _Omega2_space = np.sort(10 * (1 - rng.random((_Omega2_space_dim, nosc // 3 - 2))))
     _Omega2_space[:, 1 * _Omega2_space_dim - 1:] = _Omega2_space[0, 1 * _Omega2_space_dim - 1:]
 
+    # Train-test split
+    Omega2_space = _Omega2_space[:-1] if predict else _Omega2_space
+    Omega2_space_test = _Omega2_space[-1:] if predict else _Omega2_space
+
 @load_symbolic_expressions
-class MechSystem:
+class MechSystem(SysConfig):
     """
     Represents the mechanical system, including parameters, initial conditions, 
     and methods for evaluating system dynamics (Hamiltonian, Lagrangian, constraints).
@@ -352,26 +356,14 @@ class MechSystem:
     if not os.path.exists(data_folder):
         os.makedirs(data_folder)
 
-    # Inherit parameters from the central configuration
-    nosc = SysConfig.nosc
-    dt_space_dim = SysConfig.dt_space_dim
-    dt_space = SysConfig.dt_space
-    T_final = SysConfig.T_final
-    w_values = SysConfig.w_values
+    @staticmethod
+    def compute_J(d):
+        return r_[c_[zeros((d, d)), eye(d)], c_[-eye(d), zeros((d, d))]]
 
-    tol, M, var, store = SysConfig.tol, SysConfig.M, SysConfig.var, SysConfig.store
-    _Omega2_space_dim = SysConfig._Omega2_space_dim
-    _Omega2_space = SysConfig._Omega2_space
-    predict = SysConfig.predict
-    reducer, hyperreducer = SysConfig.reducer, SysConfig.hyperreducer
-    constraint_type, constraints_reduce = SysConfig.constraint_type, SysConfig.constraints_reduce
-
-    JJ = lambda self, d=nosc: r_[c_[zeros((d, d)), eye(d)], c_[-eye(d), zeros((d, d))]]
-
-    _i = np.arange(nosc//3//2)
+    _i = np.arange(SysConfig.nosc//3//2)
     _radius = 0.5
-    _pitch = 0.5 * nosc/18  # Scale pitch with number of particles
-    _t = _i * 2 * np.pi / (nosc//3)
+    _pitch = 0.5 * SysConfig.nosc/18  # Scale pitch with number of particles
+    _t = _i * 2 * np.pi / (SysConfig.nosc//3)
     _phase = np.pi
 
     positions_1 = np.stack((
@@ -387,7 +379,7 @@ class MechSystem:
     ), axis=1)
 
     # Combine the two helices, interleaving their positions
-    positions = np.zeros((nosc//3, 3))
+    positions = np.zeros((SysConfig.nosc//3, 3))
     positions[::2] = positions_1
     positions[1::2] = positions_2
 
@@ -397,7 +389,7 @@ class MechSystem:
 
     positions = positions.flatten().reshape(-1, 1)
 
-    momenta = np.zeros((nosc//3, 3))
+    momenta = np.zeros((SysConfig.nosc//3, 3))
     momenta[::2] = rng.uniform(-0.001, 0.001, momenta[::2].shape)
     momenta[1::2] = momenta[::2]
     assert np.allclose(momenta[1::2], momenta[::2]), 'position and momenta are not orthogonal'
@@ -607,18 +599,6 @@ class MechSystem:
         self.beta = (max(1e-2, 0 * rng.random() / 10)) * 0 # Damping coefficient, obsolete
         self.time_lapsed = []
 
-        # Projection matrices
-        if hasattr(self, 'RB'):
-            self.y_init = self.RB.T @ self.y_init
-
-            if self.reducer == 'psd':
-                self.JJ = self.JJ(self.nosc_r)
-        else:
-            self.JJ = self.JJ(self.nosc)
-
-        # Update functions based on solver type
-        self.ham = self.ham_lambda
-
         # Determine the model state and set methods accordingly
         is_hyperreduced = hasattr(self, 'RBxUx_inv_PxU') or hasattr(self, '_RBxUx_inv_PxU_')
         is_reduced = hasattr(self, 'RB') or hasattr(self, 'RB_dg')
@@ -630,6 +610,19 @@ class MechSystem:
         else:
             self._set_full_order_methods()
             
+        # Update functions based on solver type
+        self.ham = self.ham_lambda
+
+        # Projection matrices
+        if hasattr(self, 'RB'):
+            self.y_init = self.RB.T @ self.y_init
+        
+        # Initialize symplectic matrix J
+        if hasattr(self, 'RB') and self.reducer == 'psd':
+            self.JJ = self.compute_J(self.nosc_r)
+        elif not hasattr(self, 'RB'):
+            self.JJ = self.compute_J(self.nosc)
+
     def _set_full_order_methods(self):
         """Assigns methods for the full-order model."""
         print('Setting full order functions...')

@@ -80,7 +80,7 @@ if False and shutil.which('sbatch') and not "PYTEST_CURRENT_TEST" in os.environ:
 #  ^ Change to False to disable SLURM detection
 ```
 
-*Note: The script is configured to use a SLURM cluster by default. If running locally, ensure you adjust the `dask` client configuration in the `__main__` block of the script.*
+*Note: The script is configured to use a SLURM cluster by default. Ensure you adjust the `dask` client configuration in the `__main__` block of the script according to your own cluster configuration.*
 
 ## Citation
 

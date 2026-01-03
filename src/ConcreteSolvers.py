@@ -44,7 +44,15 @@ class BaseSolverMixin:
     @compose_solver_solves
     def solve_for_w(self, w_val, y_, k):
         self.set_initial_condition(y_[1])
-        y_, _, info_ = super().solve(w_val*self.t_points[k:k+2])
+        
+        # Temporarily update dt for the substep
+        original_dt = self.dt
+        self.dt = w_val * original_dt
+        try:
+            y_, _, info_ = super().solve(w_val*self.t_points[k:k+2])
+        finally:
+            self.dt = original_dt
+
         if self.store: self.info.append(np.array(info_[0::1]))
 
         if k > 0 and hasattr(self, 'Lambda') and self.solver_class == ConformalStormerVerletSolver:
@@ -399,11 +407,11 @@ class BaseSolverMixin:
         # For the purpose of this diff, I will include the full method in the actual file creation if needed,
         # but here I will just copy it from the context provided.
         
-        fig = figure(figsize=(10, 10), constrained_layout=True)  # Make figure taller
+        fig = figure(figsize=(12, 12), constrained_layout=True)  # Make figure taller
         # fig.tight_layout(pad=0)
         fig.suptitle(rf'integrator = {self.solver_class.__name__}, $\Delta t = {self.dt}$', y=1)
 
-        gs = fig.add_gridspec(5, 2, hspace=1)
+        gs = fig.add_gridspec(5, 2)
         ax0, ax1, ax2, ax3, ax4 = [fig.add_subplot(gs[i, 0]) for i in [0, 1, 2, 3, 4]]
         ax_pp = fig.add_subplot(gs[:5, -1], projection='3d')
         ax_pp.set_box_aspect([1, 1, 1])  # Set aspect ratio to be equal for all axes

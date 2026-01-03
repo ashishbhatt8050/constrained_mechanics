@@ -84,12 +84,9 @@ if __name__ == '__main__':
         ]
     }
 
-    Omega2_space = (MechSystem._Omega2_space[:-1] if MechSystem.predict
-                else MechSystem._Omega2_space)        
-    Omega2_space_dim = len(Omega2_space)
     kwds.update({
-        'Omega2_space': Omega2_space,
-        'Omega2_space_dim': Omega2_space_dim
+        'Omega2_space': MechSystem.Omega2_space,
+        'Omega2_space_dim': len(MechSystem.Omega2_space)
         })
     
     # Dask Cluster Configuration
@@ -174,10 +171,9 @@ if __name__ == '__main__':
             np.concatenate(([0], np.random.choice(np.arange(1, solver.n), n_samples - 1, replace=False)))
             for solver, n_samples in zip(solvers, n_samples_list)
         ]
-        Omega2_space_ = (MechSystem._Omega2_space[-1:] if MechSystem.predict else MechSystem._Omega2_space)
         kwds.update({
-            'Omega2_space': Omega2_space_,
-            'Omega2_space_dim': len(Omega2_space_),
+            'Omega2_space': MechSystem.Omega2_space_test,
+            'Omega2_space_dim': len(MechSystem.Omega2_space_test),
         })
         solvers_r = BaseSolverMixin.setup_and_solve_reduced_system(kwds, solvers, client=client)
 
@@ -193,7 +189,7 @@ if __name__ == '__main__':
     # %% Compute and display metrics
     array_shape = (len(kwds['registered_solver_classes']), 
                   MechSystem.dt_space_dim, 
-                  Omega2_space_dim)
+                  len(MechSystem.Omega2_space))
 
     time_lapsed = [reshape([x.time_lapsed for x in solvers], array_shape)]
 

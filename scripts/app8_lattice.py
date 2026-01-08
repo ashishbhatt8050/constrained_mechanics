@@ -37,7 +37,9 @@ from dask.distributed import Client, wait
 from ConcreteSolvers import (BaseSolverMixin, DiscreteGradientSolver, 
                             ConformalStormerVerletSolver, ConformalImplicitMidpointSolver)
 from ReduceMechSystem import ReduceMechSystem
-from System import MechSystem  # Keep for static properties
+from System import MechSystem, HamiltonianMechSystem, LagrangianMechSystem, load_symbolic_expressions
+from SymbolicComputer import IndexedBaseSymbolicComputer, manage_cache
+from PlotScript import plot_omega_distribution
 
 # Configure LaTeX rendering based on availability
 if shutil.which('latex'):
@@ -61,6 +63,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Constrained Mechanics Solver & Model Reduction")
     parser.add_argument("--no-latex", action="store_true", help="Disable LaTeX rendering for plots")
     parser.add_argument("--clean", action="store_true", help="Clean checkpoints before running")
+    parser.add_argument("--clear-symbolic", action="store_true", help="Clear symbolic expressions cache before running")
+    parser.add_argument("--clear-cache", action="store_true", help="Clear joblib cache before running")
     
     args = parser.parse_args()
 
@@ -68,11 +72,37 @@ if __name__ == '__main__':
     if args.no_latex:
         rc('text', usetex=False)
 
-    if args.clean:
-        checkpoint_path = os.path.join('data', f'{MechSystem.keep_time}')
-        if os.path.exists(checkpoint_path):
-            print(f"Cleaning checkpoint directory: {checkpoint_path}")
-            shutil.rmtree(checkpoint_path)
+    # Define paths and hash
+    cache_dir = os.path.join('data', 'joblib_cache')
+    checkpoint_path = os.path.join('data', f'{MechSystem.keep_time}')
+    expressions_file = os.path.join('data', f"symbolic_expr_{MechSystem.nosc}_cse.pickle")
+    config_hash = MechSystem.get_config_hash()
+
+    # Manage joblib cache consistency
+    manage_cache(MechSystem.nosc, config_hash, cache_dir, checkpoint_path,      expressions_file,
+                 clean_cache=args.clear_cache,
+                 clean_checkpoints=args.clean,
+                 clean_symbolic=args.clear_symbolic)
+
+    if not os.path.exists(expressions_file):
+        print(f"Generating symbolic expressions for nosc={MechSystem.nosc}...")
+        computer = IndexedBaseSymbolicComputer(MechSystem.nosc)
+        expressions = {}
+        tl = computer.compute_all(expressions)
+        print(f'Computed symbolic expressions in {tl:.2f} seconds.')
+        
+        os.makedirs('data', exist_ok=True)
+        with open(expressions_file, 'wb') as f:
+            pickle.dump(expressions, f)
+        
+        # Load them now that they exist
+        load_symbolic_expressions(HamiltonianMechSystem)
+        load_symbolic_expressions(LagrangianMechSystem)
+
+    if MechSystem.predict:
+        print("Plotting Omega2 distribution...")
+        plot_omega_distribution(MechSystem.Omega2_space, MechSystem.Omega2_space_test, 
+                                filename=os.path.join(MechSystem.data_folder, "omega2_dist.pdf"))
     
     # %% Full order solution
     kwds = {
@@ -83,6 +113,9 @@ if __name__ == '__main__':
             ConformalStormerVerletSolver,
         ]
     }
+    
+    # Save original solver classes for reporting
+    original_solver_classes = list(kwds['registered_solver_classes'])
 
     kwds.update({
         'Omega2_space': MechSystem.Omega2_space,
@@ -91,7 +124,7 @@ if __name__ == '__main__':
     
     # Dask Cluster Configuration
     cluster = None
-    if False and shutil.which('sbatch') and not "PYTEST_CURRENT_TEST" in os.environ:
+    if shutil.which('sbatch') and not "PYTEST_CURRENT_TEST" in os.environ:
         try:
             print("SLURM detected. Initializing SLURMCluster...", flush=True)
             
@@ -113,8 +146,8 @@ if __name__ == '__main__':
                 account='cpu_users',
                 cores=32,
                 # processes=8, # Unset to let dask-jobqueue use its default (often 1 process per core)
-                memory='128GB',
-                walltime='01:00:00',
+                memory='99GB',
+                walltime='1-00:00:00',
                 job_extra_directives=['--exclusive', '--output=dask_worker_%j.log', '--qos=cpu_users'],
                 job_script_prologue=job_prologue,
             )
@@ -187,22 +220,26 @@ if __name__ == '__main__':
         cluster.close()
 
     # %% Compute and display metrics
-    array_shape = (len(kwds['registered_solver_classes']), 
+    array_shape_train = (len(kwds['registered_solver_classes']), 
                   MechSystem.dt_space_dim, 
                   len(MechSystem.Omega2_space))
+    
+    array_shape_test = (len(kwds['registered_solver_classes']), 
+                  MechSystem.dt_space_dim, 
+                  len(MechSystem.Omega2_space_test))
 
-    time_lapsed = [reshape([x.time_lapsed for x in solvers], array_shape)]
+    time_lapsed = [reshape([x.time_lapsed for x in solvers], array_shape_train)]
 
     if not MechSystem.predict:
         # Calculate errors
         errors_r = reshape([np.amax(abs(y1 - y2)) 
             for y1, y2 in zip([x.y for x in solvers], 
             [x.y for x in solvers_r])], 
-            array_shape)
+            array_shape_train)
         errors_dr = reshape([np.amax(abs(y1 - y2)) 
             for y1, y2 in zip([x.y for x in solvers], 
             [x.y for x in solvers_dr])], 
-            array_shape)
+            array_shape_train)
 
         print('\n--- Max Solution Errors (over all frequencies) ---')
         error_matrices = [np.amax(errors_r, axis=2), np.amax(errors_dr, axis=2)]
@@ -210,27 +247,27 @@ if __name__ == '__main__':
 
         for i, error_matrix in enumerate(error_matrices):
             print(f"\n{model_names_err[i]}:")
-            header = "Solver".ljust(35) + "".join([f"dt={dt:<11.4f}" for dt in MechSystem.dt_space])
+            header = "Solver".ljust(45) + "".join([f"dt={dt:<11.4f}" for dt in MechSystem.dt_space])
             print(header)
             print("-" * len(header))
-            for j, solver_class in enumerate(kwds['registered_solver_classes']):
-                row_str = solver_class.__name__.ljust(35)
+            for j, solver_class in enumerate(original_solver_classes):
+                row_str = solver_class.__name__.ljust(45)
                 for k in range(MechSystem.dt_space_dim):
                     val = error_matrix[j, k]
                     row_str += f"{val:<11.2e}"
                 print(row_str)
 
-        time_lapsed.append(reshape([x.time_lapsed for x in solvers_r], array_shape))
+        time_lapsed.append(reshape([x.time_lapsed for x in solvers_r], array_shape_train))
         # time_lapsed[0].shape) / time_lapsed[0] * 100)
-        time_lapsed.append(reshape([x.time_lapsed for x in solvers_dr], array_shape))
+        time_lapsed.append(reshape([x.time_lapsed for x in solvers_dr], array_shape_train))
         # time_lapsed[0].shape) / time_lapsed[0] * 100)
         time_lapsed[1] = time_lapsed[1] / time_lapsed[0] * 100
         time_lapsed[2] = time_lapsed[2] / time_lapsed[0] * 100
 
     else:
         time_lapsed.extend([
-            reshape([x.time_lapsed for x in solvers_r], (*array_shape[:2], 1)),
-            reshape([x.time_lapsed for x in solvers_dr], (*array_shape[:2], 1))
+            reshape([x.time_lapsed for x in solvers_r], array_shape_test),
+            reshape([x.time_lapsed for x in solvers_dr], array_shape_test)
         ])
         
         # Calculate average full order time over all training frequencies
@@ -253,12 +290,12 @@ if __name__ == '__main__':
         print(f"\n{model_names[i]}:")
         
         # Header
-        header = "Solver".ljust(35) + "".join([f"dt={dt:<11.4f}" for dt in MechSystem.dt_space])
+        header = "Solver".ljust(45) + "".join([f"dt={dt:<11.4f}" for dt in MechSystem.dt_space])
         print(header)
         print("-" * len(header))
         
-        for j, solver_class in enumerate(kwds['registered_solver_classes']):
-            row_str = solver_class.__name__.ljust(35)
+        for j, solver_class in enumerate(original_solver_classes):
+            row_str = solver_class.__name__.ljust(45)
             for k in range(MechSystem.dt_space_dim):
                 val = avg_time_matrix[j, k]
                 row_str += f"{val:<11.2f}"

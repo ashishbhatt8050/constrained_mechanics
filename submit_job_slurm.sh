@@ -8,9 +8,9 @@
 
 #SBATCH --job-name=app8_lattice
 #SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=16G
+#SBATCH --ntasks=3
+#SBATCH --cpus-per-task=3
+#SBATCH --mem=64G
 #SBATCH --time=1-00:00:00
 #SBATCH --partition=workq
 #SBATCH --account=cpu_users
@@ -55,7 +55,7 @@ which latex || echo "Warning: 'latex' not found. Matplotlib usetex=True will fai
 # which gs || echo "Warning: 'gs' (Ghostscript) not found. Matplotlib usetex=True will fail."
 
 # Run on CPU by default. To run on GPU, add --device gpu
-python -u app8_lattice.py | tee logfile.txt #--device gpu
+python -u scripts/app8_lattice.py --clean --clear-symbolic --clear-cache | tee logfile.txt #--device gpu
 
 # Move the SLURM output file to the latest data directory
 LATEST_DATA_DIR=$(ls -td data/*/ | head -n 1)

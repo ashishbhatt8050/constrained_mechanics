@@ -16,7 +16,7 @@ echo "Press Ctrl+C to exit."
 while true; do
     clear
     echo "===== Job Status ====="
-    squeue -j $JOBID -o "%.18i %.9P %.8j %.8u %.2t %.10M %.6D %R"
+    squeue #-j $JOBID -o "%.18i %.9P %.8j %.8u %.2t %.10M %.6D %R"
 
     echo -e "\n===== Job Details ====="
     scontrol show job $JOBID | egrep "JobId=|JobState=|RunTime=|NodeList=|NumCPUs=|NumNodes=|MinMemoryNode=|GRES="

@@ -6,11 +6,14 @@ from pylab import log, r_, c_, sqrt, roll, figure, linspace
 import cloudpickle as pickle
 from functools import wraps
 from tqdm.auto import tqdm
+import concurrent.futures
+import matplotlib.pyplot as plt
 
-from System import MechSystem
+from System import (MechSystem, HamiltonianMechSystem, LagrangianMechSystem,
+                   ReducedHamiltonianMechSystem, ReducedLagrangianMechSystem, HyperReducedHamiltonianMechSystem, HyperReducedLagrangianMechSystem)
 from ODESolver import (ConformalStormerVerlet, ConformalImplicitMidpoint, 
                       DiscreteGradient)
-from ReduceMechSystem import ReduceMechSystem
+from ReduceMechSystem import ReduceMechSystem, HamiltonianReducer, DiscreteGradientReducer
 from PlotScript import plot_data, save_figure, timing
 
 def _dask_worker(idx, *arg):
@@ -54,8 +57,8 @@ class BaseSolverMixin:
             self.dt = original_dt
 
         if self.store: self.info.append(np.array(info_[0::1]))
-
-        if k > 0 and hasattr(self, 'Lambda') and self.solver_class == ConformalStormerVerletSolver:
+        
+        if k > 0 and hasattr(self, 'Lambda') and isinstance(self, ConformalStormerVerlet):
             Lambda = self.Lambda[k].copy()
             if k == 1:
                 print(f'Setting initial guess for Lagrange multipliers')
@@ -227,28 +230,16 @@ class BaseSolverMixin:
         from the MechSystem class to the kwds dictionary to be passed to workers.
         This ensures that the state computed on the driver is available on the workers.
         """
-        attrs_to_pass = [
-            # Reduced Basis
-            'RB', 'nosc_r', 'RB_dg', 'nosc_r_dg',
-            # DEIM attributes
-            'RBxUx_inv_PxU', '_RBxUx_inv_PxU_',
-            # MDEIM attributes for system dynamics
-            'IP_Ux_inv_PxU', '_IP_Ux_inv_PxU_',
-            # MDEIM attributes for constraints
-            '_IP_Ux_inv_PxU', '_IP_Ux_inv_PxU_dg',
-            'IP_g_prime_x_lambda_y_dg', 'IP_g_prime_x_lambda_lambda_dg',
-            # Lambdified functions (DEIM)
-            'ham_z_deim', 'ham_zz_deim', 'lag_dg_deim', 'lag_dg_z_deim',
-            # Lambdified functions (MDEIM)
-            'ham_zz_mdeim', 'lag_dg_z_mdeim', 'g_prime_mdeim', 'g_prime_mdeim_dg',
-            'g_prime_x_lambda_y_mdeim_dg', 'g_prime_x_lambda_lambda_mdeim_dg',
-            # Shape attributes for reshaping
-            'g_prime_shape', 'g_prime_shape_dg',
-            'g_prime_x_lambda_y_shape_dg', 'g_prime_x_lambda_lambda_shape_dg'
-        ]
-        for attr in attrs_to_pass:
-            if hasattr(MechSystem, attr):
-                kwds[attr] = getattr(MechSystem, attr)
+        kwds['solver_data'] = {}
+        
+        # Check registered solver classes for attributes
+        for cls in kwds.get('registered_solver_classes', []):
+            data = {}
+            for attr in ReduceMechSystem._REDUCTION_ATTRS:
+                if hasattr(cls, attr):
+                    data[attr] = getattr(cls, attr)
+            kwds['solver_data'][cls.__name__] = data
+
         return kwds
 
     @staticmethod
@@ -274,7 +265,23 @@ class BaseSolverMixin:
                 raise Exception(f"Error loading checkpoint: {str(e)}")
         else:
             # Setup reduced model and update methods
-            ReduceMechSystem.setup_reduced_model(solvers, kwds)
+            ham_solvers = [s for s in solvers if not isinstance(s, DiscreteGradient)]
+            dg_solvers = [s for s in solvers if isinstance(s, DiscreteGradient)]
+            
+            ham_classes = [REDUCED_SOLVER_MAPPING[c] for c in kwds['registered_solver_classes'] if issubclass(c, (ConformalStormerVerlet, ConformalImplicitMidpoint))]
+            dg_classes = [REDUCED_SOLVER_MAPPING[c] for c in kwds['registered_solver_classes'] if issubclass(c, DiscreteGradient)]
+            
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                futures = []
+                if ham_solvers:
+                    futures.append(executor.submit(HamiltonianReducer.setup_reduced_model, ham_solvers, ham_classes))
+                if dg_solvers:
+                    futures.append(executor.submit(DiscreteGradientReducer.setup_reduced_model, dg_solvers, dg_classes))
+                for future in concurrent.futures.as_completed(futures):
+                    future.result()
+
+            # Update registered classes to reduced versions for next steps
+            kwds['registered_solver_classes'] = [REDUCED_SOLVER_MAPPING.get(cls, cls) for cls in kwds['registered_solver_classes']]
 
             # Pass the computed bases to the workers via the kwds dictionary.
             kwds = BaseSolverMixin._transfer_reduction_attrs(kwds)
@@ -315,21 +322,39 @@ class BaseSolverMixin:
                 raise Exception(f"Error loading checkpoint: {str(e)}")
         else:
             # Setup hyperreduction using classmethod
-            ReduceMechSystem.setup_hyperreduction(kwds)
+            ham_solvers = [s for s in solvers if not isinstance(s, DiscreteGradient)]
+            dg_solvers = [s for s in solvers if isinstance(s, DiscreteGradient)]
+            
+            ham_classes = [HYPERREDUCED_SOLVER_MAPPING[c] for c in kwds['registered_solver_classes'] if issubclass(c, (ConformalStormerVerlet, ConformalImplicitMidpoint))]
+            dg_classes = [HYPERREDUCED_SOLVER_MAPPING[c] for c in kwds['registered_solver_classes'] if issubclass(c, DiscreteGradient)]
 
-            if ReduceMechSystem.hyperreducer == 'MDEIM':
-                ReduceMechSystem.update_mdeim_hyperreduction(solvers, kwds)
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                futures = []
+                if ham_classes:
+                    futures.append(executor.submit(HamiltonianReducer.setup_hyperreduction, ham_classes))
+                if dg_classes:
+                    futures.append(executor.submit(DiscreteGradientReducer.setup_hyperreduction, dg_classes))
+                for future in concurrent.futures.as_completed(futures):
+                    future.result()
 
+                if ReduceMechSystem.hyperreducer == 'MDEIM':
+                    futures = []
+                    if ham_solvers:
+                        futures.append(executor.submit(HamiltonianReducer.update_mdeim_hyperreduction, ham_solvers, ham_classes))
+                    if dg_solvers:
+                        futures.append(executor.submit(DiscreteGradientReducer.update_mdeim_hyperreduction, dg_solvers, dg_classes))
+                    for future in concurrent.futures.as_completed(futures):
+                        future.result()
+
+            # hyperreduce_constraints use parallel processing internally
             if ReduceMechSystem.constraints_reduce:
-                solver_names = [s.__name__ for s in kwds['registered_solver_classes']]
-                if 'ConformalStormerVerletSolver' in solver_names \
-                    or 'ConformalImplicitMidpointSolver' in solver_names:
-                    filtered_solvers, filtered_indices = ReduceMechSystem.filter_solvers(solvers, "Hamiltonian")
-                    ReduceMechSystem.hyperreduce_constraints(filtered_solvers, filtered_indices, "Hamiltonian")
+                if ham_solvers:
+                    HamiltonianReducer.hyperreduce_constraints(ham_solvers, ham_classes)
+                if dg_solvers:
+                    DiscreteGradientReducer.hyperreduce_constraints(dg_solvers, dg_classes)
 
-                if 'DiscreteGradientSolver' in solver_names:
-                    filtered_solvers, filtered_indices = ReduceMechSystem.filter_solvers(solvers, "DiscreteGradient")
-                    ReduceMechSystem.hyperreduce_constraints(filtered_solvers, filtered_indices, "DiscreteGradient")
+            # Update registered classes to hyper-reduced versions
+            kwds['registered_solver_classes'] = [HYPERREDUCED_SOLVER_MAPPING.get(cls, cls) for cls in kwds['registered_solver_classes']]
 
             # Pass all computed bases and functions to workers
             kwds = BaseSolverMixin._transfer_reduction_attrs(kwds)
@@ -408,8 +433,9 @@ class BaseSolverMixin:
         # but here I will just copy it from the context provided.
         
         fig = figure(figsize=(12, 12), constrained_layout=True)  # Make figure taller
+        fig.set_constrained_layout_pads(w_pad=0.1, h_pad=0.1, hspace=0.1, wspace=0.1)
         # fig.tight_layout(pad=0)
-        fig.suptitle(rf'integrator = {self.solver_class.__name__}, $\Delta t = {self.dt}$', y=1)
+        fig.suptitle(rf'integrator = {self.solver_class.__name__}, $\Delta t = {self.dt}$')
 
         gs = fig.add_gridspec(5, 2)
         ax0, ax1, ax2, ax3, ax4 = [fig.add_subplot(gs[i, 0]) for i in [0, 1, 2, 3, 4]]
@@ -458,9 +484,11 @@ class BaseSolverMixin:
         ax4.set_xlabel('time')
         # Plot the particle positions over time
         coords = self.y[:, :self.nosc].reshape(-1, self.nosc//3, 3)
+        sc = None
         for i in range(coords.shape[1]):
             ax_pp.scatter(coords[0, i, 0], coords[0, i, 1], coords[0, i, 2], s=20, c='teal')  # plot initial configuration
-            ax_pp.plot(coords[:, i, 0], coords[:, i, 1], coords[:, i, 2], 'k-')  # plot system evolution
+            # ax_pp.plot(coords[:, i, 0], coords[:, i, 1], coords[:, i, 2], 'k-')  # plot system evolution
+            sc = ax_pp.scatter(coords[:, i, 0], coords[:, i, 1], coords[:, i, 2], c=self.t_points, cmap='viridis', s=1, alpha=0.1)
 
             # Plot projection onto x-y plane (z=0)
             ax_pp.plot(coords[:, i, 0], coords[:, i, 1], np.zeros_like(coords[:, i, 2]), 'r-', alpha=0.7)
@@ -472,6 +500,10 @@ class BaseSolverMixin:
         ax_pp.set_title('Phase portrait')
         ax_pp.set_box_aspect([1, 1, 1])  # Set aspect ratio to be equal for all axes
         ax_pp.view_init(elev=15, azim=45)
+
+        if sc:
+            cbar = fig.colorbar(sc, ax=ax_pp, shrink=0.5, pad=0.1)
+            cbar.set_label('Time')
 
         # Hide inner labels
         for ax in [ax0, ax1, ax2, ax3, ax4]:
@@ -492,21 +524,17 @@ class BaseSolverMixin:
         if hasattr(self, 'eng_error'):
             fig_data['eng_error'] = self.eng_error
 
-        solver_name_short = self.solver_class.__name__.replace('Conformal', 'C').replace('StormerVerlet', 'SV').replace('ImplicitMidpoint', 'IM').replace('DiscreteGradient', 'DG')
-        suffix = '_full' if not hasattr(self, 'RB') else '_r' if not hasattr(MechSystem, 'RBxUx_inv_PxU') else '_dr'
-        suffix += '_predict' if self.predict else '' if not hasattr(self, 'RB') else '_repro'
-        filename = os.path.join(MechSystem.data_folder, f"osc_{solver_name_short}{suffix}.pdf")
-        save_figure(fig, filename, fig_data=None)
+        solver_name_short = self.solver_class.__name__.replace('Conformal', 'C').replace('StormerVerlet', 'SV').replace('ImplicitMidpoint', 'IM').replace('DiscreteGradient', 'DG').replace('HyperReduced', 'HR').replace('Reduced', 'R')
+        # suffix = '_full' if not hasattr(self, 'RB') else '_r' if not hasattr(MechSystem, 'RBxUx_inv_PxU') else '_dr'
+        suffix = '_predict' if self.predict else '' if not hasattr(self, 'RB') else '_repro'
+        filename = os.path.join(MechSystem.data_folder, f"{solver_name_short}{suffix}.pdf")
+        save_figure(fig, filename, fig_data=fig_data)
 
-class DiscreteGradientSolver(BaseSolverMixin, DiscreteGradient):
-    """DiscreteGradient solver with DG-specific capabilities."""
+class DiscreteGradientFixedPointMixin:
     def __init__(self, kwds):
         super().__init__(kwds)
         self.g = self.g__
         self.g_prime = (self.g_prime__, self._g_prime_with_JJ)
-
-    def _g_prime_with_JJ(self, y): #New class method
-        return self.g_prime__(y) @ self.JJ.T
 
     def residual(self, x, x1, Lambda):
 
@@ -547,42 +575,15 @@ class DiscreteGradientSolver(BaseSolverMixin, DiscreteGradient):
         if m >= self.M:
             raise RuntimeError("Nonlinear solver did not converge")
 
+    def _g_prime_with_JJ(self, y):
+        return self.g_prime__(y) @ self.JJ.T
 
-class ConformalStormerVerletSolver(BaseSolverMixin, ConformalStormerVerlet):
-    """Conformal Stormer-Verlet Solver with Hamiltonian capabilities."""
+class ConformalStormerVerletFixedPointMixin:
     def __init__(self, kwds):
         super().__init__(kwds)
         self.g = self.g__
         self.g_prime = (self.g_prime_diag, self.block_diag_matrix)
 
-    def block_diag_matrix(self, y):
-        """Compute g_prime using the original method"""
-
-        ham_zz_y3 = self.ham_zz(y[3])
-        i0, i1 = ham_zz_y3.shape
-        i0, i1 = i0//2, i1//2
-        ham_zz_y3_22 = ham_zz_y3[i0:, i1:]
-        
-        i0, i1 = self.g_prime__(y[0]).shape
-        i0, i1 = i0//2, i1//2
-
-        result = np.block([
-            [-0.25 * self.dt**2 * (self.g_prime__(y[2])[i0:, i1:] + self.g_prime__(y[0])[:i0, :i1] @ ham_zz_y3_22), np.zeros((i0, i1))],
-            [np.zeros((i0, i1)), -0.5 * self.dt * self.g_prime__(y[1])[i0:, i1:]]
-        ])
-        return result
-    
-    def g_prime_diag(self, y):
-        """Compute g_prime using the original method"""
-        _g_prime = self.g_prime__(y)
-        i0, i1 = _g_prime.shape
-        _g_prime_11 = _g_prime[:i0//2, :i1//2]
-        result = np.block([
-            [_g_prime_11, np.zeros(_g_prime_11.shape)],
-            [np.zeros(_g_prime_11.shape), _g_prime_11]
-        ])
-        return result
-        
     def fixed_point(self, x, Lambda):
         """
         Fixed point iteration method.
@@ -632,7 +633,7 @@ class ConformalStormerVerletSolver(BaseSolverMixin, ConformalStormerVerlet):
             m += 1
             
         if m >= self.M:
-             if self.RB is not None and LA.norm(g_pos) < 1e-5 and not m%100:
+             if getattr(self, 'RB', None) is not None and LA.norm(g_pos) < 1e-5 and not m%100:
                  print(f"Warning: Position constraints not fully satisfied (error={LA.norm(g_pos):.2e}) in reduced model. Continuing.", flush=True)
              else:
                  raise RuntimeError(f"Nonlinear solver (position) did not converge. m: {m} -- Error: {LA.norm(g_pos)}")
@@ -660,7 +661,7 @@ class ConformalStormerVerletSolver(BaseSolverMixin, ConformalStormerVerlet):
             m += 1
             
         if m >= self.M:
-             if self.RB is not None and LA.norm(g_vel) < 1e-5 and not m%100:
+             if getattr(self, 'RB', None) is not None and LA.norm(g_vel) < 1e-5 and not m%100:
                  print(f"Warning: Velocity constraints not fully satisfied (error={LA.norm(g_vel):.2e}) in reduced model. Continuing.", flush=True)
              else:
                  raise RuntimeError(f"Nonlinear solver (velocity) did not converge. m: {m} -- Error: {LA.norm(g_vel)}")
@@ -669,8 +670,60 @@ class ConformalStormerVerletSolver(BaseSolverMixin, ConformalStormerVerlet):
         Lambda[:i0] = Lambda_1
         Lambda[i0:] = Lambda_2
 
+    def block_diag_matrix(self, y):
+        """Compute g_prime using the original method"""
 
-class ConformalImplicitMidpointSolver(BaseSolverMixin, ConformalImplicitMidpoint):
+        ham_zz_y3 = self.ham_zz(y[3])
+        i0, i1 = ham_zz_y3.shape
+        i0, i1 = i0//2, i1//2
+        ham_zz_y3_22 = ham_zz_y3[i0:, i1:]
+        
+        i0, i1 = self.g_prime__(y[0]).shape
+        i0, i1 = i0//2, i1//2
+
+        result = np.block([
+            [-0.25 * self.dt**2 * (self.g_prime__(y[2])[i0:, i1:] + self.g_prime__(y[0])[:i0, :i1] @ ham_zz_y3_22), np.zeros((i0, i1))],
+            [np.zeros((i0, i1)), -0.5 * self.dt * self.g_prime__(y[1])[i0:, i1:]]
+        ])
+        return result
+    
+    def g_prime_diag(self, y):
+        """Compute g_prime using the original method"""
+        _g_prime = self.g_prime__(y)
+        i0, i1 = _g_prime.shape
+        _g_prime_11 = _g_prime[:i0//2, :i1//2]
+        result = np.block([
+            [_g_prime_11, np.zeros(_g_prime_11.shape)],
+            [np.zeros(_g_prime_11.shape), _g_prime_11]
+        ])
+        return result
+
+class DiscreteGradientSolver(BaseSolverMixin, DiscreteGradientFixedPointMixin, DiscreteGradient, LagrangianMechSystem):
+    """DiscreteGradient solver with DG-specific capabilities."""
+    pass
+
+class ReducedDiscreteGradientSolver(BaseSolverMixin, DiscreteGradientFixedPointMixin, DiscreteGradient, ReducedLagrangianMechSystem):
+    """Reduced order Discrete Gradient Solver."""
+    pass
+
+class HyperReducedDiscreteGradientSolver(BaseSolverMixin, DiscreteGradientFixedPointMixin, DiscreteGradient, HyperReducedLagrangianMechSystem):
+    """Hyper-reduced order Discrete Gradient Solver."""
+    pass
+
+
+class ConformalStormerVerletSolver(BaseSolverMixin, ConformalStormerVerletFixedPointMixin, ConformalStormerVerlet, HamiltonianMechSystem):
+    """Conformal Stormer-Verlet Solver with Hamiltonian capabilities."""
+    pass
+
+class ReducedConformalStormerVerletSolver(BaseSolverMixin, ConformalStormerVerletFixedPointMixin, ConformalStormerVerlet, ReducedHamiltonianMechSystem):
+    """Reduced order Conformal Stormer-Verlet Solver."""
+    pass
+
+class HyperReducedConformalStormerVerletSolver(BaseSolverMixin, ConformalStormerVerletFixedPointMixin, ConformalStormerVerlet, HyperReducedHamiltonianMechSystem):
+    """Hyper-reduced order Conformal Stormer-Verlet Solver."""
+    pass
+
+class ConformalImplicitMidpointSolver(BaseSolverMixin, ConformalImplicitMidpoint, HamiltonianMechSystem):
     """Conformal Implicit Midpoint Solver with Hamiltonian capabilities."""
     def __init__(self, kwds):
         super().__init__(kwds)
@@ -685,3 +738,44 @@ class ConformalImplicitMidpointSolver(BaseSolverMixin, ConformalImplicitMidpoint
             [np.zeros((_g_prime_shape[0]//2, _g_prime_shape[1]//2)), self.g_prime__(y[1])[:_g_prime_shape[0]//2, :_g_prime_shape[1]//2]]
         ])
         return result
+
+class ReducedConformalImplicitMidpointSolver(BaseSolverMixin, ConformalImplicitMidpoint, ReducedHamiltonianMechSystem):
+    """Reduced order Conformal Implicit Midpoint Solver."""
+    def __init__(self, kwds):
+        super().__init__(kwds)
+        self.g_prime = [self.g_prime__, self.block_diag_matrix]
+
+    def block_diag_matrix(self, y):
+        return ConformalImplicitMidpointSolver.block_diag_matrix(self, y)
+
+class HyperReducedConformalImplicitMidpointSolver(BaseSolverMixin, ConformalImplicitMidpoint, HyperReducedHamiltonianMechSystem):
+    """Hyper-reduced order Conformal Implicit Midpoint Solver."""
+    def __init__(self, kwds):
+        super().__init__(kwds)
+        self.g_prime = [self.g_prime__, self.block_diag_matrix]
+
+    def block_diag_matrix(self, y):
+        return ConformalImplicitMidpointSolver.block_diag_matrix(self, y)
+
+REDUCED_SOLVER_MAPPING = {
+    DiscreteGradientSolver: ReducedDiscreteGradientSolver,
+    ConformalStormerVerletSolver: ReducedConformalStormerVerletSolver,
+    ConformalImplicitMidpointSolver: ReducedConformalImplicitMidpointSolver,
+    # Map reduced to reduced (idempotent)
+    ReducedDiscreteGradientSolver: ReducedDiscreteGradientSolver,
+    ReducedConformalStormerVerletSolver: ReducedConformalStormerVerletSolver,
+    ReducedConformalImplicitMidpointSolver: ReducedConformalImplicitMidpointSolver
+}
+
+HYPERREDUCED_SOLVER_MAPPING = {
+    DiscreteGradientSolver: HyperReducedDiscreteGradientSolver,
+    ConformalStormerVerletSolver: HyperReducedConformalStormerVerletSolver,
+    ConformalImplicitMidpointSolver: HyperReducedConformalImplicitMidpointSolver,
+    ReducedDiscreteGradientSolver: HyperReducedDiscreteGradientSolver,
+    ReducedConformalStormerVerletSolver: HyperReducedConformalStormerVerletSolver,
+    ReducedConformalImplicitMidpointSolver: HyperReducedConformalImplicitMidpointSolver,
+    # Map hyperreduced to hyperreduced (idempotent)
+    HyperReducedDiscreteGradientSolver: HyperReducedDiscreteGradientSolver,
+    HyperReducedConformalStormerVerletSolver: HyperReducedConformalStormerVerletSolver,
+    HyperReducedConformalImplicitMidpointSolver: HyperReducedConformalImplicitMidpointSolver
+}

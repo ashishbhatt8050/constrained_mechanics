@@ -3,10 +3,9 @@ from pylab import r_, c_
 from numpy import linalg as LA
 import os
 
-from System import MechSystem
 from Newton import Newton
 
-class ODESolver(MechSystem):
+class ODESolver:
     """
     Subclass of numerical methods solving scalar and vector ODEs
 
@@ -22,7 +21,7 @@ class ODESolver(MechSystem):
     """
         
     def __init__(self, kwds):
-        MechSystem.__init__(self, kwds)
+        super().__init__(kwds)
             
     def __call__(self, y, t, *y1, **kwargs):
         """Base implementation - must be overridden"""
@@ -45,7 +44,7 @@ class ODESolver(MechSystem):
         # TODO: get rid of this check
         try:
             # Determine function based on the solver class
-            if self.solver_class.__name__ == "DiscreteGradientSolver":
+            if isinstance(self, DiscreteGradient):
                 f0 = self.f(c_[self.U0, self.U0].T, 0)
             else:
                 f0 = self.f(self.U0, 0, self.U0)

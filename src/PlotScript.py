@@ -161,6 +161,27 @@ def logplot(y_data, xlabel=None, xlims=None):
         fig.delaxes(axes[j])
     return fig, axes[:n]
 
+def plot_omega_distribution(train_set, test_set, filename=None):
+    """
+    Plot the distribution of Omega2 parameters for train and test sets.
+    """
+    fig = plt.figure(figsize=(10, 6))
+    ax = fig.add_subplot(111)
+    configure_axis(ax)
+    
+    ax.hist(train_set.flatten(), bins=20, alpha=0.5, label='Train', density=True, color=colors[0])
+    if test_set is not None and test_set.size > 0:
+        ax.hist(test_set.flatten(), bins=20, alpha=0.5, label='Test', density=True, color=colors[1])
+    
+    ax.set_xlabel(r'$\Omega^2$ value')
+    ax.set_ylabel('Density')
+    ax.set_title(r'Distribution of $\Omega^2$ parameters')
+    ax.legend()
+    
+    if filename:
+        save_figure(fig, filename)
+    return fig
+
 def save_figure(fig, filename, fig_data=None):
     """
     Save a figure and its data to files.
@@ -209,6 +230,144 @@ def save_figure(fig, filename, fig_data=None):
                 for i in range(coords_data.shape[1]):
                     particle_filename = f"{dat_filename_base}_coords_particle{i}.dat"
                     np.savetxt(particle_filename, coords_data[:, i, :], fmt='%f')
+
+    # Check for 3D axes and generate Plotly HTML if applicable
+    is_3d = any(getattr(ax, 'name', '') == '3d' for ax in fig.axes)
+    
+    if is_3d and fig_data is not None and 'coords' in fig_data:
+        try:
+            import plotly.graph_objects as go
+            
+            coords = fig_data['coords']
+            t_points = fig_data.get('t_points', np.arange(coords.shape[0]))
+            
+            # Downsample for animation frames (limit to ~100 frames)
+            n_steps = coords.shape[0]
+            n_frames = 100
+            step_size = max(1, n_steps // n_frames)
+            frame_indices = np.arange(0, n_steps, step_size)
+            
+            fig_ply = go.Figure()
+            
+            # 1. Add static background trajectories (faint lines)
+            for i in range(coords.shape[1]):
+                fig_ply.add_trace(go.Scatter3d(
+                    x=coords[:, i, 0], y=coords[:, i, 1], z=coords[:, i, 2],
+                    mode='lines',
+                    line=dict(color='gray', width=1),
+                    opacity=0.3,
+                    showlegend=False,
+                    name=f'Path {i}'
+                ))
+            
+            # 2. Add dynamic particles (markers) at initial position
+            fig_ply.add_trace(go.Scatter3d(
+                x=coords[0, :, 0], y=coords[0, :, 1], z=coords[0, :, 2],
+                mode='markers',
+                marker=dict(size=5, color='teal'),
+                name='Particles'
+            ))
+            
+            particle_trace_idx = len(fig_ply.data) - 1
+            
+            # 3. Create frames
+            frames_fixed = []
+            frames_rot = []
+            
+            for i, k in enumerate(frame_indices):
+                # Rotate camera around Z axis
+                angle = 2 * np.pi * i / len(frame_indices)
+                radius = 1.5
+
+                # Shared data for both frames
+                frame_data = [go.Scatter3d(
+                        x=coords[k, :, 0],
+                        y=coords[k, :, 1],
+                        z=coords[k, :, 2]
+                    )]
+
+                # Fixed camera frame
+                frames_fixed.append(go.Frame(
+                    data=frame_data,
+                    traces=[particle_trace_idx],
+                    name=f'fix_{k}'
+                ))
+
+                # Rotating camera frame
+                frames_rot.append(go.Frame(
+                    data=frame_data,
+                    traces=[particle_trace_idx],
+                    layout=dict(scene=dict(camera=dict(
+                        eye=dict(x=radius*np.cos(angle), y=radius*np.sin(angle), z=0.8)
+                    ))),
+                    name=f'rot_{k}'
+                ))
+            
+            fig_ply.frames = frames_fixed + frames_rot
+            
+            # 4. Create Sliders and Menus
+            def create_slider(prefix, visible):
+                return {
+                    'pad': {'b': 10, 't': 50},
+                    'len': 0.9, 'x': 0.1, 'y': 0,
+                    'steps': [{
+                        'args': [[f'{prefix}_{k}'], {'frame': {'duration': 0, 'redraw': True}, 'mode': 'immediate'}],
+                        'label': f'{t_points[int(k)]:.2f}',
+                        'method': 'animate'
+                    } for k in frame_indices],
+                    'currentvalue': {'prefix': 'Time: ', 'visible': True, 'xanchor': 'right'},
+                    'visible': visible
+                }
+
+            def create_play_pause(prefix, visible):
+                return {
+                    'type': 'buttons', 'showactive': False,
+                    'y': 0, 'x': 0, 'xanchor': 'right', 'yanchor': 'top', 'pad': {'t': 50, 'r': 10},
+                    'buttons': [{
+                        'label': 'Play', 'method': 'animate',
+                        'args': [[f'{prefix}_{k}' for k in frame_indices], 
+                                 {'frame': {'duration': 50, 'redraw': True}, 'fromcurrent': True}]
+                    }, {
+                        'label': 'Pause', 'method': 'animate',
+                        'args': [[None], {'frame': {'duration': 0, 'redraw': False}, 'mode': 'immediate'}]
+                    }],
+                    'visible': visible
+                }
+
+            # Define components
+            slider_fixed = create_slider('fix', True)
+            slider_rot = create_slider('rot', False)
+            
+            menu_fixed = create_play_pause('fix', True)
+            menu_rot = create_play_pause('rot', False)
+            
+            menu_toggle = {
+                'type': 'buttons', 'direction': 'left', 'pad': {'r': 10, 't': 10},
+                'showactive': True, 'x': 0.1, 'xanchor': 'right', 'y': 0.2, 'yanchor': 'top',
+                'buttons': [
+                    {'label': 'Fixed Camera', 'method': 'update',
+                     'args': [{}, {'sliders': [create_slider('fix', True), create_slider('rot', False)],
+                                   'updatemenus': [{'visible': True}, {'visible': False}, {'visible': True}]}]},
+                    {'label': 'Rotating Camera', 'method': 'update',
+                     'args': [{}, {'sliders': [create_slider('fix', False), create_slider('rot', True)],
+                                   'updatemenus': [{'visible': False}, {'visible': True}, {'visible': True}]}]}
+                ]
+            }
+            
+            fig_ply.update_layout(
+                title="3D Phase Portrait Animation",
+                scene=dict(xaxis_title='X', yaxis_title='Y', zaxis_title='Z'),
+                updatemenus=[menu_fixed, menu_rot, menu_toggle],
+                sliders=[slider_fixed, slider_rot]
+            )
+            
+            html_filename = filename.replace('.pdf', '.html')
+            fig_ply.write_html(html_filename)
+            
+        except ImportError:
+            pass
+        except Exception as e:
+            print(f"Could not save interactive plot: {e}")
 
 # %% edit the figure later
 import pickle

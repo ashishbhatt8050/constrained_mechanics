@@ -39,10 +39,10 @@ from ConcreteSolvers import (BaseSolverMixin, DiscreteGradientSolver,
 from ReduceMechSystem import ReduceMechSystem
 from System import MechSystem, HamiltonianMechSystem, LagrangianMechSystem, load_symbolic_expressions
 from SymbolicComputer import IndexedBaseSymbolicComputer, manage_cache
-from PlotScript import plot_omega_distribution
+from PlotScript import plot_omega_distribution, plot_pareto
 
 # Configure LaTeX rendering based on availability
-if shutil.which('latex'):
+if False and shutil.which('latex'):
     rc('text', usetex=True)
     rc('text.latex', preamble=r'\usepackage{amsfonts}')  # Load AMSFonts for Fraktur
 else:
@@ -104,7 +104,7 @@ if __name__ == '__main__':
         plot_omega_distribution(MechSystem.Omega2_space, MechSystem.Omega2_space_test, 
                                 filename=os.path.join(MechSystem.data_folder, "omega2_dist.pdf"))
     
-    # %% Full order solution
+    # %% Cluster set-up and system solution
     kwds = {
         "nosc": MechSystem.nosc,  # Read nosc from the central configuration
         "registered_solver_classes": [
@@ -124,7 +124,7 @@ if __name__ == '__main__':
     
     # Dask Cluster Configuration
     cluster = None
-    if shutil.which('sbatch') and not "PYTEST_CURRENT_TEST" in os.environ:
+    if False and shutil.which('sbatch') and not "PYTEST_CURRENT_TEST" in os.environ:
         try:
             print("SLURM detected. Initializing SLURMCluster...", flush=True)
             
@@ -228,21 +228,19 @@ if __name__ == '__main__':
                   MechSystem.dt_space_dim, 
                   len(MechSystem.Omega2_space_test))
 
-    time_lapsed = [reshape([x.time_lapsed for x in solvers], array_shape_train)]
+    time_lapsed = [reshape([x.time_lapsed[0] if x is not None else np.nan for x in solvers], array_shape_train)]
 
     if not MechSystem.predict:
         # Calculate errors
-        errors_r = reshape([np.amax(abs(y1 - y2)) 
-            for y1, y2 in zip([x.y for x in solvers], 
-            [x.y for x in solvers_r])], 
+        errors_r = reshape([np.amax(abs(s1.y - s2.y)) if s1 is not None and s2 is not None else np.nan
+            for s1, s2 in zip(solvers, solvers_r)], 
             array_shape_train)
-        errors_dr = reshape([np.amax(abs(y1 - y2)) 
-            for y1, y2 in zip([x.y for x in solvers], 
-            [x.y for x in solvers_dr])], 
+        errors_dr = reshape([np.amax(abs(s1.y - s2.y)) if s1 is not None and s2 is not None else np.nan
+            for s1, s2 in zip(solvers, solvers_dr)], 
             array_shape_train)
 
         print('\n--- Max Solution Errors (over all frequencies) ---')
-        error_matrices = [np.amax(errors_r, axis=2), np.amax(errors_dr, axis=2)]
+        error_matrices = [np.nanmax(errors_r, axis=2), np.nanmax(errors_dr, axis=2)]
         model_names_err = ["Reduced Model Error", "Hyper-reduced Model Error"]
 
         for i, error_matrix in enumerate(error_matrices):
@@ -257,21 +255,21 @@ if __name__ == '__main__':
                     row_str += f"{val:<11.2e}"
                 print(row_str)
 
-        time_lapsed.append(reshape([x.time_lapsed for x in solvers_r], array_shape_train))
+        time_lapsed.append(reshape([x.time_lapsed[0] if x is not None else np.nan for x in solvers_r], array_shape_train))
         # time_lapsed[0].shape) / time_lapsed[0] * 100)
-        time_lapsed.append(reshape([x.time_lapsed for x in solvers_dr], array_shape_train))
+        time_lapsed.append(reshape([x.time_lapsed[0] if x is not None else np.nan for x in solvers_dr], array_shape_train))
         # time_lapsed[0].shape) / time_lapsed[0] * 100)
         time_lapsed[1] = time_lapsed[1] / time_lapsed[0] * 100
         time_lapsed[2] = time_lapsed[2] / time_lapsed[0] * 100
 
     else:
         time_lapsed.extend([
-            reshape([x.time_lapsed for x in solvers_r], array_shape_test),
-            reshape([x.time_lapsed for x in solvers_dr], array_shape_test)
+            reshape([x.time_lapsed[0] if x is not None else np.nan for x in solvers_r], array_shape_test),
+            reshape([x.time_lapsed[0] if x is not None else np.nan for x in solvers_dr], array_shape_test)
         ])
         
         # Calculate average full order time over all training frequencies
-        avg_full_time = np.mean(time_lapsed[0], axis=2, keepdims=True)
+        avg_full_time = np.nanmean(time_lapsed[0], axis=2, keepdims=True)
         
         # Normalize reduced and hyper-reduced times
         time_lapsed[1] = time_lapsed[1] / avg_full_time * 100
@@ -284,7 +282,7 @@ if __name__ == '__main__':
         model_names = ["Full Order Model (s)", "Reduced Model (% of Full)", "Hyper-reduced Model (% of Full)"]
 
     # Average over the Omega2 dimension (axis=2)
-    avg_times = [np.mean(tl, axis=2) for tl in time_lapsed]
+    avg_times = [np.nanmean(tl, axis=2) for tl in time_lapsed]
 
     for i, avg_time_matrix in enumerate(avg_times):
         print(f"\n{model_names[i]}:")
@@ -301,9 +299,41 @@ if __name__ == '__main__':
                 row_str += f"{val:<11.2f}"
             print(row_str)
 
-    # tex_table('', time_lapsed)
-    '''
-    Observations:
+    # %% Failure Report
+    def print_failure_report(stage, solver_list, omega2_space):
+        if not solver_list: return
+        
+        print(f"\n--- {stage} Failure Report ---")
+        failures = []
+        idx = 0
+        # The iteration order must match ConcreteSolvers.parallel_solve_mech_system
+        for solver_cls in original_solver_classes:
+            for dt in MechSystem.dt_space:
+                for omega2 in omega2_space:
+                    if idx < len(solver_list):
+                        if solver_list[idx] is None:
+                            # Format omega2 for display (it's a vector)
+                            omega2_str = f"[{omega2[0]:.2f}, ...]" if len(omega2) > 0 else "[]"
+                            failures.append(f"{solver_cls.__name__:<40} | dt={dt:<8.4f} | Omega2={omega2_str}")
+                    idx += 1
+        
+        if failures:
+            print(f"Total Failures: {len(failures)}")
+            print(f"{'Solver':<40} | {'Time Step':<11} | {'Parameter'}")
+            print("-" * 80)
+            for f in failures:
+                print(f)
+        else:
+            print("No failures.")
 
-    TODO:
-    '''
+    print_failure_report("Full Order Model", solvers, MechSystem.Omega2_space)
+    if 'solvers_r' in locals():
+        print_failure_report("Reduced Order Model", solvers_r, MechSystem.Omega2_space_test)
+    if 'solvers_dr' in locals():
+        print_failure_report("Hyper-reduced Model", solvers_dr, MechSystem.Omega2_space_test)
+
+    # %% Pareto plots
+    if not MechSystem.predict and 'errors_r' in locals() and 'errors_dr' in locals():
+        print("\nGenerating Pareto plots...")
+        solver_names = [cls.__name__ for cls in original_solver_classes]
+        plot_pareto(time_lapsed, errors_r, errors_dr, solver_names, MechSystem.dt_space, MechSystem.data_folder)

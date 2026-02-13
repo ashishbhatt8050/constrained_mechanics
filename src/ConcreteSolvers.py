@@ -1,7 +1,10 @@
 import os
 import gc
+import hashlib
+import warnings
 import numpy as np
 from numpy import linalg as LA
+import logging
 from pylab import log, r_, c_, sqrt, roll, figure, linspace
 import cloudpickle as pickle
 from functools import wraps
@@ -23,12 +26,35 @@ def _dask_worker(idx, *arg):
     the top level of a module so that cloudpickle can serialize it by reference.
     """
     print(f"Worker {idx} starting...", flush=True)
+    
+    # Configure logging to capture warnings
+    logger = logging.getLogger(f"worker_{idx}")
+    logger.setLevel(logging.WARNING)
+    if not logger.handlers:
+        fh = logging.FileHandler(f"worker_{idx}.log", mode='w')
+        fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        logger.addHandler(fh)
+
     try:
-        # BaseSolverMixin is in the module's scope, so this is fine.
-        return BaseSolverMixin.solve_mech_system(*arg)
+        with warnings.catch_warnings(record=True) as w_list:
+            warnings.simplefilter("always")
+            warnings.filterwarnings("error", category=RuntimeWarning)
+            # BaseSolverMixin is in the module's scope, so this is fine.
+            result = BaseSolverMixin.solve_mech_system(*arg)
+            
+            for w in w_list:
+                logger.warning(f"{w.category.__name__}: {w.message}")
+            return result
     except Exception as e:
         print(f"Worker {idx} failed with error: {e}", flush=True)
-        raise
+        if 'w_list' in locals() and w_list:
+            for w in w_list:
+                logger.warning(f"{w.category.__name__}: {w.message}")
+        return e
+    finally:
+        for handler in logger.handlers[:]:
+            handler.close()
+            logger.removeHandler(handler)
 
 def compose_solver_solves(func):
     """Decorator to compose solver steps based on w_values."""
@@ -52,16 +78,28 @@ class BaseSolverMixin:
         original_dt = self.dt
         self.dt = w_val * original_dt
         try:
-            y_, _, info_ = super().solve(w_val*self.t_points[k:k+2])
+            if isinstance(self, DiscreteGradient) and self.constraint_type:
+                # if k == 0:
+                #     print(f"DEBUG: Heun predictor branch hit for {self.__class__.__name__}")
+                # Heun's method predictor
+                f_val = self.f(c_[y_[0], y_[0]].T, None)
+                y_euler = y_[0] + self.dt * f_val
+                f_val_next = self.f(c_[y_euler, y_euler].T, None)
+                y_[1] = y_[0] + 0.5 * self.dt * (f_val + f_val_next)
+                info_ = []
+            elif isinstance(self, DiscreteGradient) and not self.constraint_type:
+                y_, _, info_ = super().solve(w_val*self.t_points[k:k+2])
+            else:
+                y_, _, info_ = super().solve(w_val*self.t_points[k:k+2])
         finally:
             self.dt = original_dt
 
         if self.store: self.info.append(np.array(info_[0::1]))
         
-        if k > 0 and hasattr(self, 'Lambda') and isinstance(self, ConformalStormerVerlet):
+        if k > 0 and hasattr(self, 'Lambda'): # and isinstance(self, ConformalStormerVerlet):
             Lambda = self.Lambda[k].copy()
-            if k == 1:
-                print(f'Setting initial guess for Lagrange multipliers')
+            # if k == 1:
+            #     print(f'Setting initial guess for Lagrange multipliers')
         else:
             Lambda = np.zeros_like(self.g_(np.zeros(2*self.nosc))).squeeze()
 
@@ -212,7 +250,11 @@ class BaseSolverMixin:
             
             # Store results in correct order
             for i, res in enumerate(results):
-                MSsolvers[i] = res
+                if isinstance(res, Exception):
+                    print(f"Task {i} failed with error: {res}", flush=True)
+                    MSsolvers[i] = None
+                else:
+                    MSsolvers[i] = res
                 if (i + 1) % 10 == 0:
                     print(f"Retrieved {i+1}/{len(args)} results", flush=True)
             
@@ -398,18 +440,24 @@ class BaseSolverMixin:
         # Compute en_error using a list comprehension and reshape it into a 2D array: rows = dt values, columns = Omega2 values for each solver class in kwds['registered_solver_classes']
         # For each solver_class, filter solvers and compute en_error separately
         for solver_class in kwds['registered_solver_classes']:
-            filtered_solvers = [solver for solver in solvers if solver.solver_class == solver_class]
-            en_error = [
-                [solver.en_error for solver in filtered_solvers
-                 if np.isclose(solver.dt, dt) and
-                    np.isclose(solver.Omega2, omega2).all()]
-                for dt in MechSystem.dt_space
-                for omega2 in kwds['Omega2_space']
-            ]
-            # Reshape to (dt_space_dim, Omega2_space_dim)
-            en_error = np.array(en_error).reshape(MechSystem.dt_space_dim, kwds['Omega2_space_dim'])
+            filtered_solvers = [s for s in solvers if s and s.solver_class == solver_class]
+            
+            en_error_flat = []
+            for dt in MechSystem.dt_space:
+                for omega2 in kwds['Omega2_space']:
+                    found_solver = next((s for s in filtered_solvers if np.isclose(s.dt, dt) and np.allclose(s.Omega2, omega2)), None)
+                    
+                    if found_solver is not None and np.any(np.isnan(found_solver.y)):
+                        print(f"Warning: Solver {solver_class.__name__} (dt={dt:.4e}) contains NaNs.", flush=True)
 
-            if en_error.shape[0] > 1 and en_error[0, 0] is not None and MechSystem.dt_space_dim > 1 and not MechSystem.predict:
+                    if found_solver and hasattr(found_solver, 'en_error') and found_solver.en_error is not None:
+                        en_error_flat.append(found_solver.en_error)
+                    else:
+                        en_error_flat.append(np.nan)
+            
+            en_error = np.array(en_error_flat).reshape(MechSystem.dt_space_dim, kwds['Omega2_space_dim'])
+
+            if en_error.shape[0] > 1 and not np.all(np.isnan(en_error)) and MechSystem.dt_space_dim > 1 and not MechSystem.predict:
                 print(f"\nConvergence rates for {solver_class.__name__}:")
                 header = f"{'dt':>12}"
                 for col in range(en_error.shape[1]):
@@ -420,7 +468,8 @@ class BaseSolverMixin:
                 for i, dt_val in enumerate(MechSystem.dt_space):
                     print(f"{dt_val:12.6f}" + "".join([f" | {val:12.6f}" for val in all_r_values[i]]))
 
-            filtered_solvers[-1].plot()
+            if filtered_solvers:
+                filtered_solvers[-1].plot()
 
     def plot(self):
         """
@@ -435,7 +484,8 @@ class BaseSolverMixin:
         fig = figure(figsize=(12, 12), constrained_layout=True)  # Make figure taller
         fig.set_constrained_layout_pads(w_pad=0.1, h_pad=0.1, hspace=0.1, wspace=0.1)
         # fig.tight_layout(pad=0)
-        fig.suptitle(rf'integrator = {self.solver_class.__name__}, $\Delta t = {self.dt}$')
+        omega2_hash = hashlib.md5(self.Omega2.tobytes()).hexdigest()[:8]
+        fig.suptitle(rf'integrator = {self.solver_class.__name__}, $\Delta t = {self.dt}$, $\Omega_2$ hash = {omega2_hash}')
 
         gs = fig.add_gridspec(5, 2)
         ax0, ax1, ax2, ax3, ax4 = [fig.add_subplot(gs[i, 0]) for i in [0, 1, 2, 3, 4]]
@@ -556,9 +606,8 @@ class DiscreteGradientFixedPointMixin:
         """
 
         m = 0
-        residual = self.tol * 10
-
-        while residual > self.tol and m < self.M:
+        
+        while m < self.M:
 
             # Update residual and tangent
             resi, tang = self.residual(x[0], x[1], Lambda)
@@ -570,10 +619,14 @@ class DiscreteGradientFixedPointMixin:
             # Update iteration counter and residual
             m += 1
             residual = LA.norm(r_[resi, Delta_z], np.inf)
+            
+            if np.isnan(residual):
+                raise RuntimeError("Nonlinear solver diverged: Residual is NaN")
 
-        # Check convergence
-        if m >= self.M:
-            raise RuntimeError("Nonlinear solver did not converge")
+            if residual < self.tol:
+                return
+
+        raise RuntimeError("Nonlinear solver did not converge")
 
     def _g_prime_with_JJ(self, y):
         return self.g_prime__(y) @ self.JJ.T
@@ -621,7 +674,11 @@ class ConformalStormerVerletFixedPointMixin:
             
             # Check position constraints
             g_pos = self.g(x[1])[:i0]
-            if LA.norm(g_pos) < self.tol:
+            norm_g_pos = LA.norm(g_pos)
+            
+            if np.isnan(norm_g_pos):
+                raise RuntimeError("Nonlinear solver (position) diverged: Residual is NaN")
+            if norm_g_pos < self.tol:
                 break
                 
             # Jacobian R11 = G(q_{n+1}) @ (-0.5 * dt^2 * G(q0)^T)
@@ -649,7 +706,11 @@ class ConformalStormerVerletFixedPointMixin:
             
             # Check velocity constraints
             g_vel = self.g(x[1])[i0:]
-            if LA.norm(g_vel) < self.tol:
+            norm_g_vel = LA.norm(g_vel)
+            
+            if np.isnan(norm_g_vel):
+                raise RuntimeError("Nonlinear solver (velocity) diverged: Residual is NaN")
+            if norm_g_vel < self.tol:
                 break
                 
             # Jacobian R22 = -0.5 * dt * G(p_{n+1}) @ G(q_{n+1})^T

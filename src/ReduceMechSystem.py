@@ -187,7 +187,7 @@ class ReduceMechSystem(MechSystem):
                 ])
 
             # Compute POD basis and plot singular values
-            Uj, sv, _ = POD(F, np.eye(F.shape[0]), cls.tol)
+            Uj, sv, _ = POD(F, np.eye(F.shape[0]), cls.pod_tol)
             del F
 
             # Compute DEIM points and interpolation matrix
@@ -386,7 +386,7 @@ class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
 
         F3 = np.hstack(results)
 
-        Uj, sv, _ = POD(F3, np.eye(F3.shape[0]), cls.tol)
+        Uj, sv, _ = POD(F3, np.eye(F3.shape[0]), cls.pod_tol)
         fig, ax = logplot(sv, xlabel=f'index of singular values of ham_zz', xlims=(1, len(sv)))
         filename = os.path.join(MechSystem.data_folder, "sv_mdeim_H.pdf")
         save_figure(fig, filename, fig_data=None)
@@ -436,6 +436,9 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
         weights = np.eye(cls.nosc) * weight_ratio
 
         RB, sv, nosc_r = PSD(F2, y_list, cls)
+        # POD(np.hstack([F2[:cls.nosc, :], y_list[:cls.nosc, :]]), np.eye(F2.shape[0]//2), cls.pod_tol)
+        # RB, sv, _nosc_r = POD(np.hstack([F2, y_list]), np.eye(F2.shape[0]), cls.pod_tol)
+        # nosc_r = _nosc_r//2
 
         del y_list
         gc.collect()
@@ -513,7 +516,7 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
 
         F3 = np.hstack(results)
 
-        Uj, sv, _ = POD(F3, np.eye(F3.shape[0]), cls.tol)
+        Uj, sv, _ = POD(F3, np.eye(F3.shape[0]), cls.pod_tol)
         fig, ax = logplot(sv, xlabel=f'index of singular values of lag_dg_z', xlims=(1, len(sv)))
         filename = os.path.join(MechSystem.data_folder, "sv_mdeim_DG.pdf")
         save_figure(fig, filename, fig_data=None)

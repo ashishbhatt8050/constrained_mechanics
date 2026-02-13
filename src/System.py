@@ -90,8 +90,9 @@ class SysConfig:
     
     # Solver and reduction settings
     tol, M, var, store = 1.0E-12, 500, True, False
+    pod_tol = 1e-6
     
-    predict = True  # False = reproduce results of the full model
+    predict = False  # False = reproduce results of the full model
     train_ratio = 0.7
     reducer = 'psd'
     hyperreducer = 'MDEIM'
@@ -99,14 +100,14 @@ class SysConfig:
     constraints_reduce = True
     
     # System parameters
-    nosc = 54 * 10  # Number of oscillators
+    nosc = 54 * 1  # Number of oscillators
     assert nosc % 6 == 0, 'nosc must be divisible by 6'
 
     if predict: # prediction parameters
         # Time-stepping parameters
         dt_space_dim = 1
         dt_space = np.array([0.01])
-        T_final = dt_space[-1] * 1e3
+        T_final = dt_space[-1] * 1e2
 
         # Parameter space for Omega^2
         _Omega2_space_dim = 20
@@ -124,9 +125,9 @@ class SysConfig:
     _Omega2_space = np.sort(10 * (1 - rng.random((_Omega2_space_dim, num_freqs))), axis=1)
 
     # Freeze higher frequencies across samples to match the first sample
-    freeze_idx = _Omega2_space_dim - 1
-    if freeze_idx < num_freqs:
-        _Omega2_space[:, freeze_idx:] = _Omega2_space[0, freeze_idx:]
+    # freeze_idx = _Omega2_space_dim - 1
+    # if freeze_idx < num_freqs:
+    #     _Omega2_space[:, freeze_idx:] = _Omega2_space[0, freeze_idx:]
 
     # Train-test split
     if predict:

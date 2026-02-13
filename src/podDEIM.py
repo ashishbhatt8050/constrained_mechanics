@@ -82,14 +82,13 @@ def POD(S, Xh, eps=None):
     # Truncate the POD modes based on the tolerance
     if eps is not None:
         # Compute the cumulative sum of the singular values
-        cum_sum = np.cumsum(Sigma2) / np.sum(Sigma2)
+        energy = np.cumsum(Sigma2) / np.sum(Sigma2)
 
-        # Find the smallest index (>=2) where the cumulative sum exceeds 1 - eps
-        N = max(np.argmin(np.abs(cum_sum - (1 - eps))), 2)
+        # Find the smallest index (>=2) where energy exceeds 1 - eps
+        N = np.searchsorted(energy, 1 - eps, side='left')
 
         # Ensure N is even
-        if N % 2 == 1:
-            N += 1
+        if N % 2 == 1: N += 1
     else:
         N = Sigma2.size
         
@@ -101,7 +100,7 @@ def POD(S, Xh, eps=None):
 
 def PSD(F2, y_list, MechSystem, weights=None):
     
-    nosc, tol = MechSystem.nosc, MechSystem.tol
+    nosc, tol = MechSystem.nosc, MechSystem.pod_tol
     if weights is None:
         weights = np.eye(nosc)
         

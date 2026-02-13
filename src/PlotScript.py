@@ -1,17 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Mon May 11 15:30:30 2020
+Plotting utilities for constrained mechanics simulations.
 
+This module provides plotting functions optimized for scientific visualization.
+All color palettes are chosen for colorblind accessibility.
+
+Color Accessibility:
+- Discrete data: Uses the Okabe-Ito palette (http://jfly.uni-koeln.de/color/)
+  This palette is specifically designed to be distinguishable by individuals with
+  protanopia (red-blindness), deuteranopia (green-blindness), and tritanopia
+  (blue-yellow-blindness).
+- Continuous data: Uses viridis colormap, which is perceptually uniform and
+  accessible to all types of colorblindness.
+
+Created on Mon May 11 15:30:30 2020
 @author: ashishbhatt
 
-Copied from https://github.com/jbmouret/matplotlib_for_papers
+Adapted from https://github.com/jbmouret/matplotlib_for_papers
 """
 
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
+from matplotlib.lines import Line2D
 from matplotlib.ticker import MaxNLocator, LogLocator
-import brewer2mpl
 from cycler import cycler
 import os
 import pickle
@@ -20,9 +32,23 @@ from time import time
 import math
 import numpy as np
 
-# Set up plot parameters
-bmap = brewer2mpl.get_map('Set2', 'qualitative', 7)
-colors = bmap.mpl_colors
+# Colorblind-safe palettes (Okabe-Ito palette for universal accessibility)
+# Reference: https://jfly.uni-koeln.de/color/
+OKABE_ITO_PALETTE = [
+    '#E69F00',  # Orange
+    '#56B4E9',  # Sky Blue
+    '#009E73',  # Green
+    '#F0E442',  # Yellow
+    '#0072B2',  # Blue
+    '#D55E00',  # Red-Orange
+    '#CC79A7',  # Pink
+]
+
+# Viridis for continuous data (also colorblind-safe)
+VIRIDIS_PALETTE = plt.cm.viridis
+
+# Set up plot parameters with colorblind-safe colors
+colors = OKABE_ITO_PALETTE
 
 params = {
     'axes.labelsize': 20,
@@ -48,6 +74,26 @@ def timing(f):
         #   (f.__name__, args, kw, te-ts))
         return te-ts
     return wrap
+
+def get_colorblind_palette(palette_name='okabe-ito'):
+    """
+    Return a colorblind-safe color palette.
+    
+    Parameters:
+    palette_name (str): Name of the palette. Options: 'okabe-ito' (default, universal),
+                       'protanopia', 'deuteranopia', 'tritanopia'. Returns the Okabe-Ito
+                       palette by default as it's optimized for all types of colorblindness.
+    
+    Returns:
+    list: List of hex color codes in the selected palette.
+    """
+    palettes = {
+        'okabe-ito': OKABE_ITO_PALETTE,  # Universal (works for all colorblindness types)
+        'protanopia': OKABE_ITO_PALETTE,  # Red-blind (Okabe-Ito also optimized for this)
+        'deuteranopia': OKABE_ITO_PALETTE,  # Green-blind (Okabe-Ito also optimized for this)
+        'tritanopia': OKABE_ITO_PALETTE,  # Blue-yellow-blind (Okabe-Ito also optimized for this)
+    }
+    return palettes.get(palette_name.lower(), OKABE_ITO_PALETTE)
 
 def configure_axis(ax):
     """
@@ -254,17 +300,18 @@ def save_figure(fig, filename, fig_data=None):
                 fig_ply.add_trace(go.Scatter3d(
                     x=coords[:, i, 0], y=coords[:, i, 1], z=coords[:, i, 2],
                     mode='lines',
-                    line=dict(color='gray', width=1),
+                    line=dict(color='rgba(100, 100, 100, 0.3)', width=1),
                     opacity=0.3,
                     showlegend=False,
                     name=f'Path {i}'
                 ))
             
             # 2. Add dynamic particles (markers) at initial position
+            # Use colorblind-safe color (from Okabe-Ito palette)
             fig_ply.add_trace(go.Scatter3d(
                 x=coords[0, :, 0], y=coords[0, :, 1], z=coords[0, :, 2],
                 mode='markers',
-                marker=dict(size=5, color='teal'),
+                marker=dict(size=5, color=OKABE_ITO_PALETTE[1]),  # Sky Blue
                 name='Particles'
             ))
             
@@ -422,7 +469,7 @@ def tex_table(solver_name, array2print):
 
 def plot_3dsurface(fig, ax, xx, yy, zz):
     """
-    Plot a 3D surface.
+    Plot a 3D surface using a colorblind-safe colormap (viridis).
 
     Parameters:
     fig (matplotlib figure): The figure to plot on.
@@ -431,14 +478,123 @@ def plot_3dsurface(fig, ax, xx, yy, zz):
     yy (numpy array): The y-coordinates of the surface.
     zz (numpy array): The z-coordinates of the surface.
     """
+    # Use viridis colormap (colorblind-safe) instead of coolwarm
     surf = ax.plot_surface(xx, yy, zz,
-                           cmap = cm.coolwarm, linewidth=0, antialiased=False)
+                           cmap='viridis', linewidth=0, antialiased=False)
     fig.colorbar(surf, shrink=0.5, aspect=5)
-    _ = ax.contour(xx, yy, zz, zdir='z', offset=-1, cmap=cm.coolwarm)
+    _ = ax.contour(xx, yy, zz, zdir='z', offset=-1, cmap='viridis')
     ax.view_init(30, -135)
     ax.set_xticks([0,1])
     ax.set_yticks([0,1])
     ax.set_zlim3d(-1, abs(zz).max())
+
+def plot_pareto(time_lapsed, errors_r, errors_dr, solver_names, dt_space, data_folder):
+    """
+    Generate Pareto plots (Error vs Time) for reduced and hyper-reduced models.
+    
+    Parameters:
+    time_lapsed (list): List containing [full_time, reduced_percent, hyper_percent] arrays.
+    errors_r (numpy array): Reduced model errors.
+    errors_dr (numpy array): Hyper-reduced model errors.
+    solver_names (list): List of solver names.
+    dt_space (numpy array): Array of time step sizes.
+    data_folder (str): Path to save the plot.
+    """
+    
+    # Reconstruct raw times (seconds)
+    # time_lapsed[0] is raw full time
+    # time_lapsed[1] is reduced % of full
+    # time_lapsed[2] is hyper % of full
+    
+    raw_time_full = time_lapsed[0]
+    raw_time_red = time_lapsed[1] * raw_time_full / 100.0
+    raw_time_hyper = time_lapsed[2] * raw_time_full / 100.0
+    
+    # Average over parameters (axis 2)
+    avg_time_full = np.nanmean(raw_time_full, axis=2)
+    avg_time_red = np.nanmean(raw_time_red, axis=2)
+    avg_time_hyper = np.nanmean(raw_time_hyper, axis=2)
+    
+    # Std dev of time
+    std_time_red = np.nanstd(raw_time_red, axis=2)
+    std_time_hyper = np.nanstd(raw_time_hyper, axis=2)
+    
+    # Mean and Std errors over parameters (axis 2)
+    mean_err_red = np.nanmean(errors_r, axis=2)
+    std_err_red = np.nanstd(errors_r, axis=2)
+    
+    mean_err_hyper = np.nanmean(errors_dr, axis=2)
+    std_err_hyper = np.nanstd(errors_dr, axis=2)
+    
+    n_solvers = len(solver_names)
+    fig, axes = plt.subplots(1, n_solvers, figsize=(6 * n_solvers, 6), constrained_layout=False)
+    if n_solvers == 1: axes = [axes]
+
+    # Markers for different time steps
+    markers = ['o', 's', '^', 'D', 'v', '<', '>', 'p', 'h', '*']
+    
+    # For common legends
+    line_handles = []
+
+    for i, solver_name in enumerate(solver_names):
+        ax = axes[i]
+        configure_axis(ax)
+        
+        ax.set_xscale('log')
+        ax.set_yscale('log')
+
+        # Plot connecting lines with error bars (no markers)
+        h_red, _, _ = ax.errorbar(avg_time_red[i], mean_err_red[i], xerr=std_time_red[i], yerr=std_err_red[i], fmt=':', color=colors[1], capsize=3)
+        h_hyper, _, _ = ax.errorbar(avg_time_hyper[i], mean_err_hyper[i], xerr=std_time_hyper[i], yerr=std_err_hyper[i], fmt=':', color=colors[5], capsize=3)
+        
+        # Plot individual points with specific markers
+        for j, dt in enumerate(dt_space):
+            m = markers[j % len(markers)]
+            # Reduced
+            ax.plot(avg_time_red[i, j], mean_err_red[i, j], marker=m, color=colors[1], linestyle='None')
+            # Hyper-reduced
+            ax.plot(avg_time_hyper[i, j], mean_err_hyper[i, j], marker=m, color=colors[5], linestyle='None')
+            
+            # Annotate with speedup factors
+            speedup_red = avg_time_full[i, j] / avg_time_red[i, j]
+            ax.annotate(f'{speedup_red:.1f}x', (avg_time_red[i, j], mean_err_red[i, j]), textcoords="offset points", xytext=(5, 5), ha='left', fontsize=18)
+            
+            speedup_hyper = avg_time_full[i, j] / avg_time_hyper[i, j]
+            ax.annotate(f'{speedup_hyper:.1f}x', (avg_time_hyper[i, j], mean_err_hyper[i, j]), textcoords="offset points", xytext=(5, 5), ha='left', fontsize=18)
+        
+        # Plot Full model reference times (vertical lines)
+        h_full = None
+        for j, dt in enumerate(dt_space):
+            line = ax.axvline(x=avg_time_full[i, j], color=colors[2], linestyle='--', alpha=0.5)
+            if j == 0:
+                h_full = line
+
+        ax.set_xlabel('Average Wall Time (s)')
+        if i == 0:
+            ax.set_ylabel('Mean Global Error')
+        ax.set_title(f'{solver_name}')
+        ax.grid(True, which="both", ls="-", alpha=0.3)
+        
+        # Collect handles for common legend on first pass
+        if i == 0:
+            line_handles.extend([h_red, h_hyper, h_full])
+
+    # Create common legends below the subplots
+    line_labels = ['Reduced', 'Hyper-reduced', 'Full Model']
+    marker_handles = [Line2D([0], [0], color='k', marker=markers[j % len(markers)], linestyle='None', label=f'dt={dt:.0e}') for j, dt in enumerate(dt_space)]
+    
+    # Adjust subplots to make room for legends at the bottom
+    fig.tight_layout(rect=[0, 0.22, 1, 1])
+    
+    leg1 = fig.legend(handles=line_handles, labels=line_labels, loc='lower center', bbox_to_anchor=(0.5, 0.12), ncol=3, title='Model Type', frameon=True)
+    fig.add_artist(leg1) # Add the first legend manually to avoid it being overwritten
+    
+    fig.legend(handles=marker_handles, loc='lower center', bbox_to_anchor=(0.5, 0.02), ncol=len(dt_space), title='Time Step Size', frameon=True)
+        
+    filename = os.path.join(data_folder, f"pareto_combined.pdf")
+    fig.savefig(filename, bbox_inches='tight')
+    print(f"Saved Pareto plot to {filename}")
+    plt.close(fig)
 
 # %% Testing
 def test_PlotScript():

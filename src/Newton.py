@@ -1,4 +1,5 @@
 from numpy import linalg as LA
+import numpy as np
 
 def Newton(f, x, dfdx, tol, M, store):
     """
@@ -24,12 +25,23 @@ def Newton(f, x, dfdx, tol, M, store):
     m = 0
     if store: info = []
     
-    while LA.norm(f_value) > tol and m < M:
+    while m < M:
         
         # Check for singular derivative
         if LA.norm(dfdx_value) < 1E-14:
             raise ValueError("Newton: f'(%g)=%g" % (x, LA.norm(dfdx_value)))
         
+        residual = LA.norm(f_value)
+        
+        if np.isnan(residual):
+            raise RuntimeError("Newton: nonlinear solver diverged: Residual is NaN")
+            
+        if residual < tol:
+            if store:
+                return x, m, info
+            else:
+                return x, m, f_value
+
         try:
             x = x - LA.solve(dfdx_value, f_value)
         except LA.LinAlgError:
@@ -42,14 +54,8 @@ def Newton(f, x, dfdx, tol, M, store):
         if store:
             info.append(x)
         
-    # Check convergence
-    if m >= M:
-        raise RuntimeError("Newton: nonlinear solver did not converge")
     
-    if store:
-        return x, m, info
-    else:
-        return x, m, f_value
+    raise RuntimeError("Newton: nonlinear solver did not converge")
     
 def fixed_point(g, x, dgdx, tol, M, Lambda):
     """
@@ -79,27 +85,33 @@ def fixed_point(g, x, dgdx, tol, M, Lambda):
         raise TypeError("dgdx must be a tuple or list")
 
     # Fixed point iteration
-    while LA.norm(g(x[1])) > tol and m < M:
+    while m < M:
+        g_val = g(x[1])
+        residual = LA.norm(g_val)
+        
+        if np.isnan(residual):
+            raise RuntimeError("Fixed point: nonlinear solver diverged: Residual is NaN")
+            
+        if residual < tol:
+            return
+
         try:
             # Update R and Delta_Lambda
             R = dgdx_0(x[1]) @ dgdx_1(x).T
-            Delta_Lambda = LA.solve(R, g(x[1]))
+            Delta_Lambda = LA.solve(R, g_val)
 
             x[1] -= dgdx_1(x).T @ Delta_Lambda
         except (TypeError, AttributeError):
             raise NotImplementedError("fixed point iteration not implemented for scalar g")
             # Handle the case when g is a scalar
             R = dgdx_0(x[1]) * dgdx_1(x)
-            Delta_Lambda = g(x[1]) / R
+            Delta_Lambda = g_val / R
             x[1] -= dgdx_1(x) * Delta_Lambda
             
-        # Update m and x[0]
+        # Update m
         m += 1
-        # x[0] = x[1]
         
-    # Check convergence
-    if m >= M:
-        raise RuntimeError("Nonlinear solver did not converge")
+    raise RuntimeError("Nonlinear solver did not converge")
 
 #%% Testing
 if __name__ == "__main__":

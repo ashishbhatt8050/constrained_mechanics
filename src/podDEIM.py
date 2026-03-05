@@ -27,12 +27,25 @@ from scipy.linalg import qr, sqrtm
 # %% POD
 
 
-def rb_svd(y):
+def rb_svd(y, eps=None):
     'Function for SVD decomposition of the input matrix y'
     u, s, vh = np.linalg.svd(y, full_matrices=False)
     assert np.allclose(y, np.dot(u * s, vh)), "SVD was unsuccessful"
     smat = np.diag(s)
     assert np.allclose(y, np.dot(u, np.dot(smat, vh))), "SVD was unsuccessful"
+
+    # Truncate the POD modes based on the tolerance
+    if eps is not None:
+        # Compute the cumulative sum of the singular values
+        energy = np.cumsum(s**2) / np.sum(s**2)
+
+        # Find the smallest index (>=2) where energy exceeds 1 - eps
+        N = np.searchsorted(energy, 1 - eps, side='left') + 1
+
+        # Ensure N is even
+        if N % 2 == 1: N += 1
+
+        u, s, vh = u[:, :N], s[:N], vh[:N, :]
 
     return u, s, vh
 
@@ -84,8 +97,9 @@ def POD(S, Xh, eps=None):
         # Compute the cumulative sum of the singular values
         energy = np.cumsum(Sigma2) / np.sum(Sigma2)
 
-        # Find the smallest index (>=2) where energy exceeds 1 - eps
-        N = np.searchsorted(energy, 1 - eps, side='left')
+        # Find the number of modes N required to capture (1 - eps) of the total energy.
+        # We add 1 because searchsorted finds the insertion point.
+        N = np.searchsorted(energy, 1 - eps, side='left') + 1
 
         # Ensure N is even
         if N % 2 == 1: N += 1

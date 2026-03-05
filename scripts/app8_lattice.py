@@ -30,8 +30,7 @@ from tqdm.auto import tqdm
 from matplotlib import rc
 
 # Dask imports
-from dask_jobqueue import SLURMCluster
-from dask.distributed import Client, wait
+from dask.distributed import Client, wait, LocalCluster
 
 # Local application imports
 from ConcreteSolvers import (BaseSolverMixin, DiscreteGradientSolver, 
@@ -123,60 +122,56 @@ if __name__ == '__main__':
         })
     
     # Dask Cluster Configuration
-    cluster = None
-    if False and shutil.which('sbatch') and not "PYTEST_CURRENT_TEST" in os.environ:
-        try:
-            print("SLURM detected. Initializing SLURMCluster...", flush=True)
-            
-            # Define environment variables for workers
-            project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-            src_path = os.path.join(project_root, "src")
-            
-            # Shell commands to run in the job script before the worker starts.
-            job_prologue = [
-                'ulimit -s unlimited', # Prevent stack overflow with large symbolic expressions.
-                'OMP_NUM_THREADS=1',
-                'MKL_NUM_THREADS=1',
-                'OPENBLAS_NUM_THREADS=1',
-                'NUMEXPR_NUM_THREADS=1',
-            ]
-
-            cluster = SLURMCluster(
-                queue='workq',
-                account='cpu_users',
-                cores=32,
-                # processes=8, # Unset to let dask-jobqueue use its default (often 1 process per core)
-                memory='99GB',
-                walltime='1-00:00:00',
-                job_extra_directives=['--exclusive', '--output=dask_worker_%j.log', '--qos=cpu_users'],
-                job_script_prologue=job_prologue,
-            )
-        except Exception as e:
-            print(f"Failed to initialize SLURMCluster: {e}", flush=True)
+    print("Initializing LocalCluster...", flush=True)
     
-    # Determine number of nodes needed for the full simulation
-    num_full_tasks = len(kwds['registered_solver_classes']) * MechSystem.dt_space_dim * kwds['Omega2_space_dim']
-
-    if cluster is not None:
-        num_nodes = min(6, (num_full_tasks + 31) // 32) if num_full_tasks > 0 else 0
-        if num_nodes > 0:
-            print(f"Requesting {num_nodes} SLURM nodes for Dask workers...")
-            cluster.scale(jobs=num_nodes)
-    else:
-        print("Initializing LocalCluster...", flush=True)
-        from dask.distributed import LocalCluster
-        cluster = LocalCluster()
-        num_nodes = 1  # Assume local resources are available
+    n_workers = None
+    threads_per_worker = 1
+    
+    if 'SLURM_CPUS_PER_TASK' in os.environ:
+        allocated_cpus = int(os.environ['SLURM_CPUS_PER_TASK'])
+        n_workers = allocated_cpus # Start with 1 worker per core
+        print(f"LocalCluster: Detected SLURM allocation of {allocated_cpus} CPUs.", flush=True)
+        
+        # Adjust workers based on memory to prevent OOM (aim for ~3GB/worker)
+        min_mem_per_worker_mb = 3000
+        total_mem_mb = None
+        if 'SLURM_MEM_PER_NODE' in os.environ:
+            total_mem_mb = int(os.environ['SLURM_MEM_PER_NODE'])
+        elif 'SLURM_MEM_PER_CPU' in os.environ:
+            total_mem_mb = int(os.environ['SLURM_MEM_PER_CPU']) * allocated_cpus
+        
+        if total_mem_mb:
+            max_workers_mem = total_mem_mb // min_mem_per_worker_mb
+            if max_workers_mem < n_workers:
+                n_workers = max(1, max_workers_mem)
+                print(f"Memory constrained ({total_mem_mb} MB). Reducing to {n_workers} workers.", flush=True)
+        
+        threads_per_worker = max(1, allocated_cpus // n_workers)
+        
+    cluster = LocalCluster(n_workers=n_workers, threads_per_worker=threads_per_worker)
     
     print(f"Dask Dashboard: {cluster.dashboard_link}", flush=True)
+    
+    if cluster.dashboard_link:
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(cluster.dashboard_link)
+            port = parsed.port
+            host = parsed.hostname
+            print(f"\nTo access the dashboard from your local machine, run:")
+            print(f"ssh -N -L {port}:{host}:{port} <your_username>@<cluster_login_node>")
+            print(f"(If local port {port} is busy, try: ssh -N -L 8080:{host}:{port} ... and open http://localhost:8080/status)")
+            print(f"Then open http://localhost:{port}/status in your browser.\n", flush=True)
+        except Exception:
+            pass
 
-    client = None
+    client = Client(cluster)
+    print("Waiting for workers to start...", flush=True)
+    client.wait_for_workers(1)
+    n_workers_actual = len(client.scheduler_info()['workers'])
+    print(f"Dask cluster started with {n_workers_actual} workers.", flush=True)
+
     try:
-        # Use a client if we have nodes, otherwise run sequentially
-        if num_nodes > 0:
-            client = Client(cluster)
-            print("Waiting for workers to start...", flush=True)
-            client.wait_for_workers(1)
 
         # --- Full order solution ---
         solvers = []
@@ -212,6 +207,7 @@ if __name__ == '__main__':
 
         # --- Hyper-reduced model ---
         print('Computing hyper-reduction bases...')
+        solvers_dr = []
         solvers_dr = BaseSolverMixin.setup_and_solve_hyperreduced_system(kwds, solvers, client=client)
 
     finally:

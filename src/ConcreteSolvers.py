@@ -4,7 +4,6 @@ import hashlib
 import warnings
 import numpy as np
 from numpy import linalg as LA
-import logging
 from pylab import log, r_, c_, sqrt, roll, figure, linspace
 import cloudpickle as pickle
 from functools import wraps
@@ -27,14 +26,6 @@ def _dask_worker(idx, *arg):
     """
     print(f"Worker {idx} starting...", flush=True)
     
-    # Configure logging to capture warnings
-    logger = logging.getLogger(f"worker_{idx}")
-    logger.setLevel(logging.WARNING)
-    if not logger.handlers:
-        fh = logging.FileHandler(f"worker_{idx}.log", mode='w')
-        fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-        logger.addHandler(fh)
-
     try:
         with warnings.catch_warnings(record=True) as w_list:
             warnings.simplefilter("always")
@@ -42,19 +33,10 @@ def _dask_worker(idx, *arg):
             # BaseSolverMixin is in the module's scope, so this is fine.
             result = BaseSolverMixin.solve_mech_system(*arg)
             
-            for w in w_list:
-                logger.warning(f"{w.category.__name__}: {w.message}")
             return result
     except Exception as e:
         print(f"Worker {idx} failed with error: {e}", flush=True)
-        if 'w_list' in locals() and w_list:
-            for w in w_list:
-                logger.warning(f"{w.category.__name__}: {w.message}")
         return e
-    finally:
-        for handler in logger.handlers[:]:
-            handler.close()
-            logger.removeHandler(handler)
 
 def compose_solver_solves(func):
     """Decorator to compose solver steps based on w_values."""
@@ -79,8 +61,6 @@ class BaseSolverMixin:
         self.dt = w_val * original_dt
         try:
             if isinstance(self, DiscreteGradient) and self.constraint_type:
-                # if k == 0:
-                #     print(f"DEBUG: Heun predictor branch hit for {self.__class__.__name__}")
                 # Heun's method predictor
                 f_val = self.f(c_[y_[0], y_[0]].T, None)
                 y_euler = y_[0] + self.dt * f_val
@@ -228,6 +208,13 @@ class BaseSolverMixin:
         # The kwds dict can be large, especially after reduction.
         # Scatter it to workers once to avoid sending it with every task.
         if client:
+            # Ensure at least one worker is available before scattering large data
+            # This prevents deadlock when using adaptive scaling with min_workers=0
+            if not client.scheduler_info()['workers']:
+                print("Cluster has 0 workers. Triggering scaling...", flush=True)
+                dummy = client.submit(lambda x: x, 0)
+                client.wait_for_workers(1)
+
             kwds_future = client.scatter(kwds, broadcast=True)
 
         for x in kwds['registered_solver_classes']:
@@ -313,14 +300,10 @@ class BaseSolverMixin:
             ham_classes = [REDUCED_SOLVER_MAPPING[c] for c in kwds['registered_solver_classes'] if issubclass(c, (ConformalStormerVerlet, ConformalImplicitMidpoint))]
             dg_classes = [REDUCED_SOLVER_MAPPING[c] for c in kwds['registered_solver_classes'] if issubclass(c, DiscreteGradient)]
             
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                futures = []
-                if ham_solvers:
-                    futures.append(executor.submit(HamiltonianReducer.setup_reduced_model, ham_solvers, ham_classes))
-                if dg_solvers:
-                    futures.append(executor.submit(DiscreteGradientReducer.setup_reduced_model, dg_solvers, dg_classes))
-                for future in concurrent.futures.as_completed(futures):
-                    future.result()
+            if ham_solvers:
+                HamiltonianReducer.setup_reduced_model(ham_solvers, ham_classes)
+            if dg_solvers:
+                DiscreteGradientReducer.setup_reduced_model(dg_solvers, dg_classes)
 
             # Update registered classes to reduced versions for next steps
             kwds['registered_solver_classes'] = [REDUCED_SOLVER_MAPPING.get(cls, cls) for cls in kwds['registered_solver_classes']]
@@ -370,23 +353,16 @@ class BaseSolverMixin:
             ham_classes = [HYPERREDUCED_SOLVER_MAPPING[c] for c in kwds['registered_solver_classes'] if issubclass(c, (ConformalStormerVerlet, ConformalImplicitMidpoint))]
             dg_classes = [HYPERREDUCED_SOLVER_MAPPING[c] for c in kwds['registered_solver_classes'] if issubclass(c, DiscreteGradient)]
 
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                futures = []
-                if ham_classes:
-                    futures.append(executor.submit(HamiltonianReducer.setup_hyperreduction, ham_classes))
-                if dg_classes:
-                    futures.append(executor.submit(DiscreteGradientReducer.setup_hyperreduction, dg_classes))
-                for future in concurrent.futures.as_completed(futures):
-                    future.result()
+            if ham_classes:
+                HamiltonianReducer.setup_hyperreduction(ham_classes)
+            if dg_classes:
+                DiscreteGradientReducer.setup_hyperreduction(dg_classes)
 
-                if ReduceMechSystem.hyperreducer == 'MDEIM':
-                    futures = []
-                    if ham_solvers:
-                        futures.append(executor.submit(HamiltonianReducer.update_mdeim_hyperreduction, ham_solvers, ham_classes))
-                    if dg_solvers:
-                        futures.append(executor.submit(DiscreteGradientReducer.update_mdeim_hyperreduction, dg_solvers, dg_classes))
-                    for future in concurrent.futures.as_completed(futures):
-                        future.result()
+            if ReduceMechSystem.hyperreducer == 'MDEIM':
+                if ham_solvers:
+                    HamiltonianReducer.update_mdeim_hyperreduction(ham_solvers, ham_classes)
+                if dg_solvers:
+                    DiscreteGradientReducer.update_mdeim_hyperreduction(dg_solvers, dg_classes)
 
             # hyperreduce_constraints use parallel processing internally
             if ReduceMechSystem.constraints_reduce:
@@ -434,8 +410,16 @@ class BaseSolverMixin:
             kwds (dict): Dictionary of keyword arguments for the solver.
             solvers (list): List of solver instances used to solve the system. 
         """
-        r_form = lambda numer, denom: r_[float('nan'), 
-                (log(roll(numer, -1)/numer)/log(roll(denom, -1)/denom))[:-1]]
+        def empirical_orders(errors, dt):
+            log_err = np.log(errors)
+            log_dt  = np.log(dt)
+
+            num = log_err[1:] - log_err[:-1]          # shape (n_dt-1, n_methods)
+            den = log_dt[1:]  - log_dt[:-1]           # shape (n_dt-1,)
+
+            s = num / den[:, None]                    # broadcast correctly
+
+            return np.vstack([np.nan*np.ones((1, s.shape[1])), s])
 
         # Compute en_error using a list comprehension and reshape it into a 2D array: rows = dt values, columns = Omega2 values for each solver class in kwds['registered_solver_classes']
         # For each solver_class, filter solvers and compute en_error separately
@@ -464,7 +448,7 @@ class BaseSolverMixin:
                     header += f" | {f'Omega2_{col}':>12}"
                 print(header)
                 print("-" * len(header))
-                all_r_values = np.array([r_form(en_error[:, col], MechSystem.dt_space) for col in range(en_error.shape[1])]).T
+                all_r_values = empirical_orders(en_error, MechSystem.dt_space)
                 for i, dt_val in enumerate(MechSystem.dt_space):
                     print(f"{dt_val:12.6f}" + "".join([f" | {val:12.6f}" for val in all_r_values[i]]))
 

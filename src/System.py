@@ -90,9 +90,10 @@ class SysConfig:
     
     # Solver and reduction settings
     tol, M, var, store = 1.0E-12, 500, True, False
-    pod_tol = 1e-6
+    tol_reduced = 1.0E-8
+    pod_tol = 1e-4
     
-    predict = False  # False = reproduce results of the full model
+    predict = True # False = reproduce results of the full model
     train_ratio = 0.7
     reducer = 'psd'
     hyperreducer = 'MDEIM'
@@ -100,21 +101,21 @@ class SysConfig:
     constraints_reduce = True
     
     # System parameters
-    nosc = 54 * 1  # Number of oscillators
+    nosc = 54 * 10  # Number of oscillators
     assert nosc % 6 == 0, 'nosc must be divisible by 6'
 
     if predict: # prediction parameters
         # Time-stepping parameters
         dt_space_dim = 1
         dt_space = np.array([0.01])
-        T_final = dt_space[-1] * 1e2
+        T_final = dt_space[-1] * 1e3
 
         # Parameter space for Omega^2
-        _Omega2_space_dim = 20
+        _Omega2_space_dim = nosc // 3 - 2
     else: # reproduction parameters
         # Time-stepping parameters
-        dt_space_dim = 3
-        dt_space = np.round(np.logspace(-3, -2, num=dt_space_dim), 10)
+        dt_space_dim = 5
+        dt_space = np.logspace(-3 - dt_space_dim, -3, num=dt_space_dim, base=2)
         T_final = dt_space[-1] * 5e1
 
         # Parameter space for Omega^2
@@ -148,7 +149,7 @@ class MechSystem(SysConfig):
     and methods for evaluating system dynamics (Hamiltonian, Lagrangian, constraints).
     """
 
-    keep_time = datetime.now().strftime("%Y-%m-%d")
+    keep_time = datetime.now().strftime("%Y-%m-%d_%H") #-%M-%S")
     data_folder = os.path.join('data', keep_time)
     # if not os.path.exists(data_folder):
     #     os.makedirs(data_folder)
@@ -441,6 +442,7 @@ class ReducedHamiltonianMechSystem(HamiltonianMechSystem):
             for k, v in kwds['solver_data'][self.__class__.__name__].items():
                 setattr(self, k, v)
         super().__init__(kwds)
+        self.tol = self.tol_reduced
         
         # Override with reduced methods
         self.ham_z = self.ham_z_reduced
@@ -456,6 +458,7 @@ class ReducedLagrangianMechSystem(LagrangianMechSystem):
             for k, v in kwds['solver_data'][self.__class__.__name__].items():
                 setattr(self, k, v)
         super().__init__(kwds)
+        self.tol = self.tol_reduced
         
         # Override with reduced methods
         self.lag_dg = self.lag_dg_reduced

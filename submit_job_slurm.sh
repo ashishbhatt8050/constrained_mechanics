@@ -4,7 +4,7 @@
 
 # Set a name for this run and the resource requirements,
 # Exclusive node access (all CPUs), all available memory and 24 hours wall time.
-# TODO: raise MaxMemoryPerUser limit, install latex on compute nodes
+# TODO: install latex on compute nodes
 
 #SBATCH --job-name=app8_lattice
 #SBATCH --output=app8_lattice-%j.out
@@ -24,7 +24,7 @@
 
 # Send an email when this job aborts, begins or ends.
 #SBATCH --mail-type=ALL
-#SBATCH --mail-user=ashish.bhatt@vit.ac.in
+# SBATCH --mail-user=
 
 # Ensure the script exits with an error if the python command fails
 set -o pipefail
@@ -60,7 +60,7 @@ which latex || echo "Warning: 'latex' not found. Matplotlib usetex=True will fai
 # which gs || echo "Warning: 'gs' (Ghostscript) not found. Matplotlib usetex=True will fail."
 
 # Run on CPU by default. To run on GPU, add --device gpu
-{ time python -u scripts/app8_lattice.py --clean --clear-cache | tee logfile.txt; } 2>>logfile.txt &
+{ time python -u scripts/app8_lattice.py --clear-cache | tee logfile.txt; } 2>>logfile.txt &
 PYTHON_PID=$!
 
 # Start monitoring in background (only useful in interactive SLURM allocations)

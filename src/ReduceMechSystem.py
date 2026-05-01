@@ -3,9 +3,10 @@ import gc
 import numpy as np
 import sympy as smp
 import psutil
+from scipy import sparse
 from itertools import chain
-import concurrent.futures
 from numpy import linalg as LA
+from scipy.linalg import sqrtm
 from functools import partial
 from tqdm.auto import tqdm
 from System import MechSystem, HamiltonianMechSystem, LagrangianMechSystem
@@ -30,59 +31,43 @@ class ReduceMechSystem(MechSystem):
         'IP_Ux_inv_PxU',
         # MDEIM attributes for constraints
         '_IP_Ux_inv_PxU',
-        'IP_g_prime_x_lambda_y', 'IP_g_prime_x_lambda_lambda',
+        'IP_g_prime_x_lambda_y',
         # Lambdified functions (DEIM)
         'ham_z_deim', 'ham_zz_deim', 'lag_dg_deim', 'lag_dg_z_deim',
         # Lambdified functions (MDEIM)
         'ham_zz_mdeim', 'lag_dg_z_mdeim', 'g_prime_mdeim',
-        'g_prime_x_lambda_y_mdeim', 'g_prime_x_lambda_lambda_mdeim',
+        'g_prime_x_lambda_y_mdeim',
         # Shape attributes for reshaping
-        'g_prime_shape',
-        'g_prime_x_lambda_y_shape', 'g_prime_x_lambda_lambda_shape'
+        'g_prime_shape', 'g_prime_x_lambda_y_shape'
     ]
 
     @staticmethod
-    def compute_snapshots(solver, indices, func, is_dg=False, is_mdeim_gprime=False, projection_matrix=None, batch_size=None, yield_batches=False, max_workers=None):
+    def compute_snapshots(solver, indices, func, is_dg=False, is_mdeim_gprime=False, projection_indices=None, batch_size=None, yield_batches=False):
         """
         Generic method to compute snapshots or projected snapshots in batches.
         """
-        # Determine num_workers
-        if max_workers is not None:
-            num_workers = max_workers
+        # Determine output dimensionality and memory usage per sample
+        idx0 = indices[0]
+        if is_dg:
+            y_data = solver.y if hasattr(solver, 'y') else solver['y']
+            sample_res = func((y_data[idx0], y_data[idx0+1]))
+        elif is_mdeim_gprime:
+            y_data = solver.y if hasattr(solver, 'y') else solver['y']
+            lambda_data = solver.Lambda if hasattr(solver, 'Lambda') else solver['Lambda']
+            sample_res = func(y_data[idx0], lambda_data[idx0])
         else:
-            # If running in a SLURM job, use the allocated CPUs.
-            # Otherwise, use the number of CPUs on the machine.
-            # The dynamic batch sizing will adjust for memory constraints.
-            if 'SLURM_CPUS_PER_TASK' in os.environ:
-                num_workers = int(os.environ['SLURM_CPUS_PER_TASK'])
-            else:
-                num_workers = os.cpu_count() or 1
+            y_data = solver.y if hasattr(solver, 'y') else solver['y']
+            sample_res = func(y_data[idx0])
+
+        Nh_out = len(projection_indices) if projection_indices is not None else sample_res.size
 
         # Determine batch size dynamically if not provided
         if batch_size is None:
-            # Compute a single sample to estimate memory usage
-            idx0 = indices[0]
-            if is_dg:
-                # DiscreteGradient expects pairs (y_k, y_{k+1})
-                # Handle both object and dict access for solver
-                y_data = solver.y if hasattr(solver, 'y') else solver['y']
-                sample_inp = (y_data[idx0], y_data[idx0+1])
-                sample_res = func(sample_inp)
-            elif is_mdeim_gprime:
-                y_data = solver.y if hasattr(solver, 'y') else solver['y']
-                lambda_data = solver.Lambda if hasattr(solver, 'Lambda') else solver['Lambda']
-                sample_res = func(y_data[idx0], lambda_data[idx0])
-            else:
-                y_data = solver.y if hasattr(solver, 'y') else solver['y']
-                sample_inp = y_data[idx0]
-                sample_res = func(sample_inp)
-            
-            # Estimate size in bytes
+            # Estimate item size (raw result + flattened output buffer)
             item_size = sample_res.nbytes
-            if projection_matrix is not None:
-                # If projecting, we also store the flattened result temporarily
-                item_size += sample_res.size * 4 # float32
-            
+            if projection_indices is not None:
+                item_size += Nh_out * 4 # float32 buffer
+
             # Get available memory
             mem = psutil.virtual_memory()
             available_mem = mem.available
@@ -111,48 +96,66 @@ class ReduceMechSystem(MechSystem):
             except Exception:
                 pass # Fallback to psutil
             
-            # Use at most 10% of available memory for the batch buffer across all threads
-            target_mem_per_worker = (available_mem * 0.1) / num_workers
+            # Use at most 10% of available memory for the batch buffer
+            target_mem_limit = (available_mem * 0.1)
             
-            batch_size = int(target_mem_per_worker / item_size)
-            batch_size = max(1, min(batch_size, 2000)) # Clamp between 1 and 2000
+            batch_size = int(target_mem_limit / item_size)
+            batch_size = max(1, min(batch_size, 10000)) # Cap for small data, memory limit handles large data
 
         def process_batch(batch_indices):
-            if is_dg:
-                # DiscreteGradient expects pairs (y_k, y_{k+1})
-                inputs = zip(solver.y[batch_indices], solver.y[np.array(batch_indices)+1])
-                raw_results = [func(y) for y in inputs]
-            elif is_mdeim_gprime:
-                # MDEIM for g_prime_* needs (y, Lambda) pairs
-                inputs = zip(solver.y[batch_indices], solver.Lambda[batch_indices])
-                raw_results = [func(*y) for y in inputs]
-            else:
-                inputs = solver.y[batch_indices]
-                raw_results = [func(y) for y in inputs]
+            # Pre-allocate output buffer to avoid list materialization and multiple large copies
+            batch_buffer = np.empty((len(batch_indices), Nh_out), dtype=np.float32)
             
-            if projection_matrix is not None:
-                # Flatten and stack for projection
-                batch_mats = np.vstack([r.flatten().astype(np.float32) for r in raw_results])
-                # Project: (IP @ batch_mats.T).T -> (batch_size, reduced_dim)
-                return (projection_matrix @ batch_mats.T).T
-            else:
-                return raw_results
+            for i, idx in enumerate(batch_indices):
+                if is_dg:
+                    res = func((solver.y[idx], solver.y[idx+1]))
+                elif is_mdeim_gprime:
+                    res = func(solver.y[idx], solver.Lambda[idx])
+                else:
+                    res = func(solver.y[idx])
+                
+                if projection_indices is not None:
+                    # Project per result immediately to minimize peak memory
+                    batch_buffer[i] = res.ravel()[projection_indices]
+                else:
+                    batch_buffer[i] = res.ravel()
+                    
+            return batch_buffer.T
 
         batches = [indices[i:i+batch_size] for i in range(0, len(indices), batch_size)]
         
         def _generator():
-            with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
-                for batch_res in tqdm(executor.map(process_batch, batches), total=len(batches), desc=f"Computing snapshots ({num_workers} workers)", leave=False):
-                    if projection_matrix is not None:
-                        yield batch_res.T
-                    else:
-                        # Flatten and stack to (batch_size, N_h), then transpose
-                        yield np.vstack([r.flatten().astype(np.float32) for r in batch_res]).T
+            # Process batches serially to align with incremental_POD's serial consumption
+            for batch_indices in tqdm(batches, desc=f"Computing snapshots (serially)", leave=False):
+                batch_res = process_batch(batch_indices)
+                yield batch_res
+                # Trigger GC if batch is substantial
+                if batch_res.nbytes > 1e8: # ~100MB
+                    del batch_res
+                    gc.collect()
 
         if yield_batches:
             return _generator()
 
+        # If not yielding batches, compute all and hstack (original behavior)
         return np.hstack(list(_generator()))
+
+    @staticmethod
+    def _reconstruct_sparse_basis(B_hat, non_zero_indices, full_rows):
+        """
+        Reconstructs a full sparse basis matrix from the DEIM reduced basis B_hat.
+        Places rows of B_hat into the specified non_zero_indices of the full matrix.
+        Using COO format for memory efficiency and speed.
+        """
+        n_rows_sub, n_cols = B_hat.shape
+        
+        # Construct COO coordinates
+        # B_hat.flatten() is row-major: we repeat row indices and tile column indices
+        rows = np.repeat(non_zero_indices, n_cols)
+        cols = np.tile(np.arange(n_cols), n_rows_sub)
+        data = B_hat.flatten()
+        
+        return sparse.coo_matrix((data, (rows, cols)), shape=(full_rows, n_cols)).tocsr()
 
     @classmethod
     def _create_indexed_deim_func(cls, expr, P, solver_type):
@@ -182,6 +185,7 @@ class ReduceMechSystem(MechSystem):
     @classmethod
     def hyperreduce_constraints(cls, solvers, target_classes):
         solver_type = "Hamiltonian" if issubclass(cls, HamiltonianMechSystem) else "DiscreteGradient"
+        pod_tol = cls.pod_tol_ham if solver_type == "Hamiltonian" else cls.pod_tol_dg
         print('Computing constraints reduction in parallel...')
         
         # Map solvers to indices
@@ -191,46 +195,53 @@ class ReduceMechSystem(MechSystem):
         def compute_constraint_basis(func_name, expr, is_g_prime=False):
             print(f'Computing {func_name} reduction...', flush=True)
 
-            # Determine if this is a "prime" type (g_prime, g_prime_x_lambda_y, g_prime_x_lambda_lambda)
-            prime_types = ['g_prime_', 'g_prime_x_lambda_y_', 'g_prime_x_lambda_lambda_']
+            # Determine if this is a "prime" type (g_prime, g_prime_x_lambda_y)
+            prime_types = ['g_prime_', 'g_prime_x_lambda_y_']
             is_prime_type = is_g_prime or func_name in prime_types
 
             if is_prime_type:
                 # --- Get shape for the prime constraint ---
-                # Use getattr for safer attribute access
-                func_to_get_shape = getattr(solvers[0], func_name)
-                if func_name in ['g_prime_x_lambda_y_', 'g_prime_x_lambda_lambda_']:
-                    g_prime_shape = func_to_get_shape(solvers[0].y[0], solvers[0].Lambda[0]).shape
+                if func_name == 'g_prime_x_lambda_y_':
+                    actual_shape = solvers[0].g_prime_x_lambda_y(solvers[0].y[0], solvers[0].Lambda[0]).shape
                 else: # This handles 'g_prime_'
-                    g_prime_shape = func_to_get_shape(solvers[0].y[0]).shape
-                
-                shape_attr = func_name + 'shape'
-                for target_class in target_classes:
-                    setattr(target_class, shape_attr, g_prime_shape)
+                    actual_shape = solvers[0].g_prime__(solvers[0].y[0]).shape
 
-                non_zero_indices = getattr(cls, func_name + "nonzero_indices")
-                IP = np.zeros((len(non_zero_indices), np.prod(g_prime_shape)), dtype=np.int8)
-                IP[np.arange(len(non_zero_indices)), non_zero_indices] = 1
+                # Synchronize symbolic expression with sparsified solver output
+                if actual_shape[0] != expr.shape[0] or actual_shape[1] != expr.shape[1]:
+                    m_h_sym = (expr.shape[0] // 2)
+                    m_h_act = (actual_shape[0] // 2)
+                    
+                    idx_h = np.linspace(0, m_h_sym - 1, m_h_act, dtype=int)
+                    mask = np.concatenate([idx_h, idx_h + m_h_sym])
+                    
+                    expr = expr.extract(mask, range(expr.shape[1]))
+                
+                g_prime_shape = expr.shape
+                for target_class in target_classes:
+                    setattr(target_class, func_name + 'shape', g_prime_shape)
+
+                # Recalculate non-zero indices based on the (potentially sliced) expression
+                non_zero_indices = np.where(np.array(expr.tolist()).flatten() != 0)[0]
 
                 # --- Create snapshot matrix for prime constraints ---
                 results_generators = []
                 for solver, indices in tqdm(zip(solvers, filtered_indices), total=len(solvers), desc=f"Snapshots for {func_name}"):
                     # Select the function to call based on func_name
-                    if func_name in ['g_prime_x_lambda_y_', 'g_prime_x_lambda_lambda_']:
-                        snapshot_func = getattr(solver, func_name)
+                    if func_name == 'g_prime_x_lambda_y_':
+                        snapshot_func = solver.g_prime_x_lambda_y_
                         gen = cls.compute_snapshots(solver, indices, snapshot_func,
-                                                          is_mdeim_gprime=True,
-                                                          projection_matrix=IP,
-                                                          yield_batches=True)
+                                                      is_mdeim_gprime=True,
+                                                      projection_indices=non_zero_indices,
+                                                      yield_batches=True)
                     else:  # This handles 'g_prime_'
                         snapshot_func = solver.g_prime__
                         gen = cls.compute_snapshots(solver, indices, snapshot_func,
-                                                          projection_matrix=IP,
-                                                          yield_batches=True)
+                                                      projection_indices=non_zero_indices,
+                                                      yield_batches=True)
                     results_generators.append(gen)
                 
                 all_snapshot_blocks = chain.from_iterable(results_generators)
-                Uj, sv, _ = cls.incremental_POD(all_snapshot_blocks, tol=cls.pod_tol)
+                Uj, sv, _ = cls.incremental_POD(all_snapshot_blocks, tol=pod_tol)
                 del results_generators, all_snapshot_blocks
                 gc.collect()
             else:
@@ -239,16 +250,41 @@ class ReduceMechSystem(MechSystem):
                     np.array([solver.g(y) for y in solver.y[indices]]).T
                     for solver, indices in zip(solvers, filtered_indices)
                 ])
-                Uj, sv, _ = POD(F, np.eye(F.shape[0]), cls.pod_tol)
+                Uj, sv, _ = POD(F, np.eye(F.shape[0]), pod_tol)
                 del F
 
             # Compute DEIM points and interpolation matrix
             Pj, _ = DEIM(Uj, plot_deim=False)
 
             if is_prime_type:
-                basis = IP.T @ Uj @ LA.inv(Pj.T @ Uj)
+                # Reconstruct the full sparse basis matrix from the DEIM results
+                B_hat = Uj @ LA.inv(Pj.T @ Uj)
+                total_elements = np.prod(g_prime_shape)
+
+                '''
+                # --- Verification Test ---
+                # Compare the new `_reconstruct_sparse_basis` (COO-based) against a
+                # memory-safe equivalent of the original `IP.T @ B_hat` operation, which uses LIL format.
+                # 1. Generate basis using the LIL matrix approach
+                basis_lil = sparse.lil_matrix((total_elements, B_hat.shape[1]), dtype=np.float64)
+                basis_lil[non_zero_indices, :] = B_hat
+                
+                # 2. Generate basis using the new COO-based method
+                basis_coo = cls._reconstruct_sparse_basis(B_hat, non_zero_indices, total_elements)
+                
+                # 3. Compare the two sparse matrices. The difference should be negligible.
+                diff = abs(basis_lil.tocsr() - basis_coo)
+                assert diff.max() < 1e-14, "Verification failed: COO reconstruction does not match LIL reconstruction."
+                print(f"Verification for '{func_name}' successful: _reconstruct_sparse_basis matches the LIL-based method.")
+                # --- End Verification Test ---
+                '''
+
+                basis = cls._reconstruct_sparse_basis(B_hat, non_zero_indices, total_elements)
+
                 # Create lambdified function
-                col = Pj.T @ IP @ expr.reshape(np.prod(g_prime_shape), 1)
+                flat_expr = expr.flat()
+                selected_expr_elements = [flat_expr[i] for i in non_zero_indices]
+                col = Pj.T @ smp.Matrix(selected_expr_elements)
             else:
                 basis = Uj @ LA.inv(Pj.T @ Uj)
                 col = Pj.T @ expr
@@ -256,8 +292,8 @@ class ReduceMechSystem(MechSystem):
             print(f'{basis.shape = }')
 
             # Create and wrap lambdified function
-            # Handle argument signature for g_prime_x_lambda_y and g_prime_x_lambda_lambda
-            if func_name in ['g_prime_x_lambda_y_', 'g_prime_x_lambda_lambda_']:
+            # Handle argument signature for g_prime_x_lambda_y
+            if func_name == 'g_prime_x_lambda_y_':
                 mdeim_func = smp.lambdify((cls.y, cls.lag_mult), col, modules=['numpy', 'scipy'])
             elif func_name in ["g_"]:
                 # mdeim_func = smp.lambdify((cls.y,), col, modules=['scipy'])
@@ -284,7 +320,6 @@ class ReduceMechSystem(MechSystem):
         tasks = [('g_prime_', cls.g_prime_expr, True)]
         if solver_type == "DiscreteGradient":
             tasks.append(("g_prime_x_lambda_y_", cls.g_prime_x_lambda_y_expr, True))
-            tasks.append(("g_prime_x_lambda_lambda_", cls.g_prime_x_lambda_lambda_expr, True))
 
         results = {}
         for task in tasks:
@@ -299,24 +334,22 @@ class ReduceMechSystem(MechSystem):
                 setattr(target_class, '_IP_Ux_inv_PxU', _IP_Ux_inv_PxU)
         elif solver_type == "DiscreteGradient":
             IP_g_prime_x_lambda_y, sv_g_prime_x_lambda_y = results['g_prime_x_lambda_y_']
-            IP_g_prime_x_lambda_lambda, sv_g_prime_x_lambda_lambda = results['g_prime_x_lambda_lambda_']
 
             for target_class in target_classes:
                 setattr(target_class, '_IP_Ux_inv_PxU', _IP_Ux_inv_PxU)
                 setattr(target_class, 'IP_g_prime_x_lambda_y', IP_g_prime_x_lambda_y)
-                setattr(target_class, 'IP_g_prime_x_lambda_lambda', IP_g_prime_x_lambda_lambda)
         else:
             raise ValueError(f"Invalid solver type: {solver_type}")
 
-        # Plot singular values for g_prime, g_prime_x_lambda_y and g_prime_x_lambda_lambda using logplot, pass the singular values and xlims as a list
+        # Plot singular values for g_prime and g_prime_x_lambda_y using logplot
         sv_list = [sv_g_prime]
         xlims_list = [(1, len(sv_g_prime))]
 
         # Add additional singular values if solver type is DiscreteGradient
         if solver_type == "DiscreteGradient":
-            sv_list.extend([sv_g_prime_x_lambda_y, sv_g_prime_x_lambda_lambda])
+            sv_list.append(sv_g_prime_x_lambda_y)
             xlims_list.extend(
-                [(1, len(sv_g_prime_x_lambda_y)), (1, len(sv_g_prime_x_lambda_lambda))]
+                [(1, len(sv_g_prime_x_lambda_y))]
             )
 
         fig, ax = logplot(sv_list, xlabel=f"index of singular values", xlims=xlims_list)
@@ -444,7 +477,7 @@ class ReduceMechSystem(MechSystem):
         return U, np.sqrt(Sigma2), N
 
     @staticmethod
-    def incremental_POD(snapshot_blocks, max_basis_size=None, tol=None):
+    def incremental_POD(snapshot_blocks, Xh=None, max_basis_size=None, tol=None, initial_basis=(None, None)):
         """
         Compute POD using Incremental SVD (uncentered) to handle extremely large datasets.
         
@@ -453,16 +486,32 @@ class ReduceMechSystem(MechSystem):
         
         Parameters:
         snapshot_blocks: Iterable of snapshot matrices (arrays of shape (Nh, batch_size)).
+        Xh: Weighting matrix for the POD inner product.
         max_basis_size: Maximum rank of the basis to maintain.
         tol: Tolerance for singular value truncation (energy criteria).
+        initial_basis (tuple, optional): A tuple (U, S) of a pre-existing orthonormal
+                                         basis and its singular values to start from.
+                                         Defaults to (None, None).
         
         Returns:
         U: POD modes (Nh, k)
         S: Singular values (k,)
         k: Rank of the basis
         """
-        U = None
-        S = None
+        # Handle weighting matrix for consistency with POD()
+        if Xh is not None:
+            if np.allclose(Xh, np.eye(Xh.shape[0])):
+                Xh_half = np.eye(Xh.shape[0])
+            else:
+                Xh_half = sqrtm(Xh)
+        else:
+            Xh_half = None
+
+        U, S = initial_basis
+        
+        # Transform initial basis to weighted space if necessary
+        if U is not None and Xh_half is not None:
+            U = Xh_half @ U
         
         for i, block in enumerate(snapshot_blocks):
             # Handle Dask arrays
@@ -474,6 +523,9 @@ class ReduceMechSystem(MechSystem):
                 block = block.reshape(-1, 1)
                 
             B = block
+            
+            if Xh_half is not None:
+                B = Xh_half @ B
             
             if U is None:
                 # Initialize with first batch
@@ -536,6 +588,10 @@ class ReduceMechSystem(MechSystem):
                 U = U @ Ub[:k_curr, :] + Q @ Ub[k_curr:, :]
                 S = Sb
             
+        # Transform basis back to physical space: U = Xh^{-1/2} @ U_weighted
+        if U is not None and Xh_half is not None:
+            U = LA.solve(Xh_half, U)
+            
         return U, S, len(S)
 
 class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
@@ -549,104 +605,82 @@ class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
         solver_to_indices = {solver: indices for solver, indices in zip(solvers, cls.indices_list)}
         filtered_indices = [solver_to_indices[solver] for solver in solvers]
 
-        # Create snapshot list
-        y_list = np.hstack([solver.y[indices].T for solver, indices 
-                            in zip(solvers, filtered_indices)])
+        # 1. Initial POD on state snapshots (Positions and Momenta)
+        def get_state_snapshots():
+            for solver, indices in zip(solvers, filtered_indices):
+                yield from cls.compute_snapshots(solver, indices, lambda y: y[:cls.nosc], yield_batches=True)
+            for solver, indices in zip(solvers, filtered_indices):
+                yield from cls.compute_snapshots(solver, indices, lambda y: y[cls.nosc:], yield_batches=True)
 
-        # Create F2 in batches
-        F2_list = []
-        for solver, indices in zip(solvers, filtered_indices):
-            batch_result = cls.compute_snapshots(solver, indices, solver.ham_z, is_dg=False)
-            F2_list.append(batch_result)
-
-        F2 = np.hstack(F2_list)
-        del F2_list
-        gc.collect()
-
-        # Calculate weight ratio based on norms
-        norm_y = LA.norm(y_list)
-        norm_F2 = LA.norm(F2)
-        weight_ratio = (norm_y / norm_F2) if norm_F2 > 1e-12 else 1.0
-        
         weights = np.eye(cls.nosc)
+        rb, _sv, _ = cls.incremental_POD(get_state_snapshots(), Xh=weights, tol=cls.pod_tol_ham)
 
-        # --- Inlined PSD logic to get access to rb ---
-        # 1. POD on state snapshots only
-        snapshots = np.hstack([y_list[:cls.nosc, :], y_list[cls.nosc:, :]])
-        rb, _sv, _ = POD(snapshots, weights, cls.pod_tol)
-
-        # ---
-
-        # Check for rank deficiency and augment basis
-        print("Checking rank deficiency...")
-        g_prime_shape0 = cls.g_prime_(y_list[:,0]).shape[0] // 2
-        
-        gradients_list = []
-        ill_conditioned_indices = []
-
-        # Subsample snapshots to check for efficiency
-        num_check_snapshots = min(200, y_list.shape[1])
-        check_indices = np.linspace(0, y_list.shape[1] - 1, num_check_snapshots, dtype=int)
-        print(f"Checking rank deficiency on {num_check_snapshots} snapshots...")
-        for i in check_indices:
-            q_i = y_list[:cls.nosc, i]
-            y_full = np.concatenate([q_i, np.zeros(cls.nosc)])
-            G = cls.g_prime_(y_full)[:g_prime_shape0, :cls.nosc]
-            
-            if LA.matrix_rank(G @ rb) < g_prime_shape0 or LA.cond(G @ rb) > 1/cls.tol_reduced:
-                gradients_list.append(G.T)
-                ill_conditioned_indices.append(i)
-        
-        if gradients_list:
-            print(f"Augmenting basis with {len(gradients_list)} constraint gradients and F2 snapshots...")
-            
-            # Collect constraint gradients and corresponding F2 snapshots
-            constraint_gradients = np.hstack(gradients_list)
-            f2_snapshots = np.hstack([F2[:cls.nosc, ill_conditioned_indices], F2[cls.nosc:, ill_conditioned_indices]]) * weight_ratio
-            
-            # Combine all augmentation snapshots
-            augmentation_snapshots = np.hstack([constraint_gradients, f2_snapshots])
-
-            # --- Check condition number before augmentation ---
-            G_test = gradients_list[0].T 
-            cond_before = LA.cond(G_test @ rb)
-            print(f"Condition number of G @ rb (before): {cond_before:.2e}")
-            # ---
-            
-            # Project gradients onto the orthogonal complement of rb
-            aug_perp = augmentation_snapshots - rb @ (rb.T @ augmentation_snapshots)
-            aug_perp -= rb @ (rb.T @ aug_perp) # re-orthogonalization
-            
-            # Compute SVD of the residuals
-            U_aug, s_aug, _ = LA.svd(aug_perp, full_matrices=False)
-            
-            # Select modes
-            energy_aug = np.cumsum(s_aug**2) / np.sum(s_aug**2)
-            r_aug = np.searchsorted(energy_aug, 1 - cls.pod_tol, side='left') + 1
-
-            if r_aug > 0:
-                print(f"Adding {r_aug} modes from constraint gradients.")
-                rb = np.hstack([rb, U_aug[:, :r_aug]])
-                rb, _ = LA.qr(rb, mode='reduced') # Orthonormalize
+        # 2. Increment with weighted snapshots of solver.ham_z (F2 snapshots)
+        print("Incrementing basis with weighted ham_z snapshots...")
+        def get_f2_snapshots():
+            for solver, indices in zip(solvers, filtered_indices):
+                batch_f2 = cls.compute_snapshots(solver, indices, solver.ham_z, is_dg=False)
+                # Stack q_dot and p_dot parts horizontally
+                batch_f2_stacked = np.hstack([batch_f2[:cls.nosc, :], batch_f2[cls.nosc:, :]])
                 
-                # --- Check condition number after augmentation ---
-                cond_after = LA.cond(G_test @ rb)
-                print(f"Condition number of G @ rb (after): {cond_after:.2e}")
-                # ---
-                
-                # Update singular values for plotting
-                sv = [_sv, s_aug[:r_aug]]
+                norm_y = LA.norm(solver.y[indices])
+                norm_f2 = LA.norm(batch_f2)
+                weight_ratio = (norm_y / norm_f2) if norm_f2 > 1e-12 else 1.0
+                yield batch_f2_stacked * weight_ratio
+
+        rb, _sv, _ = cls.incremental_POD(get_f2_snapshots(), Xh=weights, tol=cls.pod_tol_ham, initial_basis=(rb, _sv))
+
+        # 3. Iteratively augment with g_prime gradients until condition number is O(1)
+        print("Iteratively augmenting with constraint gradients...")
+        sample_y = solvers[0].y[0]
+        g_prime_shape0 = cls.g_prime_(sample_y).shape[0] // 2
+        
+        # Test condition on the first snapshot
+        test_q = sample_y[:cls.nosc]
+        G_test = cls.g_prime_(np.concatenate([test_q, np.zeros(cls.nosc)]))[:g_prime_shape0, :cls.nosc]
+
+        # Flatten all available time points for candidates
+        candidates = []
+        for solver, indices in zip(solvers, filtered_indices):
+            for idx in indices:
+                candidates.append((solver, idx))
+        
+        current_cand_idx = 0
+        cond_val = LA.cond(G_test @ rb)
+        print(f"Initial condition number: {cond_val:.2e}")
+        
+        while cond_val > 10.0 and current_cand_idx < len(candidates):
+            # Process gradients in small batches for efficiency
+            batch_grads = []
+            batch_norms_y = 0
+            for _ in range(min(50, len(candidates) - current_cand_idx)):
+                s, i = candidates[current_cand_idx]
+                q = s.y[i][:cls.nosc]
+                G = cls.g_prime_(np.concatenate([q, np.zeros(cls.nosc)]))[:g_prime_shape0, :cls.nosc]
+                batch_grads.append(G.T)
+                batch_norms_y += LA.norm(s.y[i])**2
+                current_cand_idx += 1
+            
+            grad_matrix = np.hstack(batch_grads)
+            weight = (np.sqrt(batch_norms_y) / LA.norm(grad_matrix)) if LA.norm(grad_matrix) > 1e-12 else 1.0
+            
+            rb, _sv, _ = cls.incremental_POD([grad_matrix * weight], tol=cls.pod_tol_ham, initial_basis=(rb, _sv))
+            cond_val = LA.cond(G_test @ rb)
+            print(f"Condition number at step {current_cand_idx}: {cond_val:.2e}")
+
+        sv = [_sv]
+        print(f"Final condition number: {cond_val:.2e}")
 
         # Construct final RB and nosc_r
         nosc_r = rb.shape[1]
         RB = np.block([[rb, np.zeros_like(rb)], [np.zeros_like(rb), rb]])
 
-        del y_list, F2, snapshots, rb
+        del rb
         gc.collect()
 
         print(f'Hamiltonian {RB.shape = }')
 
-        fig, ax = logplot(sv, xlabel=f'index of singular values', xlims=(1, len(sv)))
+        fig, ax = logplot(sv, xlabel=f'index of singular values', xlims=[(1, len(s)) for s in sv])
         filename = os.path.join(MechSystem.data_folder, "sv_rb_H.pdf")
         save_figure(fig, filename, fig_data=None)
 
@@ -703,8 +737,6 @@ class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
         print(f'Computing ham_zz reduction...')
         
         non_zero_indices = cls.ham_zz_nonzero_indices
-        IP = np.zeros((len(non_zero_indices), (2*cls.nosc)**2), dtype=np.int8)
-        IP[np.arange(len(non_zero_indices)), non_zero_indices] = 1
 
         # Map solvers to indices
         solver_to_indices = {solver: indices for solver, indices in zip(solvers, cls.indices_list)}
@@ -712,13 +744,13 @@ class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
 
         results_generators = []
         for solver, indices in zip(solvers, filtered_indices):
-            gen = cls.compute_snapshots(solver, indices, solver.ham_zz, is_dg=False, projection_matrix=IP, yield_batches=True)
+            gen = cls.compute_snapshots(solver, indices, solver.ham_zz, is_dg=False, projection_indices=non_zero_indices, yield_batches=True)
             results_generators.append(gen)
 
         print('Computing POD for ham_zz snapshots...')
         # Chain generators and use incremental_POD to avoid loading all snapshots into memory
         all_snapshot_blocks = chain.from_iterable(results_generators)
-        Uj, sv, _ = cls.incremental_POD(all_snapshot_blocks, tol=cls.pod_tol)
+        Uj, sv, _ = cls.incremental_POD(all_snapshot_blocks, tol=cls.pod_tol_ham)
         del results_generators, all_snapshot_blocks
         gc.collect()
         fig, ax = logplot(sv, xlabel=f'index of singular values of ham_zz', xlims=(1, len(sv)))
@@ -726,10 +758,19 @@ class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
         save_figure(fig, filename, fig_data=None)
 
         Pj, _ = DEIM(Uj, plot_deim=False)
-        IP_Ux_inv_PxU = IP.T @ Uj @ LA.inv(Pj.T @ Uj)
+
+        # Reconstruct the full sparse basis matrix from the DEIM results
+        B_hat = Uj @ LA.inv(Pj.T @ Uj)
+        total_elements = (2*cls.nosc)**2
+
+        IP_Ux_inv_PxU = cls._reconstruct_sparse_basis(B_hat, non_zero_indices, total_elements)
+        
         print(f'{IP_Ux_inv_PxU.shape = }')
 
-        mdeim_col = Pj.T @ IP @ cls.ham_zz_expr.flat()
+        # Select non-zero elements from the symbolic expression for lambdification
+        flat_expr = cls.ham_zz_expr.flat()
+        selected_expr_elements = [flat_expr[i] for i in non_zero_indices]
+        mdeim_col = Pj.T @ smp.Matrix(selected_expr_elements)
         mdeim_func = smp.lambdify((cls.y, cls.omega2, cls.beta), mdeim_col, modules=['numpy', 'scipy'])
 
         for target_class in target_classes:
@@ -748,87 +789,66 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
         solver_to_indices = {solver: indices for solver, indices in zip(solvers, cls.indices_list)}
         filtered_indices = [solver_to_indices[solver] for solver in solvers]
 
-        # Create snapshot list
-        y_list = np.hstack([solver.y[indices].T for solver, indices 
-                            in zip(solvers, filtered_indices)])
+        # Generator for q and p snapshots
+        def get_state_snapshots():
+            # Pass 1: Positions (q)
+            for solver, indices in zip(solvers, filtered_indices):
+                yield from cls.compute_snapshots(solver, indices, lambda y: y[:cls.nosc], yield_batches=True)
+            # Pass 2: Momenta (p)
+            for solver, indices in zip(solvers, filtered_indices):
+                yield from cls.compute_snapshots(solver, indices, lambda y: y[cls.nosc:], yield_batches=True)
 
         weights = np.eye(cls.nosc)
 
-        # Use standard POD on state snapshots only. Including F2 snapshots,
-        # while consistent with HamiltonianReducer, can interfere with the
-        # subsequent constraint gradient augmentation for this solver type.
-        snapshots = np.hstack([y_list[:cls.nosc, :], y_list[cls.nosc:, :]])
-        rb_1, sv_1, _ = POD(snapshots, weights, cls.pod_tol)
+        # Perform initial POD using generators
+        rb_1, sv_1, _ = cls.incremental_POD(get_state_snapshots(), Xh=weights, tol=cls.pod_tol_dg)
 
-        # Combine results in a block diagonal matrix RB
+        # 2. Iteratively augment with g_prime gradients until condition number is O(1)
+        print("Iteratively augmenting with constraint gradients...")
+        sample_y = solvers[0].y[0]
+        g_prime_shape0 = cls.g_prime_(sample_y).shape[0] // 2
+        
+        # Test condition on the first snapshot
+        test_q = sample_y[:cls.nosc]
+        G_test = cls.g_prime_(np.concatenate([test_q, np.zeros(cls.nosc)]))[:g_prime_shape0, :cls.nosc]
+
+        # Flatten all available time points for candidates
+        candidates = []
+        for solver, indices in zip(solvers, filtered_indices):
+            for idx in indices:
+                candidates.append((solver, idx))
+        
+        current_cand_idx = 0
+        cond_val = LA.cond(G_test @ rb_1)
+        print(f"Initial condition number: {cond_val:.2e}")
+        
+        while cond_val > 10.0 and current_cand_idx < len(candidates):
+            # Process gradients in small batches for efficiency
+            batch_grads = []
+            batch_norms_y = 0
+            for _ in range(min(50, len(candidates) - current_cand_idx)):
+                s, i = candidates[current_cand_idx]
+                q = s.y[i][:cls.nosc]
+                G = cls.g_prime_(np.concatenate([q, np.zeros(cls.nosc)]))[:g_prime_shape0, :cls.nosc]
+                batch_grads.append(G.T)
+                batch_norms_y += LA.norm(s.y[i])**2
+                current_cand_idx += 1
+            
+            grad_matrix = np.hstack(batch_grads)
+            weight = (np.sqrt(batch_norms_y) / LA.norm(grad_matrix)) if LA.norm(grad_matrix) > 1e-12 else 1.0
+            
+            rb_1, sv_1, _ = cls.incremental_POD([grad_matrix * weight], Xh=weights, tol=cls.pod_tol_dg, initial_basis=(rb_1, sv_1))
+            cond_val = LA.cond(G_test @ rb_1)
+            print(f"Condition number at step {current_cand_idx}: {cond_val:.2e}")
+
+        sv = [sv_1]
+        print(f"Final condition number: {cond_val:.2e}")
+
+        # Construct final RB and nosc_r
         RB = np.block([[rb_1, np.zeros_like(rb_1)], [np.zeros_like(rb_1), rb_1]])
         nosc_r = RB.shape[1] // 2
-        sv = [sv_1]
 
-        # Check for rank deficiency and augment basis to satisfy LBB condition
-        print("Checking rank deficiency...")
-        dummy_y = np.zeros(2 * cls.nosc)
-        g_prime_shape0 = cls.g_prime_(dummy_y).shape[0] // 2
-        
-        gradients_list = []
-
-        # Subsample snapshots to check for efficiency
-        num_check_snapshots = min(200, y_list.shape[1])
-        check_indices = np.linspace(0, y_list.shape[1] - 1, num_check_snapshots, dtype=int)
-        print(f"Checking rank deficiency on {num_check_snapshots} snapshots...")
-        for i in check_indices:
-            q_i = y_list[:cls.nosc, i]
-            y_full = np.concatenate([q_i, np.zeros(cls.nosc)])
-            G = cls.g_prime_(y_full)[:g_prime_shape0, :cls.nosc]
-            
-            if LA.matrix_rank(G @ rb_1) < g_prime_shape0 or LA.cond(G @ rb_1) > 1/cls.tol_reduced:
-                gradients_list.append(G.T)
-        
-        if gradients_list:
-            print(f"Augmenting reduced basis with {len(gradients_list)} constraint gradients...")
-            gradients = np.hstack(gradients_list)
-
-            # --- Check condition number before augmentation ---
-            # Use the first rank-deficient snapshot for comparison
-            G_test = gradients_list[0].T 
-            cond_before = LA.cond(G_test @ rb_1)
-            print(f"Condition number of G @ rb_1 (before): {cond_before:.2e}")
-            # ---
-            
-            # Project gradients onto the orthogonal complement of rb_1
-            # Use re-orthogonalization (apply projection twice) for numerical stability
-            gradients_perp = gradients - rb_1 @ (rb_1.T @ gradients)
-            gradients_perp -= rb_1 @ (rb_1.T @ gradients_perp)
-            
-            # Compute SVD of the residuals to find dominant normal directions
-            U_aug, s_aug, _ = LA.svd(gradients_perp, full_matrices=False)
-            
-            # Select modes with significant energy
-            # tol_aug = 1e-8
-            energy_aug = np.cumsum(s_aug**2) / np.sum(s_aug**2)
-            r_aug = np.searchsorted(energy_aug, 1 - cls.pod_tol, side='left') + 1
-
-            if r_aug > 0:
-                print(f"Adding {r_aug} modes from constraint gradients.")
-                rb_1 = np.hstack([rb_1, U_aug[:, :r_aug]])
-
-                # Orthonormalize rb_1 using thin QR
-                rb_1, _ = LA.qr(rb_1, mode='reduced')
-                
-                # Update RB and nosc_r
-                RB = np.block([[rb_1, np.zeros_like(rb_1)], [np.zeros_like(rb_1), rb_1]])
-                nosc_r = RB.shape[1] // 2
-
-                # --- Check condition number after augmentation ---
-                cond_after = LA.cond(G_test @ rb_1)
-                print(f"Condition number of G @ rb_1 (after): {cond_after:.2e}")
-                # ---
-                
-                # Update singular values for plotting
-                # sv_1 = np.concatenate([sv_1, s_aug[:r_aug]])
-                sv = [sv_1, s_aug[:r_aug]]
-
-        del y_list, snapshots, rb_1
+        del rb_1
         gc.collect()
 
         print(f'DiscreteGradient {RB.shape = }')
@@ -846,25 +866,82 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
         setattr(cls, 'nosc_r', nosc_r)
 
     @classmethod
-    def setup_hyperreduction(cls, target_classes):
+    def setup_hyperreduction(cls, solvers, target_classes):
         print('Setting up hyperreduction (DiscreteGradient)...')
-        
-        RB = cls.RB
-        nosc_r = cls.nosc_r
-        
-        attr = cls.lag_dg_expr
-        attr_11 = RB[:cls.nosc, :nosc_r]
-        P11, _ = DEIM(attr_11, plot_deim=False)
 
-        attr_22 = RB[cls.nosc:, nosc_r:]
-        P22, _ = DEIM(attr_22, plot_deim=False)
+        # Map solvers to indices
+        solver_to_indices = {solver: indices for solver, indices in zip(solvers, cls.indices_list)}
+        filtered_indices = [solver_to_indices[solver] for solver in solvers]
+
+        # Define a helper to recreate generators for dual-pass iPOD without materializing everything in memory
+        def get_snapshots():
+            results_generators = []
+            for solver, indices in zip(solvers, filtered_indices):
+                # is_dg=True ensures process_batch passes (y_k, y_k+1) pairs
+                gen = cls.compute_snapshots(solver, indices, solver.lag_dg, is_dg=True, yield_batches=True)
+                results_generators.append(gen)
+            return chain.from_iterable(results_generators)
+
+        # Use a stricter tolerance for hyper-reduction to ensure U_nonlinear covers RB
+        hr_tol = cls.pod_tol_dg # min(cls.pod_tol_dg, 1e-8)
+        print("Computing POD for lag_dg snapshots (split)...")
+        
+        weights = np.eye(cls.nosc)
+        U1, S1, _ = cls.incremental_POD((b[:cls.nosc, :] for b in get_snapshots()), Xh=weights, tol=hr_tol)
+        U2, S2, _ = cls.incremental_POD((b[cls.nosc:, :] for b in get_snapshots()), Xh=weights, tol=hr_tol)
+        
+        '''
+        # Augment U1 and U2 with constraint gradients using incremental_POD
+        print("Augmenting hyper-reduction bases with constraint gradients...")
+
+        # Test condition number before augmentation
+        J_test = cls.g_prime_(solvers[0].y[0])
+        m_test = J_test.shape[0] // 2
+        cond1_before = LA.cond(J_test[:, :cls.nosc] @ U1)
+        cond2_before = LA.cond(J_test[m_test:, cls.nosc:] @ U2)
+        print(f"Condition number of G @ U1 (before): {cond1_before:.2e}")
+        print(f"Condition number of G_pv @ U2 (before): {cond2_before:.2e}")
+
+        gs1, gs2 = [], []
+        for solver, indices in zip(solvers, filtered_indices):
+            for i in indices:
+                J = cls.g_prime_(solver.y[i])
+                m = J.shape[0] // 2
+                gs1.append(J[:m, :cls.nosc].T)
+                gs2.append(np.hstack([J[m:, :cls.nosc].T, J[m:, cls.nosc:].T]))
+        
+        gs1_all, gs2_all = np.hstack(gs1), np.hstack(gs2)
+
+        # Weigh appropriately wrt full_snapshots
+        norm_f1, norm_f2 = LA.norm(full_snapshots[:cls.nosc, :]), LA.norm(full_snapshots[cls.nosc:, :])
+        if (n_gs1 := LA.norm(gs1_all)) > 1e-12: gs1_all *= (norm_f1 / n_gs1)
+        if (n_gs2 := LA.norm(gs2_all)) > 1e-12: gs2_all *= (norm_f2 / n_gs2)
+
+        U1, S1, _ = cls.incremental_POD([gs1_all], Xh=weights, tol=hr_tol, initial_basis=(U1, S1))
+        U2, S2, _ = cls.incremental_POD([gs2_all], Xh=weights, tol=hr_tol, initial_basis=(U2, S2))
+
+        # Test condition number after augmentation
+        cond1_after = LA.cond(J_test[:, :cls.nosc] @ U1)
+        cond2_after = LA.cond(J_test[m_test:, cls.nosc:] @ U2)
+        print(f"Condition number of G @ U1 (after): {cond1_after:.2e}")
+        print(f"Condition number of G_pv @ U2 (after): {cond2_after:.2e}")
+        '''
+        
+        P1, _ = DEIM(U1, plot_deim=False)
+        P2, _ = DEIM(U2, plot_deim=False)
 
         P = np.block([
-            [P11, np.zeros((P11.shape[0], P22.shape[1]))],
-            [np.zeros((P22.shape[0], P11.shape[1])), P22]
+            [P1, np.zeros((P1.shape[0], P2.shape[1]))],
+            [np.zeros((P2.shape[0], P1.shape[1])), P2]
+        ])
+
+        # Construct nonlinear basis U for projection
+        U_nonlinear = np.block([
+            [U1, np.zeros((U1.shape[0], U2.shape[1]))],
+            [np.zeros((U2.shape[0], U1.shape[1])), U2]
         ])
         
-        RBxUx_inv_PxU = RB.T @ RB @ LA.inv(P.T @ RB)
+        RBxUx_inv_PxU = cls.RB.T @ U_nonlinear @ LA.inv(P.T @ U_nonlinear)
         print(f'{P.shape = }')
 
         deim_func = cls._create_indexed_deim_func(cls.lag_dg_expr, P, "DiscreteGradient")
@@ -877,8 +954,8 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
                                         modules=['numpy', 'scipy'])
 
         for target_class in target_classes:
-            setattr(target_class, 'RB', RB)
-            setattr(target_class, 'nosc_r', nosc_r)
+            setattr(target_class, 'RB', cls.RB)
+            setattr(target_class, 'nosc_r', cls.nosc_r)
             setattr(target_class, 'RBxUx_inv_PxU', RBxUx_inv_PxU)
             if callable(deim_func):
                 setattr(target_class, 'lag_dg_deim', staticmethod(deim_func))
@@ -890,8 +967,6 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
         print(f'Computing lag_dg_z reduction...')
         
         non_zero_indices = cls.lag_dg_z_nonzero_indices
-        IP = np.zeros((len(non_zero_indices), (2*cls.nosc)**2), dtype=np.int8)
-        IP[np.arange(len(non_zero_indices)), non_zero_indices] = 1
 
         # Map solvers to indices
         solver_to_indices = {solver: indices for solver, indices in zip(solvers, cls.indices_list)}
@@ -899,13 +974,12 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
 
         results_generators = []
         for solver, indices in zip(solvers, filtered_indices):
-            gen = cls.compute_snapshots(solver, indices, solver.lag_dg_z, is_dg=True, projection_matrix=IP, yield_batches=True)
+            gen = cls.compute_snapshots(solver, indices, solver.lag_dg_z, is_dg=True, projection_indices=non_zero_indices, yield_batches=True)
             results_generators.append(gen)
         
         print('Computing POD for lag_dg_z snapshots...')
-        # Chain generators and use incremental_POD to avoid loading all snapshots into memory
         all_snapshot_blocks = chain.from_iterable(results_generators)
-        Uj, sv, _ = cls.incremental_POD(all_snapshot_blocks, tol=cls.pod_tol)
+        Uj, sv, _ = cls.incremental_POD(all_snapshot_blocks, tol=cls.pod_tol_dg)
         del results_generators, all_snapshot_blocks
         gc.collect()
         fig, ax = logplot(sv, xlabel=f'index of singular values of lag_dg_z', xlims=(1, len(sv)))
@@ -913,10 +987,17 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
         save_figure(fig, filename, fig_data=None)
 
         Pj, _ = DEIM(Uj, plot_deim=False)
-        IP_Ux_inv_PxU = IP.T @ Uj @ LA.inv(Pj.T @ Uj)
+        
+        # Reconstruct the full sparse basis matrix from the DEIM results
+        B_hat = Uj @ LA.inv(Pj.T @ Uj)
+        IP_Ux_inv_PxU = cls._reconstruct_sparse_basis(B_hat, non_zero_indices, (2*cls.nosc)**2)
+        
         print(f'{IP_Ux_inv_PxU.shape = }')
 
-        mdeim_col = Pj.T @ IP @ cls.lag_dg_z_expr.flat()
+        # Select non-zero elements from the symbolic expression for lambdification
+        flat_expr = cls.lag_dg_z_expr.flat()
+        selected_expr_elements = [flat_expr[i] for i in non_zero_indices]
+        mdeim_col = Pj.T @ smp.Matrix(selected_expr_elements)
         mdeim_func = smp.lambdify((cls.y, cls.y1, cls.omega2), mdeim_col, modules=['numpy', 'scipy'])
 
         for target_class in target_classes:

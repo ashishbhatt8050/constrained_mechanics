@@ -257,12 +257,10 @@ class IndexedBaseSymbolicComputer:
 
         g_prime_x_lambda_expr = g_prime_expr.T @ lag_mult
         g_prime_x_lambda_y_expr = g_prime_x_lambda_expr.jacobian(self.y)
-        g_prime_x_lambda_lambda_expr = g_prime_x_lambda_expr.jacobian(lag_mult)
         
         # Compute nonzero indices
         g_prime_nonzero_indices = np.where(np.array(g_prime_expr.tolist()).flatten() != 0)[0]
         g_prime_x_lambda_y_nonzero_indices = np.where(np.array(g_prime_x_lambda_y_expr.tolist()).flatten() != 0)[0]
-        g_prime_x_lambda_lambda_nonzero_indices = np.where(np.array(g_prime_x_lambda_lambda_expr.tolist()).flatten() != 0)[0]
 
         return {
             "g_expr": g_expr, "g_prime_expr": g_prime_expr,
@@ -272,11 +270,8 @@ class IndexedBaseSymbolicComputer:
             "lag_mult": lag_mult,
             "g_prime_x_lambda_expr": g_prime_x_lambda_expr,
             "g_prime_x_lambda_y_expr": g_prime_x_lambda_y_expr,
-            "g_prime_x_lambda_lambda_expr": g_prime_x_lambda_lambda_expr,
             "g_prime_x_lambda_y_": self._lambdify_hybrid((self.y_base, self.lag_mult_base), g_prime_x_lambda_y_expr),
-            "g_prime_x_lambda_lambda_": self._lambdify_hybrid((self.y_base, self.lag_mult_base), g_prime_x_lambda_lambda_expr),
             "g_prime_x_lambda_y_nonzero_indices": g_prime_x_lambda_y_nonzero_indices,
-            "g_prime_x_lambda_lambda_nonzero_indices": g_prime_x_lambda_lambda_nonzero_indices,
         }
 
     @timing

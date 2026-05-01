@@ -221,9 +221,9 @@ if __name__ == '__main__':
     # This block is for demonstration and will raise an error because
     # SymbolicComputer is no longer part of the project.
     try:
-        from System import IndexedBaseSymbolicComputer
+        from SymbolicComputer import IndexedBaseSymbolicComputer
 
-        nosc = 54
+        nosc = 54 * 2
 
         print("--- Generating expressions for both classes ---")
 

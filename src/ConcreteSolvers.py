@@ -78,8 +78,6 @@ class BaseSolverMixin:
         
         if k > 0 and hasattr(self, 'Lambda'): # and isinstance(self, ConformalStormerVerlet):
             Lambda = self.Lambda[k].copy()
-            # if k == 1:
-            #     print(f'Setting initial guess for Lagrange multipliers')
         else:
             Lambda = np.zeros_like(self.g_(np.zeros(2*self.nosc))).squeeze()
 
@@ -272,6 +270,43 @@ class BaseSolverMixin:
         return kwds
 
     @staticmethod
+    def _restore_reduction_attrs(kwds):
+        """
+        Restores reduction attributes from the loaded kwds dictionary back to the
+        appropriate Reducer classes. This is crucial when loading from a checkpoint
+        to ensure subsequent steps like hyper-reduction have access to the bases.
+        """
+        solver_data = kwds.get('solver_data', {})
+        if not solver_data:
+            return
+
+        # Find the RB and nosc_r from the saved data. It should be consistent
+        # across all solvers of a given type (Hamiltonian/DG).
+        rb_ham, nosc_r_ham = None, None
+        rb_dg, nosc_r_dg = None, None
+
+        # The registered_solver_classes in the loaded kwds are the reduced ones.
+        for cls in kwds.get('registered_solver_classes', []):
+            cls_name = cls.__name__
+            if cls_name in solver_data:
+                data = solver_data[cls_name]
+                if 'RB' in data and 'nosc_r' in data:
+                    if issubclass(cls, ReducedHamiltonianMechSystem):
+                        if rb_ham is None: # Store first one found
+                            rb_ham, nosc_r_ham = data['RB'], data['nosc_r']
+                    elif issubclass(cls, ReducedLagrangianMechSystem):
+                        if rb_dg is None: # Store first one found
+                            rb_dg, nosc_r_dg = data['RB'], data['nosc_r']
+
+        # Now set the attributes on the Reducer classes
+        if rb_ham is not None:
+            setattr(HamiltonianReducer, 'RB', rb_ham)
+            setattr(HamiltonianReducer, 'nosc_r', nosc_r_ham)
+        if rb_dg is not None:
+            setattr(DiscreteGradientReducer, 'RB', rb_dg)
+            setattr(DiscreteGradientReducer, 'nosc_r', nosc_r_dg)
+
+    @staticmethod
     def setup_and_solve_reduced_system(kwds, solvers, client=None):
         """Setup and solve the reduced-order system."""
         print(f'Setting up reduced system...')
@@ -290,6 +325,9 @@ class BaseSolverMixin:
                 with open(kwds_file, 'rb') as f: kwds = pickle.load(f)
                 with open(solvers_file, 'rb') as f: solvers_r = pickle.load(f)
                 print("Checkpoint loaded successfully")
+
+                # Restore class attributes needed for subsequent steps
+                BaseSolverMixin._restore_reduction_attrs(kwds)
             except Exception as e:
                 raise Exception(f"Error loading checkpoint: {str(e)}")
         else:
@@ -356,7 +394,7 @@ class BaseSolverMixin:
             if ham_classes:
                 HamiltonianReducer.setup_hyperreduction(ham_classes)
             if dg_classes:
-                DiscreteGradientReducer.setup_hyperreduction(dg_classes)
+                DiscreteGradientReducer.setup_hyperreduction(dg_solvers, dg_classes)
 
             if ReduceMechSystem.hyperreducer == 'MDEIM':
                 if ham_solvers:
@@ -575,7 +613,7 @@ class DiscreteGradientFixedPointMixin:
         g_x1 = self.g(x1)
         resi = r_[x1 - x - self.dt*self.f(c_[x, x1].T, None) - self.dt*self._g_prime_with_JJ(0.5 *(x + x1)).T @ Lambda,\
                 g_x1]
-        tang = r_[c_[np.eye(x1.shape[0]) - self.dt * self.dfdu(c_[x, x1].T, None) - 0.5 * self.dt * self.JJ @ self.g_prime_x_lambda_y(0.5 *(x + x1), Lambda), -self.dt * self.JJ @ self.g_prime_x_lambda_lambda(0.5 *(x + x1), Lambda)],\
+        tang = r_[c_[np.eye(x1.shape[0]) - self.dt * self.dfdu(c_[x, x1].T, None) - 0.5 * self.dt * self.JJ @ self.g_prime_x_lambda_y(0.5 *(x + x1), Lambda), -self.dt * self.JJ @ self.g_prime__(0.5 *(x + x1)).T],\
                   c_[self.g_prime__(x1), np.zeros((g_x1.shape[0],)*2)]]
 
         return resi, tang
@@ -596,7 +634,7 @@ class DiscreteGradientFixedPointMixin:
             # Update residual and tangent
             resi, tang = self.residual(x[0], x[1], Lambda)
 
-            Delta_z = -LA.solve(tang, resi)
+            Delta_z = -LA.lstsq(tang, resi, rcond=None)[0]
             x[1] = x[1] + Delta_z[:x[1].shape[0]]
             Lambda += Delta_z[x[1].shape[0]:]
 

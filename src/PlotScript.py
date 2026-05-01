@@ -237,6 +237,9 @@ def save_figure(fig, filename, fig_data=None):
     filename (str): The filename.
     fig_data (dict, optional): A dictionary containing the data used to generate the figure.
     """
+    # Local import to access global config without circular dependencies at module level
+    from System import MechSystem
+
     # Ensure the directory exists
     dir_name = os.path.dirname(filename)
     if dir_name and not os.path.exists(dir_name):
@@ -252,30 +255,31 @@ def save_figure(fig, filename, fig_data=None):
     if fig_data is not None:
         with open(fig_path_base + '.data.pickle', 'wb') as f:
             pickle.dump(fig_data, f)
+        
+        # Conditionally save data for pgfplots based on global config flag
+        if getattr(MechSystem, 'generate_pgfplots_data', True):
+            pgf_data_path = os.path.join(dir_name, 'pgfplots_data')
+            if not os.path.exists(pgf_data_path):
+                os.makedirs(pgf_data_path)
 
-        # Save data for pgfplots
-        pgf_data_path = os.path.join(dir_name, 'pgfplots_data')
-        if not os.path.exists(pgf_data_path):
-            os.makedirs(pgf_data_path)
+            dat_filename_base = os.path.join(pgf_data_path, os.path.splitext(os.path.basename(filename))[0])
 
-        dat_filename_base = os.path.join(pgf_data_path, os.path.splitext(os.path.basename(filename))[0])
+            if 'sv' in fig_data or 'sv_g' in fig_data:
+                for label, array in fig_data.items():
+                    dat_filename = f"{dat_filename_base}_{label}.dat"
+                    np.savetxt(dat_filename, np.c_[np.arange(1, len(array) + 1), array], fmt='%f')
+            else:
+                if 't_points' in fig_data:
+                    for key in ['lim_momentum_err', 'angular_momentum_err', 'sym_error', 'g_norm', 'eng_error']:
+                        if key in fig_data:
+                            data_to_save = np.vstack((fig_data['t_points'], fig_data[key])).T
+                            np.savetxt(f"{dat_filename_base}_{key}.dat", data_to_save, fmt='%f')
 
-        if 'sv' in fig_data or 'sv_g' in fig_data:
-            for label, array in fig_data.items():
-                dat_filename = f"{dat_filename_base}_{label}.dat"
-                np.savetxt(dat_filename, np.c_[np.arange(1, len(array) + 1), array], fmt='%f')
-        else:
-            if 't_points' in fig_data:
-                for key in ['lim_momentum_err', 'angular_momentum_err', 'sym_error', 'g_norm', 'eng_error']:
-                    if key in fig_data:
-                        data_to_save = np.vstack((fig_data['t_points'], fig_data[key])).T
-                        np.savetxt(f"{dat_filename_base}_{key}.dat", data_to_save, fmt='%f')
-
-            if 'coords' in fig_data:
-                coords_data = fig_data['coords']
-                for i in range(coords_data.shape[1]):
-                    particle_filename = f"{dat_filename_base}_coords_particle{i}.dat"
-                    np.savetxt(particle_filename, coords_data[:, i, :], fmt='%f')
+                if 'coords' in fig_data:
+                    coords_data = fig_data['coords']
+                    for i in range(coords_data.shape[1]):
+                        particle_filename = f"{dat_filename_base}_coords_particle{i}.dat"
+                        np.savetxt(particle_filename, coords_data[:, i, :], fmt='%f')
 
     # Check for 3D axes and generate Plotly HTML if applicable
     is_3d = any(getattr(ax, 'name', '') == '3d' for ax in fig.axes)

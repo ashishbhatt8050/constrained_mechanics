@@ -91,10 +91,11 @@ class SysConfig:
     # Solver and reduction settings
     tol, M, var, store = 1.0E-12, 500, True, False
     tol_reduced = 1.0E-8
-    pod_tol = 1e-4
+    pod_tol_ham = 1e-5
+    pod_tol_dg = 1e-6
     
     predict = True # False = reproduce results of the full model
-    train_ratio = 0.7
+    train_ratio = 0.8
     reducer = 'psd'
     hyperreducer = 'MDEIM'
     constraint_type = 'spherical'
@@ -108,25 +109,25 @@ class SysConfig:
         # Time-stepping parameters
         dt_space_dim = 1
         dt_space = np.array([0.01])
-        T_final = dt_space[-1] * 1e3
+        T_final = dt_space[-1] * 3e2
 
         # Parameter space for Omega^2
         _Omega2_space_dim = nosc // 3 - 2
     else: # reproduction parameters
         # Time-stepping parameters
         dt_space_dim = 5
-        dt_space = np.logspace(-3 - dt_space_dim, -3, num=dt_space_dim, base=2)
-        T_final = dt_space[-1] * 5e1
+        dt_space = np.logspace(-4, -4 - dt_space_dim, num=dt_space_dim, base=2)
+        T_final = 0.1
 
         # Parameter space for Omega^2
         _Omega2_space_dim = 3
 
     # Generate random parameter space for Omega^2 in range (0, 10]
     num_freqs = nosc // 3 - 2
-    _Omega2_space = np.sort(10 * (1 - rng.random((_Omega2_space_dim, num_freqs))), axis=1)
+    _Omega2_space = np.sort(3 * (1 - rng.random((_Omega2_space_dim, num_freqs))), axis=1)
 
     # Freeze higher frequencies across samples to match the first sample
-    # freeze_idx = _Omega2_space_dim - 1
+    # freeze_idx = _Omega2_space_dim // 2
     # if freeze_idx < num_freqs:
     #     _Omega2_space[:, freeze_idx:] = _Omega2_space[0, freeze_idx:]
 
@@ -149,7 +150,7 @@ class MechSystem(SysConfig):
     and methods for evaluating system dynamics (Hamiltonian, Lagrangian, constraints).
     """
 
-    keep_time = datetime.now().strftime("%Y-%m-%d_%H") #-%M-%S")
+    keep_time = datetime.now().strftime("%Y-%m-%d") #_%H-%M-%S")
     data_folder = os.path.join('data', keep_time)
     # if not os.path.exists(data_folder):
     #     os.makedirs(data_folder)
@@ -236,41 +237,12 @@ class MechSystem(SysConfig):
         # Compute g_prime_x_lambda_y using the full order system
         return self.g_prime_x_lambda_y_(y, lag_mult)
 
-    def g_prime_x_lambda_lambda__(self, y, lag_mult):
-        """Compute g_prime_x_lambda_lambda for full order system"""
-        # Compute g_prime_x_lambda_lambda using the full order system
-        return self.g_prime_x_lambda_lambda_(y, lag_mult)
-
     def ham_z_reduced(self, y, beta=0):
         return self.RB.T @ self.ham_z_(y @ self.RB.T, self.Omega2, beta).squeeze()
 
     def ham_zz_reduced(self, y, beta=0):
         # print(f'Computing ham_zz inside ham_zz_reduced')
         return self.RB.T @ self.ham_zz_(y @ self.RB.T, self.Omega2, beta) @ self.RB
-
-        """Break large matrix multiplication into smaller chunks"""
-        y_projected = y @ self.RB.T
-        ham_zz_result = self.ham_zz_(y_projected, self.Omega2, beta)
-
-        # Use 32 as chunk size (96 % 32 = 0 and 32 < 36)
-        chunk_size = 32  # Gives exactly 3 chunks of size 32
-        n_chunks = ham_zz_result.shape[1] // chunk_size
-
-        # First multiplication
-        result = np.zeros((self.RB.T.shape[0], ham_zz_result.shape[1]))
-        for i in range(n_chunks):
-            start = i * chunk_size
-            end = (i + 1) * chunk_size
-            result[:, start:end] = self.RB.T @ ham_zz_result[:, start:end]
-
-        # Second multiplication
-        final = np.zeros((result.shape[0], self.RB.shape[1]))
-        for i in range(n_chunks):
-            start = i * chunk_size
-            end = (i + 1) * chunk_size
-            final += result[:, start:end] @ self.RB[start:end, :]
-
-        return final
 
     def lag_dg_reduced(self, y):
         return self.RB.T @ self.lag_dg_(*(y @ self.RB.T), self.Omega2).squeeze()
@@ -279,64 +251,43 @@ class MechSystem(SysConfig):
         # print(f'Computing lag_dg_z inside lag_dg_z_reduced')
         return self.RB.T @ self.lag_dg_z_(*(y @ self.RB.T), self.Omega2) @ self.RB
 
-        """Break large matrix multiplication into smaller chunks"""
-        # First compute the DG result
-        result = self.lag_dg_z_(*(y @ self.RB.T), self.Omega2)
-
-        # Use 32 as chunk size (96 % 32 = 0 and 32 < 36)
-        chunk_size = 32  # Gives exactly 3 chunks of size 32
-        n_chunks = result.shape[1] // chunk_size
-
-        # First multiplication
-        intermediate = np.zeros((self.RB.T.shape[0], result.shape[1]))
-        for i in range(n_chunks):
-            start = i * chunk_size
-            end = (i + 1) * chunk_size
-            intermediate[:, start:end] = self.RB.T @ result[:, start:end]
-
-        # Second multiplication
-        final = np.zeros((intermediate.shape[0], self.RB.shape[1]))
-        for i in range(n_chunks):
-            start = i * chunk_size
-            end = (i + 1) * chunk_size
-            final += intermediate[:, start:end] @ self.RB[start:end, :]
-
-        return final
-
     def g_reduced(self, y):
         return self.g_(y @ self.RB.T).squeeze()
 
     def g_prime_reduced(self, y):
         return self.g_prime_(y @ self.RB.T) @ self.RB
 
-        """Break large matrix multiplication into smaller chunks"""
-        # First compute g_prime result
-        y_projected = y @ self.RB.T
-        g_prime_result = self.g_prime_(y_projected)
-
-        # Use 32 as chunk size (96 % 32 = 0 and 32 < 36)
-        chunk_size = 32  # Gives exactly 3 chunks of size 32
-        n_chunks = g_prime_result.shape[1] // chunk_size
-
-        # Process in chunks
-        final = np.zeros((g_prime_result.shape[0], self.RB.shape[1]))
-        for i in range(n_chunks):
-            start = i * chunk_size
-            end = (i + 1) * chunk_size
-            final += g_prime_result[:, start:end] @ self.RB[start:end, :]
-
-        return final
-
     def g_prime_x_lambda_y_reduced(self, y, lag_mult):
         """Compute g_prime_x_lambda_y for reduced order system"""
         # Compute g_prime_x_lambda_y using the reduced order system
         return self.RB.T @ self.g_prime_x_lambda_y_(y @ self.RB.T, lag_mult) @ self.RB
 
-    def g_prime_x_lambda_lambda_reduced(self, y, lag_mult):
-        """Compute g_prime_x_lambda_lambda for reduced order system"""
-        # Compute g_prime_x_lambda_lambda using the reduced order system
-        return self.RB.T @ self.g_prime_x_lambda_lambda_(y @ self.RB.T, lag_mult)
-
+    def _apply_sparsification(self):
+        """Redefines constraint methods to ensure the system is underconstrained."""
+        sample_g = self.g__(self.y_init)
+        m_h = sample_g.size // 2
+        print(f"m_h = {m_h}, nosc_r = {self.nosc_r}")
+        
+        if m_h >= self.nosc_r:
+            m_target = self.nosc_r - 1
+            idx_h = np.linspace(0, m_h - 1, m_target, dtype=int)
+            print(f"Sparsifying constraints: {2*m_h} -> {2*m_target} ({(1 - m_target/m_h):.1%} reduction) to satisfy LBB.")
+            full_idx = np.concatenate([idx_h, idx_h + m_h])
+            
+            _orig_g = self.g__
+            self.g__ = lambda y: _orig_g(y)[full_idx]
+            
+            _orig_gp = self.g_prime__
+            self.g_prime__ = lambda y: _orig_gp(y)[full_idx, :]
+            
+            if hasattr(self, 'g_prime_x_lambda_y'):
+                _orig_gpxy = self.g_prime_x_lambda_y
+                def wrapped_gpxy(y, lm):
+                    inflated = np.zeros(2 * m_h)
+                    inflated[full_idx] = lm
+                    return _orig_gpxy(y, inflated)
+                self.g_prime_x_lambda_y = wrapped_gpxy
+            
     def ham_z_hyperreduced(self, y, beta=0):
         return self.RBxUx_inv_PxU @ np.squeeze(self.ham_z_deim(y @ self.RB.T, self.Omega2, beta))
 
@@ -382,14 +333,6 @@ class MechSystem(SysConfig):
             @ self.RB
         )
 
-    def g_prime_x_lambda_lambda_hyperreduced(self, y, lag_mult):
-        """Compute g_prime_x_lambda_lambda for hyperreduced system"""
-        return self.RB.T @ np.reshape(
-            self.IP_g_prime_x_lambda_lambda
-            @ self.g_prime_x_lambda_lambda_mdeim(y @ self.RB.T, lag_mult),
-            self.g_prime_x_lambda_lambda_shape,
-        )
-
     def __init__(self, kwds):        
         if 'pool' in kwds:
             self.__dict__.update(kwds['pool'])
@@ -432,7 +375,6 @@ class LagrangianMechSystem(MechSystem):
         self.g__ = self.g__lambda
         self.g_prime__ = self.g_prime__lambda
         self.g_prime_x_lambda_y = self.g_prime_x_lambda_y__
-        self.g_prime_x_lambda_lambda = self.g_prime_x_lambda_lambda__
 
 class ReducedHamiltonianMechSystem(HamiltonianMechSystem):
     """Reduced order Hamiltonian system."""
@@ -449,6 +391,7 @@ class ReducedHamiltonianMechSystem(HamiltonianMechSystem):
         self.ham_zz = self.ham_zz_reduced
         self.g__ = self.g_reduced
         self.g_prime__ = self.g_prime_reduced
+        # self._apply_sparsification()
 
 class ReducedLagrangianMechSystem(LagrangianMechSystem):
     """Reduced order Lagrangian system."""
@@ -466,7 +409,7 @@ class ReducedLagrangianMechSystem(LagrangianMechSystem):
         self.g__ = self.g_reduced
         self.g_prime__ = self.g_prime_reduced
         self.g_prime_x_lambda_y = self.g_prime_x_lambda_y_reduced
-        self.g_prime_x_lambda_lambda = self.g_prime_x_lambda_lambda_reduced
+        # self._apply_sparsification()
 
 class HyperReducedHamiltonianMechSystem(ReducedHamiltonianMechSystem):
     """Hyper-reduced Hamiltonian system."""
@@ -475,10 +418,13 @@ class HyperReducedHamiltonianMechSystem(ReducedHamiltonianMechSystem):
         
         self.ham_z = self.ham_z_hyperreduced
         self.ham_zz = self.ham_zz_hyperreduced
-        self.g_prime__ = self.g_prime_hyperreduced
         
         if self.hyperreducer == 'MDEIM':
             self.ham_zz = self.ham_zz_mdeim_hyperreduced
+            
+        if self.constraints_reduce:
+            self.g_prime__ = self.g_prime_hyperreduced
+            # self._apply_sparsification()
 
 class HyperReducedLagrangianMechSystem(ReducedLagrangianMechSystem):
     """Hyper-reduced Lagrangian system."""
@@ -487,12 +433,11 @@ class HyperReducedLagrangianMechSystem(ReducedLagrangianMechSystem):
         
         self.lag_dg = self.lag_dg_hyperreduced
         self.lag_dg_z = self.lag_dg_z_hyperreduced
-        self.g_prime__ = self.g_prime_hyperreduced
         
         if self.hyperreducer == 'MDEIM':
             self.lag_dg_z = self.lag_dg_z_mdeim_hyperreduced
             
         if self.constraints_reduce:
-            
             self.g_prime_x_lambda_y = self.g_prime_x_lambda_y_hyperreduced
-            self.g_prime_x_lambda_lambda = self.g_prime_x_lambda_lambda_hyperreduced
+            self.g_prime__ = self.g_prime_hyperreduced
+            # self._apply_sparsification()

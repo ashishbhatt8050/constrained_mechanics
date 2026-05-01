@@ -103,6 +103,9 @@ def POD(S, Xh, eps=None):
 
         # Ensure N is even
         if N % 2 == 1: N += 1
+
+        if N > Chi.shape[1]:
+            N -= 2
     else:
         N = Sigma2.size
         

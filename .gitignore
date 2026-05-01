@@ -81,6 +81,7 @@ target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+*.ipynb
 
 # IPython
 profile_default/
@@ -142,5 +143,7 @@ dmypy.json
 cython_debug/
 
 app8_lattice-*.out
+*.txt
 data
 matplotlib_cache
+dask_logs/

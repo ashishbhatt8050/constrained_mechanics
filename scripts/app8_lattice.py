@@ -40,14 +40,6 @@ from System import MechSystem, HamiltonianMechSystem, LagrangianMechSystem, load
 from SymbolicComputer import IndexedBaseSymbolicComputer, manage_cache
 from PlotScript import plot_omega_distribution, plot_pareto
 
-# Configure LaTeX rendering based on availability
-if False and shutil.which('latex'):
-    rc('text', usetex=True)
-    rc('text.latex', preamble=r'\usepackage{amsfonts}')  # Load AMSFonts for Fraktur
-else:
-    rc('text', usetex=False)
-    print("LaTeX disabled or not found. Using standard fonts for plots.", flush=True)
-
 if __name__ == '__main__':
     """
     Model order reduction of the MechSystem using concrete solvers
@@ -64,12 +56,20 @@ if __name__ == '__main__':
     parser.add_argument("--clean", action="store_true", help="Clean checkpoints before running")
     parser.add_argument("--clear-symbolic", action="store_true", help="Clear symbolic expressions cache before running")
     parser.add_argument("--clear-cache", action="store_true", help="Clear joblib cache before running")
+    parser.add_argument("--no-pgfplots", action="store_true", help="Disable generation of data files for PGFPlots")
     
     args = parser.parse_args()
 
-    # Apply CLI arguments
-    if args.no_latex:
+    # Set the pgfplots generation flag on the central config object
+    MechSystem.generate_pgfplots_data = not args.no_pgfplots
+
+    # Configure LaTeX rendering based on availability
+    if args.no_latex or not shutil.which('latex'):
         rc('text', usetex=False)
+        print("LaTeX disabled or not found. Using standard fonts for plots.", flush=True)
+    elif shutil.which('latex'):
+            rc('text', usetex=True)
+
 
     # Define paths and hash
     cache_dir = os.path.join('data', 'joblib_cache')
@@ -167,7 +167,7 @@ if __name__ == '__main__':
 
     client = Client(cluster)
     print("Waiting for workers to start...", flush=True)
-    client.wait_for_workers(1)
+    client.wait_for_workers(3)
     n_workers_actual = len(client.scheduler_info()['workers'])
     print(f"Dask cluster started with {n_workers_actual} workers.", flush=True)
 

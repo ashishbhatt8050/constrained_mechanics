@@ -424,38 +424,37 @@ def save_figure(fig, filename, fig_data=None):
 import pickle
 import numpy as np
 
-filename = "data/2025-12-26_12-32/osc_sv_rbDiscreteGradient.fig.pickle"
-with open(filename, "rb") as file:
+filename = "/home/bhattah/Documents/constrained_mechanics/scripts/data/2026-06-10_11-25-15/deim_benchmark_d5_n100000.fig.pickle"
 
-    figx = pickle.load(file)
+# Configuration for custom labels
+X_LABEL_CUSTOM = r'QDEIM basis size ($\ell$)'
+Y_LABEL_LEFT_CUSTOM = 'Relative error'
+Y_LABEL_RIGHT_CUSTOM = 'Function evaluation time (ms)'
 
-    for ax in figx.axes:
-        lines = ax.get_lines()
-        if lines:
-            x_data = np.concatenate([l.get_xdata() for l in lines])
-            # print(f"x_data: min={x_data.min()}, max={x_data.max()}")
-            if x_data.size > 0:
-                xticks = np.append(ax.get_xticks(), [int(x_data.min())])
-                ax.set_xticks(xticks)
+if os.path.exists(filename):
+    with open(filename, "rb") as file:
+        figx = pickle.load(file)
 
-            y_data = np.concatenate([l.get_ydata() for l in lines])
-            if y_data.size > 0:
-                y_max = y_data.max()
-                if y_max > 0:
-                    next_pow_10 = 10 ** (np.floor(np.log10(y_max)) + 1)
-                    yticks = np.unique(np.append(ax.get_yticks(), [next_pow_10]))
-                    ax.set_yticks(yticks)
-        ax.set_xlabel("")
+        # Left Subplot (Relative Error)
+        ax_left = figx.axes[0]
+        ax_left.set_title("")  # Remove the title
+        ax_left.set_xlabel(X_LABEL_CUSTOM)
+        ax_left.set_ylabel(Y_LABEL_LEFT_CUSTOM)
+        ax_left.set_ylim([1e-5, 1e0])  # Set range from 10^-5 to 10^0
+        ax_left.set_yticks([1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1e0])
+        ax_left.set_xlim([0,55])
 
-        for item in (
-            [ax.title, ax.xaxis.label, ax.yaxis.label]
-            + ax.get_xticklabels()
-            + ax.get_yticklabels()
-        ):
-            item.set_fontsize(item.get_fontsize() - 6)
+        # Right Subplot (Online Time)
+        ax_right = figx.axes[1]
+        ax_right.set_title("")  # Remove the title
+        ax_right.set_xlabel(X_LABEL_CUSTOM)
+        ax_right.set_ylabel(Y_LABEL_RIGHT_CUSTOM)
+        ax_right.set_ylim([0, 6])  # Set range from 0 to 6
+        ax_right.set_yticks([0, 1, 2, 3, 4, 5, 6])
+        ax_right.set_xlim([0,55])
 
-    figx.show()  # Show the figure, edit it, etc.!
-    figx.savefig(filename.replace(".fig.pickle", ".pdf"), pad_inches=0.5, dpi=300)
+        figx.show()
+        figx.savefig(filename.replace(".fig.pickle", ".pdf"), pad_inches=0.5, dpi=300)
     # figx.savefig("data/2025-12-20_12-43_/osc_ConformalStormerVerletSolver_full_2.eps")
 
 # %%

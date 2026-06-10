@@ -252,6 +252,7 @@ def plot_comparison(f_true_flat, f_approx_flat, title):
     axes[0].set_ylabel('y')
     axes[0].set_xlim(xx.min(), xx.max())
     axes[0].set_ylim(yy.min(), yy.max())
+    axes[0].set_xticks(np.linspace(0.2, 0.9, 8))
     fig.colorbar(im1, ax=axes[0])
     
     # Approximated function
@@ -261,6 +262,7 @@ def plot_comparison(f_true_flat, f_approx_flat, title):
     axes[1].set_ylabel('y')
     axes[1].set_xlim(xx.min(), xx.max())
     axes[1].set_ylim(yy.min(), yy.max())
+    axes[1].set_xticks(np.linspace(0.2, 0.9, 8))
     fig.colorbar(im2, ax=axes[1])
     
     # Error
@@ -270,6 +272,7 @@ def plot_comparison(f_true_flat, f_approx_flat, title):
     axes[2].set_ylabel('y')
     axes[2].set_xlim(xx.min(), xx.max())
     axes[2].set_ylim(yy.min(), yy.max())
+    axes[2].set_xticks(np.linspace(0.2, 0.9, 8))
     fig.colorbar(im3, ax=axes[2])
     
     fig.suptitle(title)

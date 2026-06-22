@@ -21,6 +21,9 @@ def Newton(f, x, dfdx, tol, M, store):
     
     # Initialize variables
     f_value = f(x)
+    # Defensive checks for 1D vectors
+    assert f_value.ndim == 1, f"Newton: f(x) must return a 1D array, got shape {f_value.shape}"
+    assert np.asarray(x).ndim == 1, f"Newton: x must be a 1D array, got shape {np.asarray(x).shape}"
     dfdx_value = dfdx(x)
     m = 0
     if store: info = []
@@ -87,6 +90,7 @@ def fixed_point(g, x, dgdx, tol, M, Lambda):
     # Fixed point iteration
     while m < M:
         g_val = g(x[1])
+        assert g_val.ndim == 1, f"fixed_point: g(x) must return a 1D array, got shape {g_val.shape}"
         residual = LA.norm(g_val)
         
         if np.isnan(residual):
@@ -106,7 +110,7 @@ def fixed_point(g, x, dgdx, tol, M, Lambda):
             # Handle the case when g is a scalar
             R = dgdx_0(x[1]) * dgdx_1(x)
             Delta_Lambda = g_val / R
-            x[1] -= dgdx_1(x) * Delta_Lambda
+            x[1] -= dgdx_1(x) * Delta_Lambda.flatten() # Ensure 1D for addition
             
         # Update m
         m += 1

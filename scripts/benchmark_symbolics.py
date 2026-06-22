@@ -64,7 +64,7 @@ class SymbolicComputer:
         ham_ = smp.lambdify((self.y, self.omega2, self.beta), ham_expr, 'numpy')
         ham_z_ = smp.lambdify((self.y, self.omega2, self.beta), ham_z_expr, 'numpy')
         ham_zz_ = smp.lambdify((self.y, self.omega2, self.beta), ham_zz_expr, 'numpy')
-        # ham_z_ = lambda y, omega2, beta: _ham_z_(y, omega2, beta).squeeze()
+        # ham_z_ = lambda y, omega2, beta: _ham_z_(y, omega2, beta).flatten()
 
         return {
             'y': self.y, 'y1': self.y1,

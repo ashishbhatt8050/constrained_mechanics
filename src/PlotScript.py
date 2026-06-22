@@ -23,6 +23,7 @@ Adapted from https://github.com/jbmouret/matplotlib_for_papers
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 from matplotlib.ticker import MaxNLocator, LogLocator
 from cycler import cycler
 import os
@@ -396,17 +397,17 @@ def save_figure(fig, filename, fig_data=None):
                 'type': 'buttons', 'direction': 'left', 'pad': {'r': 10, 't': 10},
                 'showactive': True, 'x': 0.1, 'xanchor': 'right', 'y': 0.2, 'yanchor': 'top',
                 'buttons': [
-                    {'label': 'Fixed Camera', 'method': 'update',
+                    {'label': 'Fixed camera', 'method': 'update',
                      'args': [{}, {'sliders': [create_slider('fix', True), create_slider('rot', False)],
                                    'updatemenus': [{'visible': True}, {'visible': False}, {'visible': True}]}]},
-                    {'label': 'Rotating Camera', 'method': 'update',
+                    {'label': 'Rotating camera', 'method': 'update',
                      'args': [{}, {'sliders': [create_slider('fix', False), create_slider('rot', True)],
                                    'updatemenus': [{'visible': False}, {'visible': True}, {'visible': True}]}]}
                 ]
             }
             
             fig_ply.update_layout(
-                title="3D Phase Portrait Animation",
+                title="3D phase portrait animation",
                 scene=dict(xaxis_title='X', yaxis_title='Y', zaxis_title='Z'),
                 updatemenus=[menu_fixed, menu_rot, menu_toggle],
                 sliders=[slider_fixed, slider_rot]
@@ -424,37 +425,187 @@ def save_figure(fig, filename, fig_data=None):
 import pickle
 import numpy as np
 
-filename = "/home/bhattah/Documents/constrained_mechanics/scripts/data/2026-06-10_11-25-15/deim_benchmark_d5_n100000.fig.pickle"
+filename = "/home/bhattah/Documents/constrained_mechanics/data/2026-06-19/error_vs_basis_size.fig.pickle"
 
-# Configuration for custom labels
-X_LABEL_CUSTOM = r'QDEIM basis size ($\ell$)'
-Y_LABEL_LEFT_CUSTOM = 'Relative error'
-Y_LABEL_RIGHT_CUSTOM = 'Function evaluation time (ms)'
+# # Configuration for custom labels
+# X_LABEL_CUSTOM = r'QDEIM basis size ($\ell$)'
+# Y_LABEL_LEFT_CUSTOM = 'Relative error'
+# Y_LABEL_RIGHT_CUSTOM = 'Function evaluation time (ms)'
 
 if os.path.exists(filename):
     with open(filename, "rb") as file:
         figx = pickle.load(file)
 
-        # Left Subplot (Relative Error)
-        ax_left = figx.axes[0]
-        ax_left.set_title("")  # Remove the title
-        ax_left.set_xlabel(X_LABEL_CUSTOM)
-        ax_left.set_ylabel(Y_LABEL_LEFT_CUSTOM)
-        ax_left.set_ylim([1e-5, 1e0])  # Set range from 10^-5 to 10^0
-        ax_left.set_yticks([1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1e0])
-        ax_left.set_xlim([0,55])
+        # # Left Subplot (Relative Error)
+        # ax_left = figx.axes[0]
+        # ax_left.set_title("")  # Remove the title
+        # ax_left.set_xlabel(X_LABEL_CUSTOM)
+        # ax_left.set_ylabel(Y_LABEL_LEFT_CUSTOM)
+        # ax_left.set_ylim([1e-5, 1e0])  # Set range from 10^-5 to 10^0
+        # ax_left.set_yticks([1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1e0])
+        # ax_left.set_xlim([0,55])
 
-        # Right Subplot (Online Time)
-        ax_right = figx.axes[1]
-        ax_right.set_title("")  # Remove the title
-        ax_right.set_xlabel(X_LABEL_CUSTOM)
-        ax_right.set_ylabel(Y_LABEL_RIGHT_CUSTOM)
-        ax_right.set_ylim([0, 6])  # Set range from 0 to 6
-        ax_right.set_yticks([0, 1, 2, 3, 4, 5, 6])
-        ax_right.set_xlim([0,55])
+        # # Right Subplot (Online Time)
+        # ax_right = figx.axes[1]
+        # ax_right.set_title("")  # Remove the title
+        # ax_right.set_xlabel(X_LABEL_CUSTOM)
+        # ax_right.set_ylabel(Y_LABEL_RIGHT_CUSTOM)
+        # ax_right.set_ylim([0, 6])  # Set range from 10^-5 to 10^0
+        # ax_right.set_yticks([0, 1, 2, 3, 4, 5, 6])
+        # ax_right.set_xlim([0,55])
 
-        figx.show()
-        figx.savefig(filename.replace(".fig.pickle", ".pdf"), pad_inches=0.5, dpi=300)
+        # Increase axis and legend text size for the loaded figure.
+        for ax in figx.axes:
+            ax.tick_params(axis='both', labelsize=24)
+            ax.xaxis.label.set_size(26)
+            ax.yaxis.label.set_size(26)
+            ax.title.set_fontsize(26)
+            
+            # Increase marker sizes in all plot collections
+            for collection in ax.collections:
+                if hasattr(collection, 'set_sizes'):
+                    current_sizes = collection.get_sizes()
+                    if current_sizes is not None and len(current_sizes) > 0:
+                        collection.set_sizes(current_sizes + 4)
+                elif hasattr(collection, '_sizes'):
+                    current_sizes = collection._sizes
+                    if current_sizes is not None:
+                        collection._sizes = current_sizes + 4
+                # Ensure collections have a visible facecolor (fill) when hollow
+                try:
+                    # PathCollection: facecolors array may be empty for hollow markers
+                    facecolors = collection.get_facecolors()
+                    if facecolors is None or len(facecolors) == 0:
+                        edgecolors = None
+                        try:
+                            edgecolors = collection.get_edgecolors()
+                        except Exception:
+                            pass
+                        if edgecolors is not None and len(edgecolors) > 0:
+                            collection.set_facecolor(edgecolors)
+                        else:
+                            # Fallback: try to set to the collection color or a default
+                            try:
+                                col = collection.get_color()
+                                collection.set_facecolor(col)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            
+            # Also increase marker sizes for line objects
+            for line in ax.get_lines():
+                marker_size = line.get_markersize()
+                if marker_size > 0:
+                    line.set_markersize(marker_size + 4)
+                # Ensure Line2D markers are filled instead of hollow
+                try:
+                    if hasattr(line, 'set_fillstyle'):
+                        try:
+                            line.set_fillstyle('full')
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                try:
+                    mfc = None
+                    try:
+                        mfc = line.get_markerfacecolor()
+                    except Exception:
+                        mfc = None
+                    if mfc is None or mfc == 'none':
+                        try:
+                            line.set_markerfacecolor(line.get_color())
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+        # Ensure R2C1 subplot (third axis) has the correct ylabel
+        try:
+            if len(figx.axes) >= 3:
+                ax_r2c1 = figx.axes[2]
+                ax_r2c1.set_ylabel('Mean speedup factor')
+                ax_r2c1.yaxis.label.set_size(26)
+        except Exception:
+            pass
+
+        # Reposition existing legends to the top-right outside all subplots.
+        existing_legends = getattr(figx, 'legends', [])
+        if existing_legends:
+            for i, legend in enumerate(existing_legends):
+                legend.set_bbox_to_anchor((1.02, 0.98 - i * 0.18))
+                # legend.set_bbox_transform(figx.transFigure)
+                legend.set_loc('upper left')
+                for text in legend.get_texts():
+                    text.set_fontsize(24)
+                # Collect legend handles in a backwards-compatible way
+                if hasattr(legend, 'legendHandles'):
+                    handles = legend.legendHandles
+                else:
+                    # Fall back to common accessors available on Legend
+                    handles = []
+                    try:
+                        handles.extend(legend.get_lines())
+                    except Exception:
+                        pass
+                    try:
+                        handles.extend(legend.get_patches())
+                    except Exception:
+                        pass
+
+                for handle in handles:
+                    if hasattr(handle, 'set_fillstyle'):
+                        try:
+                            handle.set_fillstyle('full')
+                        except Exception:
+                            pass
+                    if hasattr(handle, 'set_markerfacecolor'):
+                        try:
+                            facecolor = handle.get_markerfacecolor()
+                        except Exception:
+                            facecolor = None
+                        if facecolor == 'none' or facecolor is None:
+                            if hasattr(handle, 'get_color'):
+                                try:
+                                    handle.set_markerfacecolor(handle.get_color())
+                                except Exception:
+                                    pass
+                title = legend.get_title()
+                if title is not None:
+                    title.set_fontsize(26)
+            figx.subplots_adjust(right=0.70)
+        else:
+            # Fallback: create a combined figure legend if no legends were saved.
+            all_handles = []
+            all_labels = []
+            for ax in figx.axes:
+                handles, labels = ax.get_legend_handles_labels()
+                for h, l in zip(handles, labels):
+                    if l not in all_labels:
+                        if hasattr(h, 'set_fillstyle'):
+                            h.set_fillstyle('full')
+                        if hasattr(h, 'set_markerfacecolor'):
+                            facecolor = h.get_markerfacecolor()
+                            if facecolor == 'none' or facecolor is None:
+                                if hasattr(h, 'get_color'):
+                                    h.set_markerfacecolor(h.get_color())
+                        all_handles.append(h)
+                        all_labels.append(l)
+            if all_handles:
+                figx.legend(all_handles, all_labels,
+                            loc='upper left', bbox_to_anchor=(1.02, 0.98),
+                            bbox_transform=figx.transFigure,
+                            frameon=True, title='Legend', fontsize=24, title_fontsize=26)
+                figx.subplots_adjust(right=0.70)
+
+        pdf_path = filename.replace(".fig.pickle", ".pdf")
+        if os.path.exists(pdf_path):
+            try:
+                os.remove(pdf_path)
+            except Exception as e:
+                print(f"Could not remove existing PDF {pdf_path}: {e}")
+        figx.savefig(pdf_path, bbox_inches='tight', pad_inches=0.5, dpi=300)
     # figx.savefig("data/2025-12-20_12-43_/osc_ConformalStormerVerletSolver_full_2.eps")
 
 # %%
@@ -572,9 +723,9 @@ def plot_pareto(time_lapsed, errors_r, errors_dr, solver_names, dt_space, data_f
             if j == 0:
                 h_full = line
 
-        ax.set_xlabel('Average Wall Time (s)')
+        ax.set_xlabel('Average wall time (s)')
         if i == 0:
-            ax.set_ylabel('Mean Global Error')
+            ax.set_ylabel('Mean global error')
         ax.set_title(f'{solver_name}')
         ax.grid(True, which="both", ls="-", alpha=0.3)
         
@@ -583,20 +734,246 @@ def plot_pareto(time_lapsed, errors_r, errors_dr, solver_names, dt_space, data_f
             line_handles.extend([h_red, h_hyper, h_full])
 
     # Create common legends below the subplots
-    line_labels = ['Reduced', 'Hyper-reduced', 'Full Model']
+    line_labels = ['Reduced', 'Hyper-reduced', 'Full model']
     marker_handles = [Line2D([0], [0], color='k', marker=markers[j % len(markers)], linestyle='None', label=f'dt={dt:.0e}') for j, dt in enumerate(dt_space)]
     
     # Adjust subplots to make room for legends at the bottom
     fig.tight_layout(rect=[0, 0.22, 1, 1])
     
-    leg1 = fig.legend(handles=line_handles, labels=line_labels, loc='lower center', bbox_to_anchor=(0.5, 0.12), ncol=3, title='Model Type', frameon=True)
+    leg1 = fig.legend(handles=line_handles, labels=line_labels, loc='lower center', bbox_to_anchor=(0.5, 0.12), ncol=3, title='Model type', frameon=True)
     fig.add_artist(leg1) # Add the first legend manually to avoid it being overwritten
     
-    fig.legend(handles=marker_handles, loc='lower center', bbox_to_anchor=(0.5, 0.02), ncol=len(dt_space), title='Time Step Size', frameon=True)
+    fig.legend(handles=marker_handles, loc='lower center', bbox_to_anchor=(0.5, 0.02), ncol=len(dt_space), title='Time step size', frameon=True)
         
     filename = os.path.join(data_folder, f"pareto_combined.pdf")
     fig.savefig(filename, bbox_inches='tight')
     print(f"Saved Pareto plot to {filename}")
+    plt.close(fig)
+
+
+
+def adjust_axis_limits(ax, data_points, axis='y', is_log_scale=False, max_steps=1):
+    """
+    Adjust axis limits based on data range and current tick intervals.
+    Extends limits by tick steps if data overflows.
+    """
+    if not data_points:
+        return
+
+    ax.relim()
+    ax.autoscale_view()
+
+    data_min = np.min(data_points)
+    data_max = np.max(data_points)
+    plt.draw()
+
+    if axis == 'x':
+        get_ticks = ax.get_xticks
+        set_lim = ax.set_xlim
+    elif axis == 'y':
+        get_ticks = ax.get_yticks
+        set_lim = ax.set_ylim
+    elif axis == 'z':
+        get_ticks = ax.get_zticks
+        set_lim = ax.set_zlim
+    else:
+        return
+
+    tick_values = get_ticks()
+    if len(tick_values) < 2: return
+
+    if is_log_scale:
+        log_ticks = np.log10(tick_values[tick_values > 0])
+        if len(log_ticks) < 2: return
+        
+        log_step = log_ticks[-1] - log_ticks[-2]
+        if log_step <= 1e-12: return 
+        new_min, new_max = log_ticks[0], log_ticks[-1]
+        
+        steps = 0
+        while new_max < np.log10(data_max) and steps < max_steps:
+            new_max += log_step
+            steps += 1
+        
+        if data_min > 0:
+            steps = 0
+            while new_min > np.log10(data_min) and steps < max_steps:
+                new_min -= log_step
+                steps += 1
+        
+        set_lim([10**new_min, 10**new_max])
+    else:
+        step = tick_values[1] - tick_values[0]
+        if step <= 1e-12: return
+        new_min, new_max = tick_values[0], tick_values[-1]
+        
+        steps = 0
+        while new_max < data_max and steps < max_steps:
+            new_max += step
+            steps += 1
+            
+        steps = 0
+        while new_min > data_min and steps < max_steps:
+            new_min -= step
+            steps += 1
+        
+        if axis == 'x' and 'dimension' in ax.get_xlabel().lower():
+            new_min = max(0, new_min)
+            
+        set_lim([new_min, new_max])
+
+
+def plot_error_vs_basis_size(basis_sizes, hr_basis_sizes, errors_r, errors_dr, solver_names, pod_tols, data_folder, **kwargs):
+    """
+    Plot ROM and HROM errors as a function of the reduced basis size.
+    Also plots speedup factors and convergence orders as box plots against dt.
+    Markers correspond to pod_tol values.
+    """
+    # Extract study data from kwargs
+    dt_space = kwargs.get('dt_space', [])
+    full_times_raw = kwargs.get('full_times_raw', {})
+    full_errs_raw = kwargs.get('full_errs_raw', {})    
+    times_r_raw = kwargs.get('times_r_raw', [])
+    times_dr_raw = kwargs.get('times_dr_raw', [])
+
+    fig, axes_grid = plt.subplots(2, 2, figsize=(22, 18.6))
+    ax_err_r, ax_err_dr = axes_grid[0]
+    ax_speed_r, ax_speed_dr = axes_grid[1]
+    # ax_conv_r, ax_conv_dr = axes_grid[2]
+    
+    col_axes = [ax_err_r, ax_err_dr]
+
+    # Define markers for pod_tols
+    tol_markers = ['o', 's', '^', 'D', 'v', '<', '>', 'p', 'h', '*']
+    marker_map = {tol: tol_markers[i % len(tol_markers)] for i, tol in enumerate(pod_tols)}
+
+    # Define line styles and colors for solvers
+    solver_linestyles = ['-', '--', ':', '-.']
+    solver_colors = OKABE_ITO_PALETTE # Use the colorblind-safe palette
+
+    # Store handles for legends
+    marker_handles = []
+    
+    # To ensure marker legend elements are unique
+    added_marker_labels = set()
+    
+    # Row 1: Max Error vs Dimension
+    for ax_idx, ax in enumerate(col_axes):
+        configure_axis(ax)
+        ax.tick_params(axis='both', labelsize=24)
+        all_x_col, all_y_col = [], []
+        curr_max_x = (2 * np.nanmax(np.concatenate(basis_sizes)) if ax_idx == 0 else 2 * np.nanmax(np.concatenate(hr_basis_sizes))) if basis_sizes else 1
+
+        for i, name in enumerate(solver_names):
+            color = solver_colors[i % len(solver_colors)]
+            x_sizes_raw = basis_sizes[i] if ax_idx == 0 else hr_basis_sizes[i]
+            err_mats = errors_r[i] if ax_idx == 0 else errors_dr[i]
+
+            for j, tol in enumerate(pod_tols):
+                e_data = err_mats[j]
+                if not np.isnan(x_sizes_raw[j]) and isinstance(e_data, np.ndarray) and e_data.size > 0:
+                    x_plot_val = 2 * x_sizes_raw[j]
+                    # Average over Omega2 (axis 1)
+                    mean_errors = np.nanmean(e_data, axis=1)
+                    alpha = 0.7
+                    
+                    for k in range(len(dt_space)):
+                        if not np.isnan(mean_errors[k]):
+                            ax.semilogy(x_plot_val, mean_errors[k], marker=marker_map[tol], 
+                                        color=color, alpha=alpha, markersize=14 if ax_idx == 0 else 12,
+                                        fillstyle='full', 
+                                        markerfacecolor=color, linestyle='None')
+                            all_y_col.append(mean_errors[k])
+                    
+                    all_x_col.append(x_plot_val)
+                    if tol not in added_marker_labels:
+                        marker_handles.append(Line2D([0], [0], marker=marker_map[tol], color='k', linestyle='None',
+                                                     label=f'{tol:.0e}', markersize=8, alpha=0.7))
+                        added_marker_labels.add(tol)
+
+        ax.set_ylabel('Mean max relative error' if ax_idx == 0 else '')
+        ax.set_xlabel(r'Reduced dimension $2r$' if ax_idx == 0 else r'Hyper-reduced dimension $2\ell$')
+        ax.xaxis.label.set_size(26)
+        ax.yaxis.label.set_size(26)
+        ax.title.set_fontsize(26)
+        adjust_axis_limits(ax, all_x_col, axis='x', is_log_scale=False, max_steps=5)
+        adjust_axis_limits(ax, all_y_col, axis='y', is_log_scale=True, max_steps=5)
+
+    # --- Row 2: Speedup Factor (Box plots vs dt) ---
+    for ax_idx, (ax, data_type) in enumerate(zip([ax_speed_r, ax_speed_dr], ['times_r_raw', 'times_dr_raw'])):
+        configure_axis(ax)
+        ax.tick_params(axis='both', labelsize=24)
+        ax.set_ylabel('Mean speedup factor' if ax_idx == 0 else '')
+        ax.set_xlabel(r'Time step-size $\Delta t$')
+        ax.xaxis.label.set_size(26)
+        ax.yaxis.label.set_size(26)
+        ax.title.set_fontsize(26)
+        ax.axhline(y=1.0, color='black', linestyle='--', alpha=0.5, linewidth=1)
+        
+        times_raw_list = kwargs.get(data_type, [])
+        positions = np.arange(len(dt_space))
+        n_solvers = len(solver_names)
+        n_tols = len(pod_tols)
+        width = 0.8 / (n_solvers * n_tols)
+        dt_exponents = np.log2(dt_space)
+        all_speedups = []
+
+        for i, name in enumerate(solver_names):
+            color = solver_colors[i % len(solver_colors)]
+            for t_idx, tol in enumerate(pod_tols):
+                alpha = 0.7
+                offset = (i * n_tols + t_idx - (n_solvers * n_tols - 1) / 2) * width
+                
+                for d_idx in range(len(dt_space)):
+                    t_red_mat = times_raw_list[i][t_idx]
+                    t_full_mat = full_times_raw.get(name)
+                    if isinstance(t_red_mat, np.ndarray) and t_full_mat is not None:
+                        speedup_vals = t_full_mat[d_idx] / t_red_mat[d_idx]
+                        mean_s = np.nanmean(speedup_vals)
+                        if not np.isnan(mean_s):
+                            ax.plot(positions[d_idx] + offset, mean_s, marker=marker_map[tol], 
+                                    color=color, alpha=alpha, markersize=14, linestyle='None')
+                            all_speedups.append(mean_s)
+
+        adjust_axis_limits(ax, all_speedups, axis='y', is_log_scale=False, max_steps=10)
+        ax.set_xticks(positions)
+        ax.set_xticklabels([rf"$2^{{{int(exp)}}}$" for exp in dt_exponents])
+
+        # Custom "bin" brackets for x-axis to group markers per step-size
+        for pos in positions:
+            ax.plot([pos - 0.4, pos - 0.4, pos + 0.4, pos + 0.4], 
+                    [-0.03, 0, 0, -0.03], transform=ax.get_xaxis_transform(), 
+                    color='black', linewidth=1.5, clip_on=False, linestyle='-')
+        ax.tick_params(axis='x', which='both', length=0)
+
+    solver_handles = [
+        Line2D([0], [0], color=solver_colors[i], lw=4, alpha=0.5,
+               label="Model 1" if "StormerVerlet" in name else "Model 2" if "DiscreteGradient" in name else name)
+        for i, name in enumerate(solver_names)
+    ]
+    solver_handles.sort(key=lambda h: h.get_label())
+
+    # Create combined tolerance legend (marker shape + transparency)
+    combined_tol_handles = [
+        Line2D([0], [0], marker=marker_map[tol], color='k', linestyle='None', 
+               alpha=0.7,
+               label=f'{tol:.0e}', markersize=10)
+               for j, tol in enumerate(pod_tols)
+    ]
+
+    # Place legends outside the 2x2 axes in the top-right corner (stacked)
+    legend1 = fig.legend(handles=solver_handles, title="Model", loc='upper left', bbox_to_anchor=(0.92, 0.98), bbox_transform=fig.transFigure, fontsize=20, title_fontsize=22, frameon=True)
+    fig.add_artist(legend1)
+    legend2 = fig.legend(handles=combined_tol_handles, title="POD Tolerance", loc='upper left', bbox_to_anchor=(0.92, 0.82), bbox_transform=fig.transFigure, fontsize=20, title_fontsize=22, frameon=True)
+    fig.add_artist(legend2)
+
+    # Increase right margin so legends don't overlap the subplots
+    plt.subplots_adjust(right=0.70, hspace=0.4, wspace=0.25)
+
+
+    filename = os.path.join(data_folder, "error_vs_basis_size.pdf")
+    save_figure(fig, filename)
+    print(f"Saved Error vs. Basis Size plot to {filename}")
     plt.close(fig)
 
 # %% Testing

@@ -91,8 +91,10 @@ class SysConfig:
     # Solver and reduction settings
     tol, M, var, store = 1.0E-12, 500, True, False
     tol_reduced = 1.0E-8
-    pod_tol_ham = 1e-5
-    pod_tol_dg = 1e-6
+    # pod_tol_ham = 1e-10
+    # pod_tol_dg = 1e-10
+    pod_tol_sweep = [1e-4] #, 1e-6, 1e-8, 1e-10] # must be in descending order
+    assert all(pod_tol_sweep[i] >= pod_tol_sweep[i + 1] for i in range(len(pod_tol_sweep) - 1)), "pod_tol_sweep must be in descending order"
     
     predict = True # False = reproduce results of the full model
     train_ratio = 0.8
@@ -109,14 +111,14 @@ class SysConfig:
         # Time-stepping parameters
         dt_space_dim = 1
         dt_space = np.array([0.01])
-        T_final = dt_space[-1] * 3e2
+        T_final = dt_space[-1] * 1e3
 
         # Parameter space for Omega^2
         _Omega2_space_dim = nosc // 3 - 2
     else: # reproduction parameters
         # Time-stepping parameters
         dt_space_dim = 5
-        dt_space = np.logspace(-4, -4 - dt_space_dim, num=dt_space_dim, base=2)
+        dt_space = np.logspace(-4, -4 - dt_space_dim, num=dt_space_dim, base=2, endpoint=False)
         T_final = 0.1
 
         # Parameter space for Omega^2
@@ -124,7 +126,7 @@ class SysConfig:
 
     # Generate random parameter space for Omega^2 in range (0, 10]
     num_freqs = nosc // 3 - 2
-    _Omega2_space = np.sort(3 * (1 - rng.random((_Omega2_space_dim, num_freqs))), axis=1)
+    _Omega2_space = 3 * (1 - rng.random((_Omega2_space_dim, num_freqs)))
 
     # Freeze higher frequencies across samples to match the first sample
     # freeze_idx = _Omega2_space_dim // 2
@@ -215,19 +217,19 @@ class MechSystem(SysConfig):
         return self.ham_(y, self.Omega2, beta)
 
     def ham_z_lambda(self, y, beta=0):
-        return self.ham_z_(y, self.Omega2, beta).squeeze()
+        return self.ham_z_(y, self.Omega2, beta)
 
     def ham_zz_lambda(self, y, beta=0):
         return self.ham_zz_(y, self.Omega2, beta)
 
     def lag_dg_lambda(self, y):
-        return self.lag_dg_(*y, self.Omega2).squeeze()
+        return self.lag_dg_(*y, self.Omega2)
 
     def lag_dg_z_lambda(self, y):
         return self.lag_dg_z_(*y, self.Omega2)
 
     def g__lambda(self, y):
-        return self.g_(y).squeeze()
+        return self.g_(y)
 
     def g_prime__lambda(self, y):
         return self.g_prime_(y)
@@ -238,21 +240,21 @@ class MechSystem(SysConfig):
         return self.g_prime_x_lambda_y_(y, lag_mult)
 
     def ham_z_reduced(self, y, beta=0):
-        return self.RB.T @ self.ham_z_(y @ self.RB.T, self.Omega2, beta).squeeze()
+        return self.RB.T @ self.ham_z_(y @ self.RB.T, self.Omega2, beta)
 
     def ham_zz_reduced(self, y, beta=0):
         # print(f'Computing ham_zz inside ham_zz_reduced')
         return self.RB.T @ self.ham_zz_(y @ self.RB.T, self.Omega2, beta) @ self.RB
 
     def lag_dg_reduced(self, y):
-        return self.RB.T @ self.lag_dg_(*(y @ self.RB.T), self.Omega2).squeeze()
+        return self.RB.T @ self.lag_dg_(*(y @ self.RB.T), self.Omega2)
 
     def lag_dg_z_reduced(self, y):
         # print(f'Computing lag_dg_z inside lag_dg_z_reduced')
         return self.RB.T @ self.lag_dg_z_(*(y @ self.RB.T), self.Omega2) @ self.RB
 
     def g_reduced(self, y):
-        return self.g_(y @ self.RB.T).squeeze()
+        return self.g_(y @ self.RB.T)
 
     def g_prime_reduced(self, y):
         return self.g_prime_(y @ self.RB.T) @ self.RB
@@ -289,7 +291,7 @@ class MechSystem(SysConfig):
                 self.g_prime_x_lambda_y = wrapped_gpxy
             
     def ham_z_hyperreduced(self, y, beta=0):
-        return self.RBxUx_inv_PxU @ np.squeeze(self.ham_z_deim(y @ self.RB.T, self.Omega2, beta))
+        return self.RBxUx_inv_PxU @ self.ham_z_deim(y @ self.RB.T, self.Omega2, beta)
 
     def ham_zz_hyperreduced(self, y, beta=0):
         return self.RBxUx_inv_PxU @ self.ham_zz_deim(y @ self.RB.T, self.Omega2, beta) @ self.RB
@@ -301,7 +303,7 @@ class MechSystem(SysConfig):
         ) @ self.RB
 
     def lag_dg_hyperreduced(self, y):
-        return self.RBxUx_inv_PxU @ np.squeeze(self.lag_dg_deim(*(y @ self.RB.T), self.Omega2))
+        return self.RBxUx_inv_PxU @ self.lag_dg_deim(*(y @ self.RB.T), self.Omega2)
 
     def lag_dg_z_hyperreduced(self, y):
         return self.RBxUx_inv_PxU @ self.lag_dg_z_deim(*(y @ self.RB.T), self.Omega2) @ self.RB
@@ -313,7 +315,7 @@ class MechSystem(SysConfig):
         ) @ self.RB
 
     def g_hyperreduced(self, y):
-        return (self._Ux_inv_PxU @ self.g_deim(y @ self.RB.T)).squeeze()
+        return (self._Ux_inv_PxU @ self.g_deim(y @ self.RB.T))
 
     def g_prime_hyperreduced(self, y):
         return np.reshape(

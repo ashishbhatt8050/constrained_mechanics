@@ -24,7 +24,12 @@ class ShapeWrapper:
                 new_args.append(arg.flatten())
             else:
                 new_args.append(arg)
-        return self.func(*new_args)
+        
+        result = self.func(*new_args)
+        # Flatten output if it's a column vector (N, 1)
+        if isinstance(result, np.ndarray) and result.ndim == 2 and result.shape[1] == 1:
+            return result.flatten()
+        return result
 
 def _run_method(computer, method_name, *args):
     """Helper to run a method and return cloudpickled result."""

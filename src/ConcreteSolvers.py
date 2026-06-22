@@ -79,7 +79,7 @@ class BaseSolverMixin:
         if k > 0 and hasattr(self, 'Lambda'): # and isinstance(self, ConformalStormerVerlet):
             Lambda = self.Lambda[k].copy()
         else:
-            Lambda = np.zeros_like(self.g_(np.zeros(2*self.nosc))).squeeze()
+            Lambda = np.zeros_like(self.g_(np.zeros(2*self.nosc)))
 
         if self.constraint_type:
             self.fixed_point(y_, Lambda)
@@ -216,32 +216,40 @@ class BaseSolverMixin:
             kwds_future = client.scatter(kwds, broadcast=True)
 
         for x in kwds['registered_solver_classes']:
+            # Check if this is a reduced solver class that failed setup (RB is None)
+            is_reduced_type = any(sub in x.__name__ for sub in ['Reduced', 'HyperReduced'])
+            rb_is_missing = is_reduced_type and getattr(x, 'RB', None) is None
+            
             for y in MechSystem.dt_space:
                 for z in kwds["Omega2_space"]:
-                    # If using dask, pass the future to the data. Otherwise, pass the data itself.
-                    kwds_arg = kwds_future if client else kwds
-                    args.append((x, y, z, kwds_arg))
+                    if rb_is_missing:
+                        args.append(None)
+                    else:
+                        # If using dask, pass the future to the data. Otherwise, pass the data itself.
+                        kwds_arg = kwds_future if client else kwds
+                        args.append((x, y, z, kwds_arg))
 
         if client and len(args) > 0:
             print(f"Submitting {len(args)} tasks to existing Dask cluster...", flush=True)
-            # Pre-allocate MSsolvers with None values
-            MSsolvers.extend([None] * len(args))
-
-            futures = [client.submit(_dask_worker, i, *arg) for i, arg in enumerate(args)]
+            
+            # Identify which arguments are valid tasks vs skipped ones
+            valid_indices = [i for i, a in enumerate(args) if a is not None]
+            valid_args = [a for a in args if a is not None]
+            
+            # Submit only valid tasks
+            futures = [client.submit(_dask_worker, i, *a) for i, a in zip(valid_indices, valid_args)]
             
             # Gather results (blocks until all are done)
             # client.gather returns results in the same order as futures list
-            results = client.gather(futures, errors='raise')
+            gathered_results = client.gather(futures, errors='raise')
             
-            # Store results in correct order
-            for i, res in enumerate(results):
-                if isinstance(res, Exception):
-                    print(f"Task {i} failed with error: {res}", flush=True)
-                    MSsolvers[i] = None
-                else:
-                    MSsolvers[i] = res
-                if (i + 1) % 10 == 0:
-                    print(f"Retrieved {i+1}/{len(args)} results", flush=True)
+            # Align results back into the full MSsolvers list, preserving None for skips
+            results = [None] * len(args)
+            for idx, res in zip(valid_indices, gathered_results):
+                 if not isinstance(res, Exception):
+                     results[idx] = res
+
+            MSsolvers.extend(results)
             
             print("Parallel processing complete.", flush=True)
         else:
@@ -316,8 +324,9 @@ class BaseSolverMixin:
 
         # Try to load from checkpoint
         checkpoint_path = os.path.join('data', f'{MechSystem.keep_time}')
-        kwds_file = os.path.join(checkpoint_path, 'kwds_r.joblib')
-        solvers_file = os.path.join(checkpoint_path, 'solvers_r.joblib')
+        tol_suffix = f"tol_{MechSystem.pod_tol_ham:.1e}"
+        kwds_file = os.path.join(checkpoint_path, f'kwds_r_{tol_suffix}.joblib')
+        solvers_file = os.path.join(checkpoint_path, f'solvers_r_{tol_suffix}.joblib')
 
         if os.path.exists(checkpoint_path) and os.path.exists(kwds_file) and os.path.exists(solvers_file):
             try:
@@ -335,8 +344,8 @@ class BaseSolverMixin:
             ham_solvers = [s for s in solvers if not isinstance(s, DiscreteGradient)]
             dg_solvers = [s for s in solvers if isinstance(s, DiscreteGradient)]
             
-            ham_classes = [REDUCED_SOLVER_MAPPING[c] for c in kwds['registered_solver_classes'] if issubclass(c, (ConformalStormerVerlet, ConformalImplicitMidpoint))]
-            dg_classes = [REDUCED_SOLVER_MAPPING[c] for c in kwds['registered_solver_classes'] if issubclass(c, DiscreteGradient)]
+            ham_classes = [REDUCED_SOLVER_MAPPING.get(c, c) for c in kwds['registered_solver_classes'] if issubclass(c, (ConformalStormerVerlet, ConformalImplicitMidpoint))]
+            dg_classes = [REDUCED_SOLVER_MAPPING.get(c, c) for c in kwds['registered_solver_classes'] if issubclass(c, DiscreteGradient)]
             
             if ham_solvers:
                 HamiltonianReducer.setup_reduced_model(ham_solvers, ham_classes)
@@ -372,8 +381,9 @@ class BaseSolverMixin:
 
         # Try to load from checkpoint
         checkpoint_path = os.path.join('data', f'{MechSystem.keep_time}')
-        kwds_file = os.path.join(checkpoint_path, 'kwds_dr.joblib')
-        solvers_file = os.path.join(checkpoint_path, 'solvers_dr.joblib')
+        tol_suffix = f"tol_{MechSystem.pod_tol_ham:.1e}"
+        kwds_file = os.path.join(checkpoint_path, f'kwds_dr_{tol_suffix}.joblib')
+        solvers_file = os.path.join(checkpoint_path, f'solvers_dr_{tol_suffix}.joblib')
 
         if os.path.exists(checkpoint_path) and os.path.exists(kwds_file) and os.path.exists(solvers_file):
             try:
@@ -388,8 +398,8 @@ class BaseSolverMixin:
             ham_solvers = [s for s in solvers if not isinstance(s, DiscreteGradient)]
             dg_solvers = [s for s in solvers if isinstance(s, DiscreteGradient)]
             
-            ham_classes = [HYPERREDUCED_SOLVER_MAPPING[c] for c in kwds['registered_solver_classes'] if issubclass(c, (ConformalStormerVerlet, ConformalImplicitMidpoint))]
-            dg_classes = [HYPERREDUCED_SOLVER_MAPPING[c] for c in kwds['registered_solver_classes'] if issubclass(c, DiscreteGradient)]
+            ham_classes = [HYPERREDUCED_SOLVER_MAPPING.get(c, c) for c in kwds['registered_solver_classes'] if issubclass(c, (ConformalStormerVerlet, ConformalImplicitMidpoint))]
+            dg_classes = [HYPERREDUCED_SOLVER_MAPPING.get(c, c) for c in kwds['registered_solver_classes'] if issubclass(c, DiscreteGradient)]
 
             if ham_classes:
                 HamiltonianReducer.setup_hyperreduction(ham_classes)
@@ -632,7 +642,8 @@ class DiscreteGradientFixedPointMixin:
         while m < self.M:
 
             # Update residual and tangent
-            resi, tang = self.residual(x[0], x[1], Lambda)
+            resi, tang = self.residual(x[0], x[1], Lambda) 
+            assert resi.ndim == 1, f"DiscreteGradient FixedPoint: resi must be 1D, got {resi.shape}"
 
             Delta_z = -LA.lstsq(tang, resi, rcond=None)[0]
             x[1] = x[1] + Delta_z[:x[1].shape[0]]
@@ -688,7 +699,7 @@ class ConformalStormerVerletFixedPointMixin:
         m = 0
         while m < self.M:
             # p_{n+1/2}
-            p_half1 = p_half_unconstrained - 0.5 * dt * G_q0.T @ Lambda_1
+            p_half1 = p_half_unconstrained - 0.5 * dt * G_q0.T @ Lambda_1 # Lambda_1 is 1D
             
             # q_{n+1}
             q_next = q0 + dt * f(np.concatenate([q0, p_half1]), None)[:neq]
@@ -696,6 +707,7 @@ class ConformalStormerVerletFixedPointMixin:
             
             # Check position constraints
             g_pos = self.g(x[1])[:i0]
+            assert g_pos.ndim == 1, f"StormerVerlet FixedPoint: g_pos must be 1D, got {g_pos.shape}"
             norm_g_pos = LA.norm(g_pos)
             
             if np.isnan(norm_g_pos):
@@ -727,7 +739,8 @@ class ConformalStormerVerletFixedPointMixin:
             x[1, neq:] = p_next
             
             # Check velocity constraints
-            g_vel = self.g(x[1])[i0:]
+            g_vel = self.g(x[1])[i0:] # g_vel is (N,1)
+            assert g_vel.ndim == 1, f"StormerVerlet FixedPoint: g_vel must be 1D, got {g_vel.shape}"
             norm_g_vel = LA.norm(g_vel)
             
             if np.isnan(norm_g_vel):
@@ -847,7 +860,11 @@ REDUCED_SOLVER_MAPPING = {
     # Map reduced to reduced (idempotent)
     ReducedDiscreteGradientSolver: ReducedDiscreteGradientSolver,
     ReducedConformalStormerVerletSolver: ReducedConformalStormerVerletSolver,
-    ReducedConformalImplicitMidpointSolver: ReducedConformalImplicitMidpointSolver
+    ReducedConformalImplicitMidpointSolver: ReducedConformalImplicitMidpointSolver,
+    # Map hyperreduced back to reduced (idempotent for tier lookup)
+    HyperReducedDiscreteGradientSolver: ReducedDiscreteGradientSolver,
+    HyperReducedConformalStormerVerletSolver: ReducedConformalStormerVerletSolver,
+    HyperReducedConformalImplicitMidpointSolver: ReducedConformalImplicitMidpointSolver
 }
 
 HYPERREDUCED_SOLVER_MAPPING = {

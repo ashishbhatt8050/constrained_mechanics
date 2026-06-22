@@ -6,7 +6,7 @@ authors:
   affiliation: "Vellore Institute of Technology"
   email: "ashish.bhatt@vit.ac.in"
 title: "Constrained Mechanics Solvers: Structure-Preserving MOR Framework"
-version: 0.1.0
+version: 0.2.0
 date-released: 2024-06-01
 url: "https://github.com/ashishbhatt8050/constrained_mechanics"
 license: MIT

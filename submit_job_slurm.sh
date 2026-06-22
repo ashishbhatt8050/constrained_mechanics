@@ -60,7 +60,7 @@ which latex || echo "Warning: 'latex' not found. Matplotlib usetex=True will fai
 # which gs || echo "Warning: 'gs' (Ghostscript) not found. Matplotlib usetex=True will fail."
 
 # Run on CPU by default. To run on GPU, add --device gpu
-{ time python -u scripts/app8_lattice.py --clear-cache | tee logfile.txt; } 2>>logfile.txt &
+{ time python -u scripts/app8_lattice.py | tee logfile.txt; } 2>>logfile.txt &
 PYTHON_PID=$!
 
 # Start monitoring in background (only useful in interactive SLURM allocations)
@@ -213,7 +213,7 @@ except Exception as e:
 TIMING_EOF
 
 # Move the SLURM output file to the latest data directory
-LATEST_DATA_DIR=$(ls -td data/*/ | head -n 1)
+LATEST_DATA_DIR=$(ls -td data/*/ | grep -v "joblib_cache" | head -n 1)
 if [ -d "$LATEST_DATA_DIR" ]; then
     mv "app8_lattice-${SLURM_JOB_ID}.out" "$LATEST_DATA_DIR"
 fi

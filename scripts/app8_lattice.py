@@ -38,10 +38,84 @@ from ConcreteSolvers import (BaseSolverMixin, DiscreteGradientSolver,
                             ConformalStormerVerletSolver, ConformalImplicitMidpointSolver,
                             REDUCED_SOLVER_MAPPING, HYPERREDUCED_SOLVER_MAPPING)
 from ReduceMechSystem import ReduceMechSystem
-from System import MechSystem, HamiltonianMechSystem, LagrangianMechSystem, load_symbolic_expressions
+from System import MechSystem, HamiltonianMechSystem, LagrangianMechSystem, load_symbolic_expressions, fast_dump, fast_load
 from SymbolicComputer import IndexedBaseSymbolicComputer, manage_cache
-from PlotScript import plot_omega_distribution, plot_pareto, plot_error_vs_basis_size
+from PlotScript import plot_omega_distribution, plot_pareto, plot_error_vs_basis_size, plot_prediction_results
 
+# ---------------------------------------------------------------------------
+# Helper functions for prediction-mode metric collection
+# ---------------------------------------------------------------------------
+def _matches_solver_family(solver, base_cls):
+    """Check if a solver belongs to the same family as base_cls (handles
+    Reduced/HyperReduced naming variants)."""
+    if solver is None:
+        return False
+    solver_class = getattr(solver, 'solver_class', None)
+    if solver_class is None:
+        return False
+    if solver_class is base_cls:
+        return True
+    if issubclass(solver_class, base_cls):
+        return True
+    if issubclass(base_cls, solver_class):
+        return True
+    # IMPORTANT: replace 'HyperReduced' BEFORE 'Reduced', otherwise
+    # 'HyperReduced' → 'Hyper' and the second replace can't catch it.
+    return (solver_class.__name__.replace('HyperReduced', '').replace('Reduced', '')
+            == base_cls.__name__.replace('HyperReduced', '').replace('Reduced', ''))
+
+
+def _collect_metric(solver_list, cls, metric_fn):
+    """Collect a scalar metric from every solver in *solver_list* that matches
+    *cls*, using *metric_fn(solver)* to extract the value.  Returns a 2-D
+    numpy array of shape (dt_space_dim, -1) ready to be appended to
+    *study_data*."""
+    values = [metric_fn(s) if s and _matches_solver_family(s, cls) else np.nan
+              for s in solver_list]
+    return np.array(values).reshape(MechSystem.dt_space_dim, -1)
+
+
+def _compute_lin_mom_error(solver):
+    """Max deviation of linear momentum from its initial value."""
+    nosc = solver.nosc
+    lin_mom = np.sum(solver.y[:, nosc:].reshape(-1, nosc // 3, 3), axis=1)
+    return np.amax(r_[0, LA.norm(lin_mom[1:] - lin_mom[0], axis=1)])
+
+
+def _compute_ang_mom_error(solver):
+    """Max deviation of angular momentum from its initial value."""
+    nosc = solver.nosc
+    q = solver.y[:, :nosc].reshape(-1, nosc // 3, 3)
+    p = solver.y[:, nosc:].reshape(-1, nosc // 3, 3)
+    ang_mom = np.sum(np.cross(q, p), axis=1)
+    return np.amax(r_[0, LA.norm(ang_mom[1:] - ang_mom[0], axis=1)])
+
+
+def _compute_phase_error(solver):
+    """Max constraint violation (‖g_λ(y)‖) over the whole trajectory."""
+    return np.amax([LA.norm(solver.g__lambda(y)) for y in solver.y])
+
+
+# ---------------------------------------------------------------------------
+# Metric descriptors – used to drive the repetitive collection loop
+# ---------------------------------------------------------------------------
+# Each entry: (study_data_key_prefix, extractor_function, guard_check)
+#   study_data_key_prefix:  e.g. 'sym_error' → keys 'sym_error_f/r/dr'
+#   extractor_function:     callable(solver) → scalar metric value
+#   guard_check:            callable(solver_list) → bool; if False the metric
+#                           is skipped entirely for this tolerance
+_PREDICTION_METRICS = [
+    ('sym_error',   lambda s: np.amax(s.sym_error),   lambda sl: hasattr(sl[0], 'sym_error')),
+    ('energy_error', lambda s: np.amax(s.eng_error),   lambda sl: hasattr(sl[0], 'eng_error')),
+    ('phase_error',  _compute_phase_error,             lambda sl: True),
+    ('lin_mom_error', _compute_lin_mom_error,           lambda sl: True),
+    ('ang_mom_error', _compute_ang_mom_error,           lambda sl: True),
+]
+
+
+# ===========================================================================
+# Main script
+# ===========================================================================
 if __name__ == '__main__':
     """
     Model order reduction of the MechSystem using concrete solvers
@@ -93,8 +167,7 @@ if __name__ == '__main__':
         print(f'Computed symbolic expressions in {tl:.2f} seconds.')
         
         os.makedirs('data', exist_ok=True)
-        with open(expressions_file, 'wb') as f:
-            pickle.dump(expressions, f)
+        fast_dump(expressions, expressions_file)
         
         # Load them now that they exist
         load_symbolic_expressions(HamiltonianMechSystem)
@@ -184,14 +257,14 @@ if __name__ == '__main__':
 
         if os.path.exists(checkpoint_path) and os.path.exists(kwds_file) and os.path.exists(solvers_file):
             print("Loading full solution from checkpoint...")
-            with open(kwds_file, 'rb') as f: kwds = pickle.load(f)
-            with open(solvers_file, 'rb') as f: solvers = pickle.load(f)
+            kwds = fast_load(kwds_file)
+            solvers = fast_load(solvers_file)
         else:
             BaseSolverMixin.parallel_solve_mech_system(kwds, solvers, client=client)
             os.makedirs(checkpoint_path, exist_ok=True)
             print("Creating new checkpoint for full model...")
-            with open(kwds_file, 'wb') as f: pickle.dump(kwds, f)
-            with open(solvers_file, 'wb') as f: pickle.dump(solvers, f)
+            fast_dump(kwds, kwds_file)
+            fast_dump(solvers, solvers_file)
         BaseSolverMixin.measures(kwds, solvers)
 
         # --- Reduced order solution ---
@@ -203,7 +276,15 @@ if __name__ == '__main__':
         })
 
         # --- Basis Size Study ---
-        study_data = {cls.__name__: {'sizes': [], 'sizes_dr': [], 'err_r': [], 'err_dr': [], 'times_r': [], 'times_dr': []} for cls in original_solver_classes}
+        study_data = {cls.__name__: {
+            'sizes': [], 'sizes_dr': [], 'err_r': [], 'err_dr': [],
+            'times_f': [], 'times_r': [], 'times_dr': [],
+            'sym_error_f': [], 'sym_error_r': [], 'sym_error_dr': [], 
+            'phase_error_f': [], 'phase_error_r': [], 'phase_error_dr': [],
+            'energy_error_f': [], 'energy_error_r': [], 'energy_error_dr': [],
+            'lin_mom_error_f':[], 'lin_mom_error_r': [], 'lin_mom_error_dr': [],
+            'ang_mom_error_f': [], 'ang_mom_error_r': [], 'ang_mom_error_dr': []
+        } for cls in original_solver_classes}
 
         for tol in MechSystem.pod_tol_sweep:
             print(f"\n>>> Running MOR sweep for tolerance: {tol}")
@@ -217,77 +298,148 @@ if __name__ == '__main__':
             solvers_dr = BaseSolverMixin.setup_and_solve_hyperreduced_system(kwds, solvers, client=client)
 
             # Calculate errors for this tolerance
-            for cls_idx, cls in enumerate(original_solver_classes):
-                errs_r_for_tol = []
-                errs_dr_for_tol = []
-                nosc_r_for_tol = np.nan # Will be set by the first successful solver
-                nosc_dr_for_tol = np.nan
+            if not MechSystem.predict:
+                for cls_idx, cls in enumerate(original_solver_classes):
+                    errs_r_for_tol = []
+                    errs_dr_for_tol = []
+                    nosc_r_for_tol = np.nan # Will be set by the first successful solver
+                    nosc_dr_for_tol = np.nan
 
-                # Iterate through all solvers to ensure strict alignment between full, reduced, and hyper-reduced results
-                for s_f, s_r, s_dr in zip(solvers, solvers_r, solvers_dr):
-                    # Only calculate error if the full order reference corresponds to the current class
-                    if s_f is not None and s_f.solver_class == cls:
-                        # Convergence check: both reduced and hyper-reduced solvers must have succeeded
-                        if s_r is not None and s_dr is not None:
-                            current_err_r = np.amax(abs(s_f.y - s_r.y)) / np.amax(abs(s_f.y))
-                            current_err_dr = np.amax(abs(s_f.y - s_dr.y)) / np.amax(abs(s_f.y))
+                    # Iterate through all solvers to ensure strict alignment between full, reduced, and hyper-reduced results
+                    for s_f, s_r, s_dr in zip(solvers, solvers_r, solvers_dr):
+                        # Only calculate error if the full order reference corresponds to the current class
+                        if s_f is not None and s_f.solver_class == cls:
+                            # Convergence check: both reduced and hyper-reduced solvers must have succeeded
+                            if s_r is not None and s_dr is not None:
+                                current_err_r = np.amax(abs(s_f.y - s_r.y)) / np.amax(abs(s_f.y))
+                                current_err_dr = np.amax(abs(s_f.y - s_dr.y)) / np.amax(abs(s_f.y))
 
-                            errs_r_for_tol.append(current_err_r)
-                            errs_dr_for_tol.append(current_err_dr)
+                                errs_r_for_tol.append(current_err_r)
+                                errs_dr_for_tol.append(current_err_dr)
 
-                            if np.isnan(nosc_r_for_tol): # Capture the basis size for this tolerance level
-                                nosc_r_for_tol = s_r.nosc_r                            
-                            if np.isnan(nosc_dr_for_tol):
-                                nosc_dr_for_tol = s_dr.RBxUx_inv_PxU.shape[1]//2
+                                if np.isnan(nosc_r_for_tol): # Capture the basis size for this tolerance level
+                                    nosc_r_for_tol = s_r.nosc_r                            
+                                if np.isnan(nosc_dr_for_tol):
+                                    nosc_dr_for_tol = s_dr.RBxUx_inv_PxU.shape[1]//2
 
-                # Capture raw timing and errors for box plots
-                times_r_list = [s.time_lapsed[0] if s else np.nan for s_f, s in zip(solvers, solvers_r) if s_f is not None and s_f.solver_class == cls]
-                times_dr_list = [s.time_lapsed[0] if s else np.nan for s_f, s in zip(solvers, solvers_dr) if s_f is not None and s_f.solver_class == cls]
-                
-                study_data[cls.__name__]['times_r'].append(np.array(times_r_list).reshape(MechSystem.dt_space_dim, -1))
-                study_data[cls.__name__]['times_dr'].append(np.array(times_dr_list).reshape(MechSystem.dt_space_dim, -1))
+                    # Capture raw timing and errors for box plots
+                    times_r_list = [s.time_lapsed[0] if s else np.nan for s_f, s in zip(solvers, solvers_r) if s_f is not None and s_f.solver_class == cls]
+                    times_dr_list = [s.time_lapsed[0] if s else np.nan for s_f, s in zip(solvers, solvers_dr) if s_f is not None and s_f.solver_class == cls]
+                    
+                    study_data[cls.__name__]['times_r'].append(np.array(times_r_list).reshape(MechSystem.dt_space_dim, -1))
+                    study_data[cls.__name__]['times_dr'].append(np.array(times_dr_list).reshape(MechSystem.dt_space_dim, -1))
 
-                # Print success counts for monitoring
-                num_success = len(errs_r_for_tol)
-                num_expected = sum(1 for s in solvers if s and s.solver_class == cls)
-                print(f"  [{cls.__name__}] Successful solvers for tol={tol}: {num_success}/{num_expected}")
+                    # Print success counts for monitoring
+                    num_success = len(errs_r_for_tol)
+                    num_expected = sum(1 for s in solvers if s and s.solver_class == cls)
+                    print(f"  [{cls.__name__}] Successful solvers for tol={tol}: {num_success}/{num_expected}")
 
-                if not np.isnan(nosc_r_for_tol): # Only append if at least one solver succeeded for this tol
-                    study_data[cls.__name__]['sizes'].append(nosc_r_for_tol)
-                    study_data[cls.__name__]['sizes_dr'].append(nosc_dr_for_tol)
-                    study_data[cls.__name__]['err_r'].append(np.array(errs_r_for_tol).reshape(MechSystem.dt_space_dim, -1))
-                    study_data[cls.__name__]['err_dr'].append(np.array(errs_dr_for_tol).reshape(MechSystem.dt_space_dim, -1))
-                else:
-                    print(f"  [Warning] Solver {cls.__name__} failed for tol={tol}. Skipping error calculation.")
+                    if not np.isnan(nosc_r_for_tol): # Only append if at least one solver succeeded for this tol
+                        study_data[cls.__name__]['sizes'].append(nosc_r_for_tol)
+                        study_data[cls.__name__]['sizes_dr'].append(nosc_dr_for_tol)
+                        study_data[cls.__name__]['err_r'].append(np.array(errs_r_for_tol).reshape(MechSystem.dt_space_dim, -1))
+                        study_data[cls.__name__]['err_dr'].append(np.array(errs_dr_for_tol).reshape(MechSystem.dt_space_dim, -1))
+                    else:
+                        print(f"  [Warning] Solver {cls.__name__} failed for tol={tol}. Skipping error calculation.")
 
-                    # Maintain consistent list lengths for plotting by appending NaNs
-                    study_data[cls.__name__]['sizes'].append(np.nan)
-                    study_data[cls.__name__]['sizes_dr'].append(np.nan)
-                    study_data[cls.__name__]['err_r'].append(np.nan)
-                    study_data[cls.__name__]['err_dr'].append(np.nan)
+                        # Maintain consistent list lengths for plotting by appending NaNs
+                        study_data[cls.__name__]['sizes'].append(np.nan)
+                        study_data[cls.__name__]['sizes_dr'].append(np.nan)
+                        study_data[cls.__name__]['err_r'].append(np.nan)
+                        study_data[cls.__name__]['err_dr'].append(np.nan)
+            else:
+                # --- Prediction mode: collect all error metrics ---
+                for cls in original_solver_classes:
+                    # Timing (always collected)
+                    study_data[cls.__name__]['times_f'].append(
+                        _collect_metric(solvers,   cls, lambda s: s.time_lapsed[0]))
+                    study_data[cls.__name__]['times_r'].append(
+                        _collect_metric(solvers_r, cls, lambda s: s.time_lapsed[0]))
+                    study_data[cls.__name__]['times_dr'].append(
+                        _collect_metric(solvers_dr, cls, lambda s: s.time_lapsed[0]))
 
-        # Debugging: Confirm data collection sizes
-        print("\n>>> Debug: Timing data collection sizes:")
-        for name in study_data:
-            t_r = study_data[name]['times_r']
-            print(f"  {name:40} | times_r: {len(t_r)} (tols) x {t_r[0].shape if len(t_r)>0 else 'N/A'} (dt x params)")
+                    # All five error metrics, each collected for f / r / dr
+                    for prefix, extractor, guard in _PREDICTION_METRICS:
+                        if guard(solvers):
+                            study_data[cls.__name__][f'{prefix}_f'].append(
+                                _collect_metric(solvers, cls, extractor))
+                        if guard(solvers_r):
+                            study_data[cls.__name__][f'{prefix}_r'].append(
+                                _collect_metric(solvers_r, cls, extractor))
+                        if guard(solvers_dr):
+                            study_data[cls.__name__][f'{prefix}_dr'].append(
+                                _collect_metric(solvers_dr, cls, extractor))
 
-        # Prepare raw full order data
-        f_times_raw = {cls.__name__: np.array([s.time_lapsed[0] for s in solvers if s.solver_class == cls]).reshape(MechSystem.dt_space_dim, -1) for cls in original_solver_classes}
-        f_errs_raw = {cls.__name__: np.array([s.en_error if hasattr(s, 'en_error') else np.nan for s in solvers if s.solver_class == cls]).reshape(MechSystem.dt_space_dim, -1) for cls in original_solver_classes}
 
-        plot_error_vs_basis_size(
-            [study_data[n]['sizes'] for n in study_data],
-            [study_data[n]['sizes_dr'] for n in study_data],
-            [study_data[n]['err_r'] for n in study_data],
-            [study_data[n]['err_dr'] for n in study_data],
-            list(study_data.keys()), MechSystem.pod_tol_sweep, MechSystem.data_folder,
-            dt_space=MechSystem.dt_space,
-            full_times_raw=f_times_raw,
-            full_errs_raw=f_errs_raw,
-            times_r_raw=[study_data[n]['times_r'] for n in study_data],
-            times_dr_raw=[study_data[n]['times_dr'] for n in study_data]
-        )
+        if not MechSystem.predict:
+            # Debugging: Confirm data collection sizes
+            print("\n>>> Debug: Timing data collection sizes:")
+            for name in study_data:
+                t_r = study_data[name]['times_r']
+                print(f"  {name:40} | times_r: {len(t_r)} (tols) x {t_r[0].shape if len(t_r)>0 else 'N/A'} (dt x params)")
+
+            # Prepare raw full order data
+            f_times_raw = {cls.__name__: np.array([s.time_lapsed[0] for s in solvers if s.solver_class == cls]).reshape(MechSystem.dt_space_dim, -1) for cls in original_solver_classes}
+            f_errs_raw = {cls.__name__: np.array([s.en_error if hasattr(s, 'en_error') else np.nan for s in solvers if s.solver_class == cls]).reshape(MechSystem.dt_space_dim, -1) for cls in original_solver_classes}
+
+            plot_error_vs_basis_size(
+                [study_data[n]['sizes'] for n in study_data],
+                [study_data[n]['sizes_dr'] for n in study_data],
+                [study_data[n]['err_r'] for n in study_data],
+                [study_data[n]['err_dr'] for n in study_data],
+                list(study_data.keys()), MechSystem.pod_tol_sweep, MechSystem.data_folder,
+                dt_space=MechSystem.dt_space,
+                full_times_raw=f_times_raw,
+                full_errs_raw=f_errs_raw,
+                times_r_raw=[study_data[n]['times_r'] for n in study_data],
+                times_dr_raw=[study_data[n]['times_dr'] for n in study_data]
+            )
+        else:
+            # In prediction mode, plot timing and average symplectic error (over Omega2) and average speedup factors (over Omega2) for reduced and hyper-reduced models for each solver class
+            full_time_map = {}
+            for cls in original_solver_classes:
+                key = cls.__name__
+                t_full = np.array([s.time_lapsed[0] if s is not None else np.nan for s in solvers if s.solver_class == cls])
+                full_time_map[key] = t_full.reshape(MechSystem.dt_space_dim, -1)
+
+            # Debug: Print data structure info & metric averages before calling plot_prediction_results
+            print("\n>>> Debug: plot_prediction_results data structure check:")
+            for n in study_data:
+                print(f"  [{n}]")
+                for key, vals in study_data[n].items():
+                    if len(vals) > 0:
+                        v0 = vals[0]
+                        avg_val = np.nanmean(vals)
+                        if isinstance(v0, np.ndarray):
+                            print(f"    {key:25s}: {len(vals)} tols, shape={v0.shape}, dtype={v0.dtype}, avg={avg_val:.2e}")
+                        else:
+                            print(f"    {key:25s}: {len(vals)} tols, type={type(v0).__name__}, val={v0}, avg={avg_val:.2e}")
+                    else:
+                        print(f"    {key:25s}: EMPTY")
+            print(">>> End debug check\n")
+
+            # Build the metric dicts expected by plot_prediction_results
+            def _build_metric_dict(prefix):
+                return {
+                    f'{prefix}_f':  [study_data[n][f'{prefix}_f']  for n in study_data],
+                    f'{prefix}_r':  [study_data[n][f'{prefix}_r']  for n in study_data],
+                    f'{prefix}_dr': [study_data[n][f'{prefix}_dr'] for n in study_data],
+                }
+
+            metric_kwargs = {}
+            for prefix, _, _ in _PREDICTION_METRICS:
+                metric_kwargs.update(_build_metric_dict(prefix))
+
+            plot_prediction_results(
+                list(study_data.keys()),
+                MechSystem.pod_tol_sweep,
+                MechSystem.dt_space,
+                MechSystem.data_folder,
+                full_time_map,
+                [study_data[n]['times_r'] for n in study_data],
+                [study_data[n]['times_dr'] for n in study_data],
+                **metric_kwargs,
+            )
 
     finally:
         if client:
@@ -331,36 +483,34 @@ if __name__ == '__main__':
                     row_str += f"{val:<11.2e}"
                 print(row_str)
 
-        time_lapsed.append(reshape([x.time_lapsed[0] if x is not None else np.nan for x in solvers_r], array_shape_train))
-        # time_lapsed[0].shape) / time_lapsed[0] * 100)
-        time_lapsed.append(reshape([x.time_lapsed[0] if x is not None else np.nan for x in solvers_dr], array_shape_train))
-        # time_lapsed[0].shape) / time_lapsed[0] * 100)
-        time_lapsed[1] = time_lapsed[1] / time_lapsed[0] * 100
-        time_lapsed[2] = time_lapsed[2] / time_lapsed[0] * 100
+        raw_times_r = reshape([x.time_lapsed[0] if x is not None else np.nan for x in solvers_r], array_shape_train)
+        raw_times_dr = reshape([x.time_lapsed[0] if x is not None else np.nan for x in solvers_dr], array_shape_train)
+        time_lapsed.extend([raw_times_r / time_lapsed[0] * 100, raw_times_dr / time_lapsed[0] * 100])
 
     else:
-        time_lapsed.extend([
-            reshape([x.time_lapsed[0] if x is not None else np.nan for x in solvers_r], array_shape_test),
-            reshape([x.time_lapsed[0] if x is not None else np.nan for x in solvers_dr], array_shape_test)
-        ])
+        raw_times_r = reshape([x.time_lapsed[0] if x is not None else np.nan for x in solvers_r], array_shape_test)
+        raw_times_dr = reshape([x.time_lapsed[0] if x is not None else np.nan for x in solvers_dr], array_shape_test)
         
         # Calculate average full order time over all training frequencies
         avg_full_time = np.nanmean(time_lapsed[0], axis=2, keepdims=True)
         
-        # Normalize reduced and hyper-reduced times
-        time_lapsed[1] = time_lapsed[1] / avg_full_time * 100
-        time_lapsed[2] = time_lapsed[2] / avg_full_time * 100
+        # Normalize reduced and hyper-reduced times for downstream plotting
+        time_lapsed.extend([raw_times_r / avg_full_time * 100, raw_times_dr / avg_full_time * 100])
 
-    print("\n--- Average Time Lapsed ---")
-    if MechSystem.predict:
-        model_names = ["Full Order Model (s)", "Reduced Model (% of Avg Full)", "Hyper-reduced Model (% of Avg Full)"]
-    else:
-        model_names = ["Full Order Model (s)", "Reduced Model (% of Full)", "Hyper-reduced Model (% of Full)"]
+    # Compute average times over parameters (axis 2) in seconds
+    avg_fom_time = np.nanmean(time_lapsed[0], axis=2)
+    avg_rom_time = np.nanmean(raw_times_r, axis=2)
+    avg_hrom_time = np.nanmean(raw_times_dr, axis=2)
 
-    # Average over the Omega2 dimension (axis=2)
-    avg_times = [np.nanmean(tl, axis=2) for tl in time_lapsed]
+    # Compute speedup factors (avg. FOM time / avg. surrogate time)
+    speedup_r = avg_fom_time / avg_rom_time
+    speedup_dr = avg_fom_time / avg_hrom_time
 
-    for i, avg_time_matrix in enumerate(avg_times):
+    print("\n--- Average Time Lapsed & Speedup Factors ---")
+    model_names = ["Full Order Model (s)", "Reduced Model (Speedup Factor)", "Hyper-reduced Model (Speedup Factor)"]
+    metrics_to_print = [avg_fom_time, speedup_r, speedup_dr]
+
+    for i, matrix in enumerate(metrics_to_print):
         print(f"\n{model_names[i]}:")
         
         # Header
@@ -371,7 +521,7 @@ if __name__ == '__main__':
         for j, solver_class in enumerate(original_solver_classes):
             row_str = solver_class.__name__.ljust(45)
             for k in range(MechSystem.dt_space_dim):
-                val = avg_time_matrix[j, k]
+                val = matrix[j, k]
                 row_str += f"{val:<11.2f}"
             print(row_str)
 

@@ -12,7 +12,8 @@ import concurrent.futures
 import matplotlib.pyplot as plt
 
 from System import (MechSystem, HamiltonianMechSystem, LagrangianMechSystem,
-                   ReducedHamiltonianMechSystem, ReducedLagrangianMechSystem, HyperReducedHamiltonianMechSystem, HyperReducedLagrangianMechSystem)
+                   ReducedHamiltonianMechSystem, ReducedLagrangianMechSystem, HyperReducedHamiltonianMechSystem, HyperReducedLagrangianMechSystem,
+                   fast_dump, fast_load)
 from ODESolver import (ConformalStormerVerlet, ConformalImplicitMidpoint, 
                       DiscreteGradient)
 from ReduceMechSystem import ReduceMechSystem, HamiltonianReducer, DiscreteGradientReducer
@@ -230,7 +231,7 @@ class BaseSolverMixin:
                         args.append((x, y, z, kwds_arg))
 
         if client and len(args) > 0:
-            print(f"Submitting {len(args)} tasks to existing Dask cluster...", flush=True)
+            print(f"\nSubmitting {len(args)} tasks to existing Dask cluster...", flush=True)
             
             # Identify which arguments are valid tasks vs skipped ones
             valid_indices = [i for i, a in enumerate(args) if a is not None]
@@ -317,7 +318,7 @@ class BaseSolverMixin:
     @staticmethod
     def setup_and_solve_reduced_system(kwds, solvers, client=None):
         """Setup and solve the reduced-order system."""
-        print(f'Setting up reduced system...')
+        print(f'\nSetting up reduced system...')
 
         # Solve reduced system
         solvers_r = []
@@ -331,8 +332,8 @@ class BaseSolverMixin:
         if os.path.exists(checkpoint_path) and os.path.exists(kwds_file) and os.path.exists(solvers_file):
             try:
                 print("Loading from checkpoint...")
-                with open(kwds_file, 'rb') as f: kwds = pickle.load(f)
-                with open(solvers_file, 'rb') as f: solvers_r = pickle.load(f)
+                kwds = fast_load(kwds_file)
+                solvers_r = fast_load(solvers_file)
                 print("Checkpoint loaded successfully")
 
                 # Restore class attributes needed for subsequent steps
@@ -364,8 +365,8 @@ class BaseSolverMixin:
             # Create checkpoint directory and save initial state
             os.makedirs(checkpoint_path, exist_ok=True)
             print("Creating new checkpoint...")
-            with open(kwds_file, 'wb') as f: pickle.dump(kwds, f)
-            with open(solvers_file, 'wb') as f: pickle.dump(solvers_r, f)
+            fast_dump(kwds, kwds_file)
+            fast_dump(solvers_r, solvers_file)
 
         BaseSolverMixin.measures(kwds, solvers_r)
 
@@ -374,7 +375,7 @@ class BaseSolverMixin:
     @staticmethod
     def setup_and_solve_hyperreduced_system(kwds, solvers, client=None):
         """Setup and solve the hyper-reduced system."""
-        print(f'Setting up hyper-reduced system...')
+        print(f'\nSetting up hyper-reduced system...')
 
         # Solve hyper-reduced system
         solvers_dr = []
@@ -388,8 +389,8 @@ class BaseSolverMixin:
         if os.path.exists(checkpoint_path) and os.path.exists(kwds_file) and os.path.exists(solvers_file):
             try:
                 print("Loading from checkpoint...")
-                with open(kwds_file, 'rb') as f: kwds = pickle.load(f)
-                with open(solvers_file, 'rb') as f: solvers_dr = pickle.load(f)
+                kwds = fast_load(kwds_file)
+                solvers_dr = fast_load(solvers_file)
                 print("Checkpoint loaded successfully")
             except Exception as e:
                 raise Exception(f"Error loading checkpoint: {str(e)}")
@@ -431,19 +432,8 @@ class BaseSolverMixin:
             # Create checkpoint directory and save initial state
             os.makedirs(checkpoint_path, exist_ok=True)
             print("Creating new checkpoint...")
-            try:
-                with open(kwds_file, 'wb') as f: pickle.dump(kwds, f)
-            except Exception as e:
-                print(f"Pickling failed for kwds. Tracing offending attribute...", flush=True)
-                import tempfile
-                with tempfile.NamedTemporaryFile() as tmp:
-                    for k, v in kwds.items():
-                        try:
-                            with open(tmp.name, 'wb') as tmp_f: pickle.dump(v, tmp_f)
-                        except Exception as ex:
-                            print(f"FAIL: kwds['{k}'] ({type(v)}) could not be pickled: {ex}", flush=True)
-                raise e
-            with open(solvers_file, 'wb') as f: pickle.dump(solvers_dr, f)
+            fast_dump(kwds, kwds_file)
+            fast_dump(solvers_dr, solvers_file)
 
         BaseSolverMixin.measures(kwds, solvers_dr)
 

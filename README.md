@@ -56,8 +56,11 @@ flowchart TD
     HamiltonianMechSystem --> ConformalStormerVerletSolver
 
 
-    classDef lagrangian fill:#e6f7ff,stroke:#1f77b4,stroke-width:1px;
-    classDef hamiltonian fill:#fff2cc,stroke:#d95f02,stroke-width:1px;
+    linkStyle default stroke-width:2.5px;
+
+    classDef lagrangian fill:#1e293b,stroke:#38bdf8,color:#f0f9ff,stroke-width:1.5px,font-weight:bold;
+    classDef hamiltonian fill:#331e11,stroke:#fb923c,color:#fff7ed,stroke-width:1.5px,font-weight:bold;
+    classDef default fill:#0f172a,stroke:#64748b,color:#f8fafc,stroke-width:1.5px,font-weight:bold;
     class LagrangianMechSystem,DiscreteGradient,DiscreteGradientSolver,DiscreteGradientReducer,ReducedLagrangianMechSystem,HyperReducedLagrangianMechSystem lagrangian;
     class HamiltonianMechSystem,ConformalStormerVerlet,ConformalStormerVerletSolver,HamiltonianReducer,ReducedHamiltonianMechSystem,HyperReducedHamiltonianMechSystem hamiltonian;
 ```

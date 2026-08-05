@@ -132,7 +132,7 @@ def plot_data(ax, x_data, y_data, xlims=None, ylabel=None, margins=None):
     if ylabel is not None: ax.set_ylabel(ylabel)
     if margins is not None: ax.margins(y=margins)
 
-def logplot(y_data, xlabel=None, xlims=None):
+def logplot(y_data, xlabel=None, xlims=None, ylabel=None):
     """
     Create log plots for each element in y_data, arranged in a square grid.
     Backward compatible: if y_data is a 1D array, plot it as a single subplot.
@@ -142,6 +142,7 @@ def logplot(y_data, xlabel=None, xlims=None):
                                     or a single 1D array for one plot.
     xlabel (str, optional): The x-axis label. Defaults to None.
     xlims (list, optional): The x-axis limits. Defaults to None.
+    ylabel (str, optional): The y-axis label. Defaults to None.
 
     Returns:
     fig (matplotlib figure): The figure.
@@ -183,6 +184,8 @@ def logplot(y_data, xlabel=None, xlims=None):
             
         if xlabel is not None:
             ax.set_xlabel(xlabel)
+        if ylabel is not None:
+            ax.set_ylabel(ylabel)
         if xlims[i] is not None:
             ax.xaxis.set_major_locator(MaxNLocator(integer=True))
             ax.set_xlim(xlims[i])
@@ -975,6 +978,208 @@ def plot_error_vs_basis_size(basis_sizes, hr_basis_sizes, errors_r, errors_dr, s
     save_figure(fig, filename)
     print(f"Saved Error vs. Basis Size plot to {filename}")
     plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Metric descriptors for plot_prediction_results
+# ---------------------------------------------------------------------------
+# Each entry: (key_suffix, marker_style, legend_label, markersize)
+_PLOT_METRICS = [
+    ('sym',       'o', r'$\Delta Sp$', 9),
+    ('energy',    's', r'$\Delta H$',  8),
+    ('phase',     '^', r'$\Delta \mathcal{S}$', 8),
+    ('lin_mom',   'D', r'$\Delta L$',  8),
+    ('ang_mom',   'v', r'$\Delta J$',  8),
+]
+
+
+def _plot_metric_panel(ax, metric_data, i, j, marker, color, ms, all_y_values):
+    """Plot a single metric marker on *ax* if *metric_data* is valid."""
+    if metric_data is not None and len(metric_data) > i and len(metric_data[i]) > j:
+        arr = metric_data[i][j]
+        if isinstance(arr, np.ndarray) and arr.size > 0:
+            val = np.nanmean(np.nanmean(arr, axis=1))
+            ax.semilogy([i], [val], marker=marker, color=color,
+                        linestyle='None', markersize=ms,
+                        markerfacecolor=color, markeredgecolor=color)
+            all_y_values.append(val)
+
+
+def _plot_speedup_panel(ax, times_raw, i, j, marker, color, avg_full, all_y_values):
+    """Plot a speedup marker on *ax* if timing data is valid."""
+    if len(times_raw) > i and len(times_raw[i]) > j:
+        t_arr = times_raw[i][j]
+        if isinstance(t_arr, np.ndarray) and t_arr.size > 0 and avg_full is not None:
+            speedup = np.nanmean(avg_full / np.nanmean(t_arr, axis=1))
+            ax.plot([i], [speedup], marker=marker, color=color,
+                    linestyle='None', markersize=9,
+                    markerfacecolor=color, markeredgecolor=color)
+            all_y_values.append(speedup)
+
+
+def plot_prediction_results(solver_names, pod_tols, dt_space, data_folder,
+                             full_times_raw, times_r_raw, times_dr_raw,
+                             sym_error_f=None, sym_error_r=None, sym_error_dr=None,
+                             energy_error_f=None, energy_error_r=None, energy_error_dr=None,
+                             phase_error_f=None, phase_error_r=None, phase_error_dr=None,
+                             lin_mom_error_f=None, lin_mom_error_r=None, lin_mom_error_dr=None,
+                             ang_mom_error_f=None, ang_mom_error_r=None, ang_mom_error_dr=None):
+    """
+    Plot prediction-mode metrics for reduced and hyper-reduced models.
+
+    Parameters
+    ----------
+    solver_names : list of str
+        Names of solver classes.
+    pod_tols : list of float
+        POD tolerances used in the sweep.
+    dt_space : numpy array
+        Time step sizes.
+    data_folder : str
+        Directory for saving the plot.
+    full_times_raw : dict
+        Mapping solver name → full-order timing array of shape (n_dt, n_train_params).
+    times_r_raw : list of list of numpy arrays
+        Reduced timing arrays per solver and tolerance.
+    times_dr_raw : list of list of numpy arrays
+        Hyper-reduced timing arrays per solver and tolerance.
+    sym_error_f, sym_error_r, sym_error_dr : list of list of numpy arrays, optional
+    energy_error_f, energy_error_r, energy_error_dr : list of list of numpy arrays, optional
+    phase_error_f, phase_error_r, phase_error_dr : list of list of numpy arrays, optional
+    lin_mom_error_f, lin_mom_error_r, lin_mom_error_dr : list of list of numpy arrays, optional
+    ang_mom_error_f, ang_mom_error_r, ang_mom_error_dr : list of list of numpy arrays, optional
+    """
+    # --- Reorder solvers so Model 1 (StormerVerlet) is on the left (x=0) ---
+    # The input order may have Model 2 first; we want a consistent left-to-right
+    # ordering: Model 1 (StormerVerlet) at x=0, Model 2 (DiscreteGradient) at x=1.
+    def _model_rank(name):
+        if 'StormerVerlet' in name:
+            return 0
+        if 'DiscreteGradient' in name:
+            return 1
+        return 2  # any other solver goes to the right
+
+    order = sorted(range(len(solver_names)), key=lambda i: _model_rank(solver_names[i]))
+    solver_names = [solver_names[i] for i in order]
+
+    # Reorder all per-solver data lists to match the new solver order
+    def _reorder(data_list):
+        if data_list is None:
+            return None
+        return [data_list[i] for i in order]
+
+    times_r_raw = _reorder(times_r_raw)
+    times_dr_raw = _reorder(times_dr_raw)
+
+    # Group all error metrics by model level for data-driven plotting
+    _error_groups = {
+        'f':  {'ax': None, 'data': {}, 'y_vals': []},
+        'r':  {'ax': None, 'data': {}, 'y_vals': []},
+        'dr': {'ax': None, 'data': {}, 'y_vals': []},
+    }
+    # Map keyword suffixes to the actual data passed in (reordered)
+    _metric_data = {
+        'sym':     {'f': _reorder(sym_error_f),     'r': _reorder(sym_error_r),     'dr': _reorder(sym_error_dr)},
+        'energy':  {'f': _reorder(energy_error_f),  'r': _reorder(energy_error_r),  'dr': _reorder(energy_error_dr)},
+        'phase':   {'f': _reorder(phase_error_f),   'r': _reorder(phase_error_r),   'dr': _reorder(phase_error_dr)},
+        'lin_mom': {'f': _reorder(lin_mom_error_f), 'r': _reorder(lin_mom_error_r), 'dr': _reorder(lin_mom_error_dr)},
+        'ang_mom': {'f': _reorder(ang_mom_error_f), 'r': _reorder(ang_mom_error_r), 'dr': _reorder(ang_mom_error_dr)},
+    }
+
+    fig, axes = plt.subplots(2, 3, figsize=(28, 18.6))
+    ax_fom = axes[0, 0]
+    ax_sym_r = axes[0, 1]
+    ax_sym_dr = axes[0, 2]
+    ax_speed_r = axes[1, 1]
+    ax_speed_dr = axes[1, 2]
+    axes[1, 0].axis('off')
+
+    # Assign axes to groups
+    _error_groups['f']['ax'] = ax_fom
+    _error_groups['r']['ax'] = ax_sym_r
+    _error_groups['dr']['ax'] = ax_sym_dr
+
+    # Populate data dicts
+    for suffix, levels in _metric_data.items():
+        for level in ('f', 'r', 'dr'):
+            _error_groups[level]['data'][suffix] = levels[level]
+
+    marker_map = {tol: m for tol, m in zip(pod_tols, ['o', 's', '^', 'D', 'v', '<', '>', 'p', 'h', '*'])}
+    metric_marker_map = {suffix: (m, ms) for suffix, m, _, ms in _PLOT_METRICS}
+    solver_colors = OKABE_ITO_PALETTE
+
+    all_y_values_speed_r = []
+    all_y_values_speed_dr = []
+
+    for i, name in enumerate(solver_names):
+        color = solver_colors[i % len(solver_colors)]
+        full_time = full_times_raw.get(name)
+        avg_full = np.nanmean(full_time, axis=1) if isinstance(full_time, np.ndarray) else None
+
+        for j, tol in enumerate(pod_tols):
+            marker = marker_map[tol]
+
+            # --- Error panels (FOM, ROM, HRM) ---
+            for level, group in _error_groups.items():
+                for suffix, (mkr, ms) in metric_marker_map.items():
+                    _plot_metric_panel(group['ax'], group['data'].get(suffix),
+                                       i, j, mkr, color, ms, group['y_vals'])
+
+            # --- Speedup panels ---
+            _plot_speedup_panel(ax_speed_r, times_r_raw, i, j, marker, color,
+                                avg_full, all_y_values_speed_r)
+            _plot_speedup_panel(ax_speed_dr, times_dr_raw, i, j, marker, color,
+                                avg_full, all_y_values_speed_dr)
+
+    # Legend handles for the five error metrics
+    error_legend_handles = [
+        Line2D([0], [0], marker=m, color='black', label=label,
+               markersize=ms, linestyle='None')
+        for _, m, label, ms in _PLOT_METRICS
+    ]
+
+    for ax in [ax_fom, ax_sym_r, ax_sym_dr, ax_speed_r, ax_speed_dr]:
+        configure_axis(ax)
+        ax.tick_params(axis='both', labelsize=22)
+        ax.set_xlim(-0.5, 1.5)
+        ax.set_xticks([0, 1])
+        # Build tick labels from solver_names
+        tick_labels = []
+        for sn in solver_names[:2]:  # at most 2 solvers
+            if 'StormerVerlet' in sn:
+                tick_labels.append('Model 1')
+            elif 'DiscreteGradient' in sn:
+                tick_labels.append('Model 2')
+            else:
+                tick_labels.append(sn)
+        ax.set_xticklabels(tick_labels)
+        ax.grid(True, which='both', ls='-', alpha=0.2)
+
+    ax_fom.set_title('FOM error metrics')
+    ax_sym_r.set_title('ROM error metrics')
+    ax_sym_dr.set_title('HRM error metrics')
+    ax_fom.set_ylabel('Mean error magnitude')
+    ax_sym_r.set_ylabel('Mean error magnitude')
+    ax_speed_r.set_ylabel('Mean speedup factor')
+    ax_speed_r.axhline(1.0, color='black', linestyle='--', alpha=0.5)
+    ax_speed_dr.axhline(1.0, color='black', linestyle='--', alpha=0.5)
+
+    adjust_axis_limits(ax_fom, _error_groups['f']['y_vals'], axis='y', is_log_scale=True, max_steps=10)
+    adjust_axis_limits(ax_sym_r, _error_groups['r']['y_vals'], axis='y', is_log_scale=True, max_steps=10)
+    adjust_axis_limits(ax_sym_dr, _error_groups['dr']['y_vals'], axis='y', is_log_scale=True, max_steps=10)
+    adjust_axis_limits(ax_speed_r, all_y_values_speed_r, axis='y', is_log_scale=False, max_steps=10)
+    adjust_axis_limits(ax_speed_dr, all_y_values_speed_dr, axis='y', is_log_scale=False, max_steps=10)
+
+    fig.legend(handles=error_legend_handles, title='Error', loc='upper left',
+               bbox_to_anchor=(0.95, 0.90), bbox_transform=fig.transFigure,
+               fontsize=13, title_fontsize=15, frameon=True)
+
+    plt.subplots_adjust(right=0.78, hspace=0.35, wspace=0.25)
+    filename = os.path.join(data_folder, 'prediction_results.pdf')
+    save_figure(fig, filename)
+    print(f"Saved Prediction Results plot to {filename}")
+    plt.close(fig)
+
 
 # %% Testing
 def test_PlotScript():

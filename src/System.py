@@ -8,6 +8,7 @@ import os
 import sys
 import cloudpickle as pickle
 import pickle as std_pickle
+import lz4.frame
 from functools import wraps
 from datetime import datetime
 import hashlib
@@ -26,14 +27,33 @@ rng = np.random.default_rng(
     seed=267257368022227711484290921317604022527
 )  # rng = np.random.default_rng(seed=408394104)  # Create RNG with fixed seed
 
+# High-performance compressed serialization helpers for large checkpoints
+def fast_dump(obj, filename):
+    """Save object using cloudpickle with LZ4 compression and a 16MB I/O buffer."""
+    tmp_filename = filename + ".tmp"
+    with open(tmp_filename, 'wb', buffering=16 * 1024 * 1024) as raw_f:
+        with lz4.frame.open(raw_f, 'wb') as f:
+            pickle.dump(obj, f)
+    os.replace(tmp_filename, filename)
+
+def fast_load(filename):
+    """Load object using cloudpickle with LZ4 decompression and 16MB I/O buffer fallback."""
+    try:
+        with open(filename, 'rb', buffering=16 * 1024 * 1024) as raw_f:
+            with lz4.frame.open(raw_f, 'rb') as f:
+                return pickle.load(f)
+    except Exception:
+        # Fallback for uncompressed legacy pickle files
+        with open(filename, 'rb', buffering=16 * 1024 * 1024) as f:
+            return pickle.load(f)
+
 # %%
 def load_symbolic_expressions(cls):
     """Decorator to handle loading/saving of symbolic expressions"""
     try:
         # Try to load expressions
         expressions_file = os.path.join('data', f"symbolic_expr_{cls.nosc}_cse.pickle")
-        with open(expressions_file, 'rb') as f:
-            expressions = pickle.load(f)
+        expressions = fast_load(expressions_file)
 
         # print("Loaded symbolic expressions from disk.")
     except: # (FileNotFoundError, std_pickle.UnpicklingError):
@@ -93,7 +113,7 @@ class SysConfig:
     tol_reduced = 1.0E-8
     # pod_tol_ham = 1e-10
     # pod_tol_dg = 1e-10
-    pod_tol_sweep = [1e-4] #, 1e-6, 1e-8, 1e-10] # must be in descending order
+    pod_tol_sweep = [1e-6] #, 1e-6, 1e-8, 1e-10] # must be in descending order
     assert all(pod_tol_sweep[i] >= pod_tol_sweep[i + 1] for i in range(len(pod_tol_sweep) - 1)), "pod_tol_sweep must be in descending order"
     
     predict = True # False = reproduce results of the full model
@@ -110,7 +130,7 @@ class SysConfig:
     if predict: # prediction parameters
         # Time-stepping parameters
         dt_space_dim = 1
-        dt_space = np.array([0.01])
+        dt_space = np.array([0.002])
         T_final = dt_space[-1] * 1e3
 
         # Parameter space for Omega^2
@@ -126,7 +146,7 @@ class SysConfig:
 
     # Generate random parameter space for Omega^2 in range (0, 10]
     num_freqs = nosc // 3 - 2
-    _Omega2_space = 3 * (1 - rng.random((_Omega2_space_dim, num_freqs)))
+    _Omega2_space = np.sort(3 * (1 - rng.random((_Omega2_space_dim, num_freqs))), axis=1)
 
     # Freeze higher frequencies across samples to match the first sample
     # freeze_idx = _Omega2_space_dim // 2

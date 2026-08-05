@@ -204,14 +204,14 @@ class ReduceMechSystem(MechSystem):
     def hyperreduce_constraints(cls, solvers, target_classes):
         solver_type = "Hamiltonian" if issubclass(cls, HamiltonianMechSystem) else "DiscreteGradient"
         pod_tol = cls.pod_tol_sweep[-1]
-        print('Computing constraints reduction in parallel...')
+        print('\nComputing constraints reduction in parallel...')
         
         # Map solvers to indices
         solver_to_indices = {solver: indices for solver, indices in zip(solvers, cls.indices_list)}
         filtered_indices = [solver_to_indices[solver] for solver in solvers]
 
         def compute_constraint_basis(func_name, expr, is_g_prime=False):
-            print(f'Computing {func_name} reduction...', flush=True)
+            print(f'\nComputing {func_name} reduction...', flush=True)
 
             # Determine if this is a "prime" type (g_prime, g_prime_x_lambda_y)
             prime_types = ['g_prime_', 'g_prime_x_lambda_y_']
@@ -331,7 +331,7 @@ class ReduceMechSystem(MechSystem):
             else:
                 print(f"Memory address of {func_name}{'mdeim' if is_prime_type else 'deim'}: {hex(id(mdeim_func))}")
 
-            print(f'Finished {func_name} reduction.', flush=True)
+            print(f'Finished {func_name} reduction.\n', flush=True)
             return func_name, basis, sv
 
         # Prepare tasks for parallel execution
@@ -370,13 +370,13 @@ class ReduceMechSystem(MechSystem):
                 [(1, len(sv_g_prime_x_lambda_y))]
             )
 
-        fig, ax = logplot(sv_list, xlabel=f"index of singular values", xlims=xlims_list)
+        fig, ax = logplot(sv_list, xlabel=f"index of singular values", xlims=xlims_list, ylabel="singular value magnitude")
         filename = os.path.join(
             MechSystem.data_folder, "sv_constraints_" + solver_type.replace("Hamiltonian", "H").replace("DiscreteGradient", "DG") + ".pdf"
         )
         save_figure(fig, filename, fig_data=None)
 
-        print('Constraints reduction complete.')
+        print('Constraints reduction complete.\n')
 
     @staticmethod
     def batched_POD(snapshot_blocks, tol):
@@ -617,7 +617,7 @@ class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
 
     @classmethod
     def setup_reduced_model(cls, solvers, target_classes):
-        print(f'Setting up reduced model ({cls.__name__})...')
+        print(f'\nSetting up reduced model ({cls.__name__})...')
         tol = cls.pod_tol_sweep[-1]
 
         # Map solvers to indices (always needed)
@@ -713,9 +713,9 @@ class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
         del rb
         gc.collect()
 
-        print(f'Hamiltonian {RB.shape = }')
+        print(f'Hamiltonian {RB.shape = }\n')
 
-        fig, ax = logplot(sv, xlabel=f'index of singular values', xlims=[(1, len(s)) for s in sv])
+        fig, ax = logplot(sv, xlabel=f'index of singular values', xlims=[(1, len(s)) for s in sv], ylabel="singular value magnitude")
         filename = os.path.join(MechSystem.data_folder, "sv_rb_H.pdf")
         save_figure(fig, filename, fig_data=None)
 
@@ -729,7 +729,7 @@ class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
 
     @classmethod
     def setup_hyperreduction(cls, target_classes):
-        print('Setting up hyperreduction (Hamiltonian)...')
+        print('\nSetting up hyperreduction (Hamiltonian)...')
         
         if not hasattr(cls, 'RB') or cls.RB is None:
             print("  [Warning] Reduced basis not found or invalid. Skipping hyper-reduction setup.")
@@ -755,7 +755,7 @@ class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
         ])
         
         RBxUx_inv_PxU = RB.T @ RB @ LA.inv(P.T @ RB)
-        print(f'{P.shape = }')
+        print(f'{P.shape = }\n')
 
         deim_func = cls._create_indexed_deim_func(cls.ham_z_expr, P, "Hamiltonian")
         
@@ -777,7 +777,7 @@ class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
 
     @classmethod
     def update_mdeim_hyperreduction(cls, solvers, target_classes):
-        print(f'Updating MDEIM hyperreduction ({cls.__name__})...')
+        print(f'\nUpdating MDEIM hyperreduction ({cls.__name__})...')
         tol = cls.pod_tol_sweep[-1]
         
         non_zero_indices = cls.ham_zz_nonzero_indices
@@ -803,7 +803,7 @@ class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
 
         Uj, sv, _ = cls._truncate_basis(cls._Full_Uj, cls._Full_Sj, tol)
 
-        fig, ax = logplot(sv, xlabel=f'index of singular values of ham_zz', xlims=(1, len(sv)))
+        fig, ax = logplot(sv, xlabel=f'index of singular values of ham_zz', xlims=(1, len(sv)), ylabel="singular value magnitude")
         filename = os.path.join(MechSystem.data_folder, "sv_mdeim_H.pdf")
         save_figure(fig, filename, fig_data=None)
 
@@ -815,7 +815,7 @@ class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
 
         IP_Ux_inv_PxU = cls._reconstruct_sparse_basis(B_hat, non_zero_indices, total_elements)
         
-        print(f'{IP_Ux_inv_PxU.shape = }')
+        print(f'{IP_Ux_inv_PxU.shape = }\n')
 
         # Select non-zero elements from the symbolic expression for lambdification
         flat_expr = cls.ham_zz_expr.flat()
@@ -833,7 +833,7 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
 
     @classmethod
     def setup_reduced_model(cls, solvers, target_classes):
-        print(f'Setting up reduced model ({cls.__name__})...')
+        print(f'\nSetting up reduced model ({cls.__name__})...')
         tol = cls.pod_tol_sweep[-1]
 
         # Map solvers to indices (always needed)
@@ -917,9 +917,9 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
         del rb_1
         gc.collect()
 
-        print(f'DiscreteGradient {RB.shape = }')
+        print(f'DiscreteGradient {RB.shape = }\n')
 
-        fig, ax = logplot(sv, xlabel=f'index of singular values', xlims=[(1, len(s)) for s in sv])
+        fig, ax = logplot(sv, xlabel=f'index of singular values', xlims=[(1, len(s)) for s in sv], ylabel="singular value magnitude")
         filename = os.path.join(MechSystem.data_folder, "sv_rb_DG.pdf")
         save_figure(fig, filename, fig_data=None)
 
@@ -933,7 +933,7 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
 
     @classmethod
     def setup_hyperreduction(cls, solvers, target_classes):
-        print(f'Setting up hyperreduction ({cls.__name__})...')
+        print(f'\nSetting up hyperreduction ({cls.__name__})...')
 
         if not hasattr(cls, 'RB') or cls.RB is None:
             print("  [Warning] Reduced basis not found or invalid. Skipping hyper-reduction setup.")
@@ -1023,7 +1023,7 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
         ])
         
         RBxUx_inv_PxU = cls.RB.T @ U_nonlinear @ LA.inv(P.T @ U_nonlinear)
-        print(f'{P.shape = }')
+        print(f'{P.shape = }\n')
 
         deim_func = cls._create_indexed_deim_func(cls.lag_dg_expr, P, "DiscreteGradient")
         
@@ -1045,7 +1045,7 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
 
     @classmethod
     def update_mdeim_hyperreduction(cls, solvers, target_classes):
-        print(f'Updating MDEIM hyperreduction ({cls.__name__})...')
+        print(f'\nUpdating MDEIM hyperreduction ({cls.__name__})...')
         tol = cls.pod_tol_sweep[-1]
         
         non_zero_indices = cls.lag_dg_z_nonzero_indices
@@ -1069,7 +1069,7 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
             print(f"  [{cls.__name__}] Reusing Master MDEIM SVD (Rank: {cls._Full_Uj.shape[1]})")
 
         Uj, sv, _ = cls._truncate_basis(cls._Full_Uj, cls._Full_Sj, tol)
-        fig, ax = logplot(sv, xlabel=f'index of singular values of lag_dg_z', xlims=(1, len(sv)))
+        fig, ax = logplot(sv, xlabel=f'index of singular values of lag_dg_z', xlims=(1, len(sv)), ylabel="singular value magnitude")
         filename = os.path.join(MechSystem.data_folder, "sv_mdeim_DG.pdf")
         save_figure(fig, filename, fig_data=None)
 
@@ -1079,7 +1079,7 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
         B_hat = Uj @ LA.inv(Pj.T @ Uj)
         IP_Ux_inv_PxU = cls._reconstruct_sparse_basis(B_hat, non_zero_indices, (2*cls.nosc)**2)
         
-        print(f'{IP_Ux_inv_PxU.shape = }')
+        print(f'{IP_Ux_inv_PxU.shape = }\n')
 
         # Select non-zero elements from the symbolic expression for lambdification
         flat_expr = cls.lag_dg_z_expr.flat()

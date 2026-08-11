@@ -113,7 +113,7 @@ class SysConfig:
     tol_reduced = 1.0E-8
     # pod_tol_ham = 1e-10
     # pod_tol_dg = 1e-10
-    pod_tol_sweep = [1e-6] #, 1e-6, 1e-8, 1e-10] # must be in descending order
+    pod_tol_sweep = [1e-4] #, 1e-6, 1e-8, 1e-10] # must be in descending order
     assert all(pod_tol_sweep[i] >= pod_tol_sweep[i + 1] for i in range(len(pod_tol_sweep) - 1)), "pod_tol_sweep must be in descending order"
     
     predict = True # False = reproduce results of the full model
@@ -130,7 +130,7 @@ class SysConfig:
     if predict: # prediction parameters
         # Time-stepping parameters
         dt_space_dim = 1
-        dt_space = np.array([0.002])
+        dt_space = np.array([0.005])
         T_final = dt_space[-1] * 1e3
 
         # Parameter space for Omega^2
@@ -146,7 +146,7 @@ class SysConfig:
 
     # Generate random parameter space for Omega^2 in range (0, 10]
     num_freqs = nosc // 3 - 2
-    _Omega2_space = np.sort(3 * (1 - rng.random((_Omega2_space_dim, num_freqs))), axis=1)
+    _Omega2_space = np.sort(1 * (1 - rng.random((_Omega2_space_dim, num_freqs))), axis=1)
 
     # Freeze higher frequencies across samples to match the first sample
     # freeze_idx = _Omega2_space_dim // 2
@@ -371,9 +371,6 @@ class MechSystem(SysConfig):
         # Projection matrices
         if hasattr(self, 'RB'):
             self.y_init = self.RB.T @ self.y_init
-
-    def get_en_err(self):
-        return np.array([self.ham(y) for y in self.y]) - self.ham(self.y[0])
 
 @load_symbolic_expressions
 class HamiltonianMechSystem(MechSystem):

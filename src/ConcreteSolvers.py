@@ -49,10 +49,58 @@ def compose_solver_solves(func):
         return y_, y_full_, Lambda
     return wrapper
 
+def _matches_solver_family(solver, base_cls):
+    """Check if a solver (instance or class) belongs to the same family as base_cls
+    (handles Reduced/HyperReduced naming variants)."""
+    if solver is None or base_cls is None:
+        return False
+
+    if isinstance(solver, type):
+        solver_class = solver
+    else:
+        solver_class = getattr(solver, 'solver_class', getattr(solver, '__class__', None))
+
+    if solver_class is None:
+        return False
+
+    if not isinstance(base_cls, type):
+        base_class = getattr(base_cls, 'solver_class', getattr(base_cls, '__class__', None))
+    else:
+        base_class = base_cls
+
+    if base_class is None:
+        return False
+
+    if solver_class is base_class:
+        return True
+
+    try:
+        if issubclass(solver_class, base_class):
+            return True
+    except TypeError:
+        pass
+
+    try:
+        if issubclass(base_class, solver_class):
+            return True
+    except TypeError:
+        pass
+
+    solver_name = getattr(solver_class, '__name__', '')
+    base_name = getattr(base_class, '__name__', '')
+
+    stripped_solver = solver_name.replace('HyperReduced', '').replace('Reduced', '')
+    stripped_base = base_name.replace('HyperReduced', '').replace('Reduced', '')
+
+    return bool(stripped_solver and stripped_base and stripped_solver == stripped_base)
+
+
 class BaseSolverMixin:
     """
     Base mixin class providing common solving capabilities for solvers.
     """
+    matches_solver_family = staticmethod(_matches_solver_family)
+
     @compose_solver_solves
     def solve_for_w(self, w_val, y_, k):
         self.set_initial_condition(y_[1])
@@ -144,6 +192,62 @@ class BaseSolverMixin:
             del self.y_full
             gc.collect()
 
+    def compute_energy_error(self):
+        """Compute time-series energy error (eng_error) and scalar RMS energy error (en_error)."""
+        if hasattr(self, 'ham') and hasattr(self, 'y') and self.y is not None and not getattr(self, 'beta', False):
+            self.eng_error = np.array([self.ham(y) for y in self.y]) - self.ham(self.y[0])
+            self.en_error = sqrt(self.dt) * LA.norm(self.eng_error)
+        else:
+            self.eng_error = None
+            self.en_error = None
+
+    def compute_sym_error(self):
+        """Compute time-series symplectic error."""
+        if getattr(self, 'var', False):
+            y = self.y_red if hasattr(self, 'y_red') else self.y
+            self.sym_error = self.var_solve(y)
+        else:
+            self.sym_error = None
+
+    def compute_constraint_error(self):
+        """Compute time-series constraint norm (g_norm) and max constraint error (phase_error)."""
+        if hasattr(self, 'g__lambda'):
+            self.g_norm = [LA.norm(self.g__lambda(y)) for y in self.y]
+            self.phase_error = np.amax(self.g_norm)
+        else:
+            self.g_norm = None
+            self.phase_error = np.nan
+
+    def compute_linear_momentum_error(self):
+        """Compute time-series linear momentum error array and max error."""
+        if hasattr(self, 'y') and self.y is not None:
+            lin_mom = np.sum(self.y[:, self.nosc:].reshape(-1, self.nosc // 3, 3), axis=1)
+            self.lin_momentum_err = r_[0, LA.norm(lin_mom[1:] - lin_mom[0], axis=1)]
+            self.lin_mom_error = np.amax(self.lin_momentum_err)
+        else:
+            self.lin_momentum_err = None
+            self.lin_mom_error = np.nan
+
+    def compute_angular_momentum_error(self):
+        """Compute time-series angular momentum error array and max error."""
+        if hasattr(self, 'y') and self.y is not None:
+            q = self.y[:, :self.nosc].reshape(-1, self.nosc // 3, 3)
+            p = self.y[:, self.nosc:].reshape(-1, self.nosc // 3, 3)
+            ang_mom = np.sum(np.cross(q, p), axis=1)
+            self.angular_momentum_err = r_[0, LA.norm(ang_mom[1:] - ang_mom[0], axis=1)]
+            self.ang_mom_error = np.amax(self.angular_momentum_err)
+        else:
+            self.angular_momentum_err = None
+            self.ang_mom_error = np.nan
+
+    def compute_all_metrics(self):
+        """Compute all physical diagnostic metrics after trajectory solution."""
+        self.compute_energy_error()
+        self.compute_sym_error()
+        self.compute_constraint_error()
+        self.compute_linear_momentum_error()
+        self.compute_angular_momentum_error()
+
     @staticmethod
     def solve_mech_system(solver_class, dt, Omega2, kwds):
         """
@@ -175,21 +279,7 @@ class BaseSolverMixin:
             tl = solver.solve_trajectory()
 
             solver.time_lapsed.append(tl)
-
-            if not solver.beta:
-                solver.eng_error = solver.get_en_err()
-                solver.en_error = sqrt(dt) * LA.norm(solver.eng_error)
-            else:
-                solver.en_error = None
-
-            if solver.var:
-                if hasattr(solver, 'y_red'):
-                    y = solver.y_red
-                else:
-                    y = solver.y
-
-                solver.sym_error = solver.var_solve(y)
-                # solver.sym_error = solver.symplectic_error(dpsi)
+            solver.compute_all_metrics()
 
             return solver
 
@@ -320,12 +410,14 @@ class BaseSolverMixin:
         """Setup and solve the reduced-order system."""
         print(f'\nSetting up reduced system...')
 
+        pod_tol = kwds.get('pod_tol', MechSystem.pod_tol_sweep[-1])
+
         # Solve reduced system
         solvers_r = []
 
         # Try to load from checkpoint
         checkpoint_path = os.path.join('data', f'{MechSystem.keep_time}')
-        tol_suffix = f"tol_{MechSystem.pod_tol_ham:.1e}"
+        tol_suffix = f"tol_{pod_tol:.1e}"
         kwds_file = os.path.join(checkpoint_path, f'kwds_r_{tol_suffix}.joblib')
         solvers_file = os.path.join(checkpoint_path, f'solvers_r_{tol_suffix}.joblib')
 
@@ -368,7 +460,8 @@ class BaseSolverMixin:
             fast_dump(kwds, kwds_file)
             fast_dump(solvers_r, solvers_file)
 
-        BaseSolverMixin.measures(kwds, solvers_r)
+        BaseSolverMixin.compute_convergence_rates(kwds, solvers_r)
+        BaseSolverMixin.plot_solvers(kwds, solvers_r)
 
         return solvers_r
 
@@ -377,12 +470,14 @@ class BaseSolverMixin:
         """Setup and solve the hyper-reduced system."""
         print(f'\nSetting up hyper-reduced system...')
 
+        pod_tol = kwds.get('pod_tol', MechSystem.pod_tol_sweep[-1])
+
         # Solve hyper-reduced system
         solvers_dr = []
 
         # Try to load from checkpoint
         checkpoint_path = os.path.join('data', f'{MechSystem.keep_time}')
-        tol_suffix = f"tol_{MechSystem.pod_tol_ham:.1e}"
+        tol_suffix = f"tol_{pod_tol:.1e}"
         kwds_file = os.path.join(checkpoint_path, f'kwds_dr_{tol_suffix}.joblib')
         solvers_file = os.path.join(checkpoint_path, f'solvers_dr_{tol_suffix}.joblib')
 
@@ -435,14 +530,15 @@ class BaseSolverMixin:
             fast_dump(kwds, kwds_file)
             fast_dump(solvers_dr, solvers_file)
 
-        BaseSolverMixin.measures(kwds, solvers_dr)
+        BaseSolverMixin.compute_convergence_rates(kwds, solvers_dr)
+        BaseSolverMixin.plot_solvers(kwds, solvers_dr)
 
         return solvers_dr
 
     @staticmethod
-    def measures(kwds, solvers):
+    def compute_convergence_rates(kwds, solvers):
         """
-        Compute various measurements based on the solution and plot the results.
+        Compute empirical convergence rates across step sizes for solved system instances.
 
         Parameters:
             kwds (dict): Dictionary of keyword arguments for the solver.
@@ -462,7 +558,7 @@ class BaseSolverMixin:
         # Compute en_error using a list comprehension and reshape it into a 2D array: rows = dt values, columns = Omega2 values for each solver class in kwds['registered_solver_classes']
         # For each solver_class, filter solvers and compute en_error separately
         for solver_class in kwds['registered_solver_classes']:
-            filtered_solvers = [s for s in solvers if s and s.solver_class == solver_class]
+            filtered_solvers = [s for s in solvers if s and _matches_solver_family(s, solver_class)]
             
             en_error_flat = []
             for dt in MechSystem.dt_space:
@@ -490,6 +586,17 @@ class BaseSolverMixin:
                 for i, dt_val in enumerate(MechSystem.dt_space):
                     print(f"{dt_val:12.6f}" + "".join([f" | {val:12.6f}" for val in all_r_values[i]]))
 
+    @staticmethod
+    def plot_solvers(kwds, solvers):
+        """
+        Generate and display plots for representative solver instances.
+
+        Parameters:
+            kwds (dict): Dictionary of keyword arguments containing registered_solver_classes.
+            solvers (list): List of solver instances used to solve the system.
+        """
+        for solver_class in kwds['registered_solver_classes']:
+            filtered_solvers = [s for s in solvers if s and _matches_solver_family(s, solver_class)]
             if filtered_solvers:
                 filtered_solvers[-1].plot()
 
@@ -521,37 +628,27 @@ class BaseSolverMixin:
             if max(abs(self.sym_error)) < 1e-15:
                 ax0.set_ylim([-1e-15, 1e-15])
 
-        g_norm = None
-        if hasattr(self, 'g__lambda'):
-            g_norm = [LA.norm(self.g__lambda(y)) for y in self.y]
-
+        if getattr(self, 'g_norm', None) is not None:
             plot_data(
                 ax1,
                 self.t_points,
-                g_norm,
+                self.g_norm,
                 xlims=(0, self.T_final),
                 ylabel=r"$\Delta \mathcal{S}$",
                 margins=10,
             )
 
-        if hasattr(self, 'eng_error'):
+        if getattr(self, 'eng_error', None) is not None:
             plot_data(ax2, self.t_points, self.eng_error, xlims=(0, self.T_final), \
                     ylabel=r'$\Delta H$', margins=10)
 
-        lin_momentum = np.sum(self.y[:, self.nosc:].reshape(-1, self.nosc//3, 3), axis=1)
-        lim_momentum_err = r_[0, LA.norm(lin_momentum[1:] - lin_momentum[0], axis=1)]
+        if getattr(self, 'lin_momentum_err', None) is not None:
+            plot_data(ax3, self.t_points, self.lin_momentum_err, xlims=(0, self.T_final), \
+                    ylabel=r'$\Delta L$', margins=10)
 
-        angular_momentum = np.cross(self.y[:, :self.nosc].reshape(-1, self.nosc//3, 3), \
-                                    self.y[:, self.nosc:].reshape(-1, self.nosc//3, 3))
-        angular_momentum_sum = np.sum(angular_momentum, axis=1)
-        angular_momentum_err = r_[0, \
-                                LA.norm(angular_momentum_sum[1:] - angular_momentum_sum[0], axis=1)]
-
-        plot_data(ax3, self.t_points, lim_momentum_err, xlims=(0, self.T_final), \
-                ylabel=r'$\Delta L$', margins=10)
-
-        plot_data(ax4, self.t_points, angular_momentum_err, xlims=(0, self.T_final), \
-                ylabel=r'$\Delta J$', margins=10)
+        if getattr(self, 'angular_momentum_err', None) is not None:
+            plot_data(ax4, self.t_points, self.angular_momentum_err, xlims=(0, self.T_final), \
+                    ylabel=r'$\Delta J$', margins=10)
 
         ax4.set_xlabel('time')
         # Plot the particle positions over time
@@ -585,15 +682,15 @@ class BaseSolverMixin:
 
         fig_data = {
             't_points': self.t_points,
-            'lim_momentum_err': lim_momentum_err,
-            'angular_momentum_err': angular_momentum_err,
+            'lin_momentum_err': getattr(self, 'lin_momentum_err', None),
+            'angular_momentum_err': getattr(self, 'angular_momentum_err', None),
             'coords': coords
         }
-        if hasattr(self, 'sym_error'):
+        if getattr(self, 'sym_error', None) is not None:
             fig_data['sym_error'] = self.sym_error
-        if g_norm is not None:
-            fig_data['g_norm'] = g_norm
-        if hasattr(self, 'eng_error'):
+        if getattr(self, 'g_norm', None) is not None:
+            fig_data['g_norm'] = self.g_norm
+        if getattr(self, 'eng_error', None) is not None:
             fig_data['eng_error'] = self.eng_error
 
         solver_name_short = self.solver_class.__name__.replace('Conformal', 'C').replace('StormerVerlet', 'SV').replace('ImplicitMidpoint', 'IM').replace('DiscreteGradient', 'DG').replace('HyperReduced', 'HR').replace('Reduced', 'R')

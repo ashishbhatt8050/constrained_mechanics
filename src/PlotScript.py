@@ -128,9 +128,13 @@ def plot_data(ax, x_data, y_data, xlims=None, ylabel=None, margins=None):
     """
     configure_axis(ax)
     ax.plot(x_data, y_data, linewidth=2)
-    if xlims is not None: ax.set_xlim(xlims)
+    if xlims is not None:
+        ax.set_xlim(xlims)
+    else:
+        adjust_axis_limits(ax, x_data, axis='x', is_log_scale=False)
     if ylabel is not None: ax.set_ylabel(ylabel)
     if margins is not None: ax.margins(y=margins)
+    adjust_axis_limits(ax, y_data, axis='y', is_log_scale=False)
 
 def logplot(y_data, xlabel=None, xlims=None, ylabel=None):
     """
@@ -174,13 +178,7 @@ def logplot(y_data, xlabel=None, xlims=None, ylabel=None):
         # Set yticks to cover the whole range of yd, rounded to nearest powers of 10
         yd_nonzero = yd[np.isfinite(yd) & (yd > 0)]
         if yd_nonzero.size > 0:
-            ymin = yd_nonzero.min()
-            ymax = yd_nonzero.max()
-            lower = 10 ** math.floor(math.log10(ymin))
-            upper = 10 ** math.ceil(math.log10(ymax))
-            # yticks = [10 ** exp for exp in range(int(math.floor(math.log10(lower))), int(math.ceil(math.log10(upper))) + 1)]
-            # ax.set_yticks(yticks)
-            ax.set_ylim([lower, upper])
+            adjust_axis_limits(ax, yd_nonzero, axis='y', is_log_scale=True, max_steps=5)
             
         if xlabel is not None:
             ax.set_xlabel(xlabel)
@@ -189,6 +187,8 @@ def logplot(y_data, xlabel=None, xlims=None, ylabel=None):
         if xlims[i] is not None:
             ax.xaxis.set_major_locator(MaxNLocator(integer=True))
             ax.set_xlim(xlims[i])
+        else:
+            adjust_axis_limits(ax, np.arange(len(yd)), axis='x', is_log_scale=False)
 
         # # Remove penultimate xticks if too close to boundary xticks
         # xticks = list(ax.get_xticks())
@@ -228,6 +228,12 @@ def plot_omega_distribution(train_set, test_set, filename=None):
     ax.set_title(r'Distribution of $\Omega^2$ parameters')
     ax.legend()
     
+    # Adjust axis limits for Omega2 data
+    all_omega = train_set.flatten()
+    if test_set is not None and test_set.size > 0:
+        all_omega = np.concatenate([all_omega, test_set.flatten()])
+    adjust_axis_limits(ax, all_omega, axis='x', is_log_scale=False)
+
     if filename:
         save_figure(fig, filename)
     return fig
@@ -270,20 +276,26 @@ def save_figure(fig, filename, fig_data=None):
 
             if 'sv' in fig_data or 'sv_g' in fig_data:
                 for label, array in fig_data.items():
-                    dat_filename = f"{dat_filename_base}_{label}.dat"
-                    np.savetxt(dat_filename, np.c_[np.arange(1, len(array) + 1), array], fmt='%f')
+                    if array is not None:
+                        arr = np.asarray(array).ravel()
+                        dat_filename = f"{dat_filename_base}_{label}.dat"
+                        np.savetxt(dat_filename, np.c_[np.arange(1, len(arr) + 1), arr], fmt='%f')
             else:
-                if 't_points' in fig_data:
-                    for key in ['lim_momentum_err', 'angular_momentum_err', 'sym_error', 'g_norm', 'eng_error']:
-                        if key in fig_data:
-                            data_to_save = np.vstack((fig_data['t_points'], fig_data[key])).T
-                            np.savetxt(f"{dat_filename_base}_{key}.dat", data_to_save, fmt='%f')
+                if 't_points' in fig_data and fig_data['t_points'] is not None:
+                    t_pts = np.asarray(fig_data['t_points']).ravel()
+                    for key in ['lim_momentum_err', 'lin_momentum_err', 'angular_momentum_err', 'sym_error', 'g_norm', 'eng_error']:
+                        if key in fig_data and fig_data[key] is not None:
+                            val_arr = np.asarray(fig_data[key]).ravel()
+                            if val_arr.shape == t_pts.shape:
+                                data_to_save = np.column_stack((t_pts, val_arr))
+                                np.savetxt(f"{dat_filename_base}_{key}.dat", data_to_save, fmt='%f')
 
-                if 'coords' in fig_data:
+                if 'coords' in fig_data and fig_data['coords'] is not None:
                     coords_data = fig_data['coords']
-                    for i in range(coords_data.shape[1]):
-                        particle_filename = f"{dat_filename_base}_coords_particle{i}.dat"
-                        np.savetxt(particle_filename, coords_data[:, i, :], fmt='%f')
+                    if hasattr(coords_data, 'shape') and len(coords_data.shape) >= 2:
+                        for i in range(coords_data.shape[1]):
+                            particle_filename = f"{dat_filename_base}_coords_particle{i}.dat"
+                            np.savetxt(particle_filename, coords_data[:, i, :], fmt='%f')
 
     # Check for 3D axes and generate Plotly HTML if applicable
     is_3d = any(getattr(ax, 'name', '') == '3d' for ax in fig.axes)
@@ -425,190 +437,206 @@ def save_figure(fig, filename, fig_data=None):
             print(f"Could not save interactive plot: {e}")
 
 # %% edit the figure later
-import pickle
-import numpy as np
+def edit_figure_later(filename=None):
+    """
+    Load a saved matplotlib figure pickle file, customize formatting/layout, and save as PDF.
 
-filename = "/home/bhattah/Documents/constrained_mechanics/data/2026-06-19/error_vs_basis_size.fig.pickle"
+    Parameters
+    ----------
+    filename : str, optional
+        Path to the `.fig.pickle` file. If None, defaults to the sample figure path.
 
-# # Configuration for custom labels
-# X_LABEL_CUSTOM = r'QDEIM basis size ($\ell$)'
-# Y_LABEL_LEFT_CUSTOM = 'Relative error'
-# Y_LABEL_RIGHT_CUSTOM = 'Function evaluation time (ms)'
+    Returns
+    -------
+    matplotlib.figure.Figure or None
+        The modified figure object if loaded and saved, else None.
+    """
+    if filename is None:
+        filename = "/home/bhattah/Documents/constrained_mechanics/data/2026-06-19/error_vs_basis_size.fig.pickle"
 
-if os.path.exists(filename):
-    with open(filename, "rb") as file:
-        figx = pickle.load(file)
+    if os.path.exists(filename):
+        with open(filename, "rb") as file:
+            figx = pickle.load(file)
 
-        # # Left Subplot (Relative Error)
-        # ax_left = figx.axes[0]
-        # ax_left.set_title("")  # Remove the title
-        # ax_left.set_xlabel(X_LABEL_CUSTOM)
-        # ax_left.set_ylabel(Y_LABEL_LEFT_CUSTOM)
-        # ax_left.set_ylim([1e-5, 1e0])  # Set range from 10^-5 to 10^0
-        # ax_left.set_yticks([1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1e0])
-        # ax_left.set_xlim([0,55])
+            # Increase axis and legend text size for the loaded figure.
+            for ax in figx.axes:
+                ax.tick_params(axis='both', labelsize=24)
+                ax.xaxis.label.set_size(26)
+                ax.yaxis.label.set_size(26)
+                ax.title.set_fontsize(26)
 
-        # # Right Subplot (Online Time)
-        # ax_right = figx.axes[1]
-        # ax_right.set_title("")  # Remove the title
-        # ax_right.set_xlabel(X_LABEL_CUSTOM)
-        # ax_right.set_ylabel(Y_LABEL_RIGHT_CUSTOM)
-        # ax_right.set_ylim([0, 6])  # Set range from 10^-5 to 10^0
-        # ax_right.set_yticks([0, 1, 2, 3, 4, 5, 6])
-        # ax_right.set_xlim([0,55])
-
-        # Increase axis and legend text size for the loaded figure.
-        for ax in figx.axes:
-            ax.tick_params(axis='both', labelsize=24)
-            ax.xaxis.label.set_size(26)
-            ax.yaxis.label.set_size(26)
-            ax.title.set_fontsize(26)
-            
-            # Increase marker sizes in all plot collections
-            for collection in ax.collections:
-                if hasattr(collection, 'set_sizes'):
-                    current_sizes = collection.get_sizes()
-                    if current_sizes is not None and len(current_sizes) > 0:
-                        collection.set_sizes(current_sizes + 4)
-                elif hasattr(collection, '_sizes'):
-                    current_sizes = collection._sizes
-                    if current_sizes is not None:
-                        collection._sizes = current_sizes + 4
-                # Ensure collections have a visible facecolor (fill) when hollow
-                try:
-                    # PathCollection: facecolors array may be empty for hollow markers
-                    facecolors = collection.get_facecolors()
-                    if facecolors is None or len(facecolors) == 0:
-                        edgecolors = None
-                        try:
-                            edgecolors = collection.get_edgecolors()
-                        except Exception:
-                            pass
-                        if edgecolors is not None and len(edgecolors) > 0:
-                            collection.set_facecolor(edgecolors)
-                        else:
-                            # Fallback: try to set to the collection color or a default
+                # Adjust axis limits dynamically based on line and collection data
+                xdata, ydata = [], []
+                for line in ax.get_lines():
+                    xd, yd = line.get_xdata(), line.get_ydata()
+                    if xd is not None and len(xd) > 0: xdata.extend(np.array(xd).flatten())
+                    if yd is not None and len(yd) > 0: ydata.extend(np.array(yd).flatten())
+                is_x_log = (ax.get_xscale() == 'log')
+                is_y_log = (ax.get_yscale() == 'log')
+                if xdata:
+                    x_pts = np.array(xdata)
+                    if is_x_log: x_pts = x_pts[np.isfinite(x_pts) & (x_pts > 0)]
+                    adjust_axis_limits(ax, x_pts, axis='x', is_log_scale=is_x_log, max_steps=5)
+                if ydata:
+                    y_pts = np.array(ydata)
+                    if is_y_log: y_pts = y_pts[np.isfinite(y_pts) & (y_pts > 0)]
+                    adjust_axis_limits(ax, y_pts, axis='y', is_log_scale=is_y_log, max_steps=5)
+                
+                # Increase marker sizes in all plot collections
+                for collection in ax.collections:
+                    if hasattr(collection, 'set_sizes'):
+                        current_sizes = collection.get_sizes()
+                        if current_sizes is not None and len(current_sizes) > 0:
+                            collection.set_sizes(current_sizes + 4)
+                    elif hasattr(collection, '_sizes'):
+                        current_sizes = collection._sizes
+                        if current_sizes is not None:
+                            collection._sizes = current_sizes + 4
+                    # Ensure collections have a visible facecolor (fill) when hollow
+                    try:
+                        # PathCollection: facecolors array may be empty for hollow markers
+                        facecolors = collection.get_facecolors()
+                        if facecolors is None or len(facecolors) == 0:
+                            edgecolors = None
                             try:
-                                col = collection.get_color()
-                                collection.set_facecolor(col)
+                                edgecolors = collection.get_edgecolors()
                             except Exception:
                                 pass
-                except Exception:
-                    pass
-            
-            # Also increase marker sizes for line objects
-            for line in ax.get_lines():
-                marker_size = line.get_markersize()
-                if marker_size > 0:
-                    line.set_markersize(marker_size + 4)
-                # Ensure Line2D markers are filled instead of hollow
-                try:
-                    if hasattr(line, 'set_fillstyle'):
-                        try:
-                            line.set_fillstyle('full')
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-                try:
-                    mfc = None
-                    try:
-                        mfc = line.get_markerfacecolor()
-                    except Exception:
-                        mfc = None
-                    if mfc is None or mfc == 'none':
-                        try:
-                            line.set_markerfacecolor(line.get_color())
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-
-        # Ensure R2C1 subplot (third axis) has the correct ylabel
-        try:
-            if len(figx.axes) >= 3:
-                ax_r2c1 = figx.axes[2]
-                ax_r2c1.set_ylabel('Mean speedup factor')
-                ax_r2c1.yaxis.label.set_size(26)
-        except Exception:
-            pass
-
-        # Reposition existing legends to the top-right outside all subplots.
-        existing_legends = getattr(figx, 'legends', [])
-        if existing_legends:
-            for i, legend in enumerate(existing_legends):
-                legend.set_bbox_to_anchor((1.02, 0.98 - i * 0.18))
-                # legend.set_bbox_transform(figx.transFigure)
-                legend.set_loc('upper left')
-                for text in legend.get_texts():
-                    text.set_fontsize(24)
-                # Collect legend handles in a backwards-compatible way
-                if hasattr(legend, 'legendHandles'):
-                    handles = legend.legendHandles
-                else:
-                    # Fall back to common accessors available on Legend
-                    handles = []
-                    try:
-                        handles.extend(legend.get_lines())
-                    except Exception:
-                        pass
-                    try:
-                        handles.extend(legend.get_patches())
-                    except Exception:
-                        pass
-
-                for handle in handles:
-                    if hasattr(handle, 'set_fillstyle'):
-                        try:
-                            handle.set_fillstyle('full')
-                        except Exception:
-                            pass
-                    if hasattr(handle, 'set_markerfacecolor'):
-                        try:
-                            facecolor = handle.get_markerfacecolor()
-                        except Exception:
-                            facecolor = None
-                        if facecolor == 'none' or facecolor is None:
-                            if hasattr(handle, 'get_color'):
+                            if edgecolors is not None and len(edgecolors) > 0:
+                                collection.set_facecolor(edgecolors)
+                            else:
+                                # Fallback: try to set to the collection color or a default
                                 try:
-                                    handle.set_markerfacecolor(handle.get_color())
+                                    col = collection.get_color()
+                                    collection.set_facecolor(col)
                                 except Exception:
                                     pass
-                title = legend.get_title()
-                if title is not None:
-                    title.set_fontsize(26)
-            figx.subplots_adjust(right=0.70)
-        else:
-            # Fallback: create a combined figure legend if no legends were saved.
-            all_handles = []
-            all_labels = []
-            for ax in figx.axes:
-                handles, labels = ax.get_legend_handles_labels()
-                for h, l in zip(handles, labels):
-                    if l not in all_labels:
-                        if hasattr(h, 'set_fillstyle'):
-                            h.set_fillstyle('full')
-                        if hasattr(h, 'set_markerfacecolor'):
-                            facecolor = h.get_markerfacecolor()
-                            if facecolor == 'none' or facecolor is None:
-                                if hasattr(h, 'get_color'):
-                                    h.set_markerfacecolor(h.get_color())
-                        all_handles.append(h)
-                        all_labels.append(l)
-            if all_handles:
-                figx.legend(all_handles, all_labels,
-                            loc='upper left', bbox_to_anchor=(1.02, 0.98),
-                            bbox_transform=figx.transFigure,
-                            frameon=True, title='Legend', fontsize=24, title_fontsize=26)
-                figx.subplots_adjust(right=0.70)
+                    except Exception:
+                        pass
+                
+                # Also increase marker sizes for line objects
+                for line in ax.get_lines():
+                    marker_size = line.get_markersize()
+                    if marker_size > 0:
+                        line.set_markersize(marker_size + 4)
+                    # Ensure Line2D markers are filled instead of hollow
+                    try:
+                        if hasattr(line, 'set_fillstyle'):
+                            try:
+                                line.set_fillstyle('full')
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    try:
+                        mfc = None
+                        try:
+                            mfc = line.get_markerfacecolor()
+                        except Exception:
+                            mfc = None
+                        if mfc is None or mfc == 'none':
+                            try:
+                                line.set_markerfacecolor(line.get_color())
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
 
-        pdf_path = filename.replace(".fig.pickle", ".pdf")
-        if os.path.exists(pdf_path):
+            # Ensure R2C1 subplot (third axis) has the correct ylabel
             try:
-                os.remove(pdf_path)
-            except Exception as e:
-                print(f"Could not remove existing PDF {pdf_path}: {e}")
-        figx.savefig(pdf_path, bbox_inches='tight', pad_inches=0.5, dpi=300)
+                if len(figx.axes) >= 3:
+                    ax_r2c1 = figx.axes[2]
+                    ax_r2c1.set_ylabel('Mean speedup factor')
+                    ax_r2c1.yaxis.label.set_size(26)
+            except Exception:
+                pass
+
+            # Reposition existing legends to the top-right outside all subplots.
+            existing_legends = getattr(figx, 'legends', [])
+            if existing_legends:
+                for i, legend in enumerate(existing_legends):
+                    legend.set_bbox_to_anchor((1.02, 0.98 - i * 0.18))
+                    # legend.set_bbox_transform(figx.transFigure)
+                    legend.set_loc('upper left')
+                    for text in legend.get_texts():
+                        text.set_fontsize(24)
+                    # Collect legend handles in a backwards-compatible way
+                    if hasattr(legend, 'legendHandles'):
+                        handles = legend.legendHandles
+                    else:
+                        # Fall back to common accessors available on Legend
+                        handles = []
+                        try:
+                            handles.extend(legend.get_lines())
+                        except Exception:
+                            pass
+                        try:
+                            handles.extend(legend.get_patches())
+                        except Exception:
+                            pass
+
+                    for handle in handles:
+                        if hasattr(handle, 'set_fillstyle'):
+                            try:
+                                handle.set_fillstyle('full')
+                            except Exception:
+                                pass
+                        if hasattr(handle, 'set_markerfacecolor'):
+                            try:
+                                facecolor = handle.get_markerfacecolor()
+                            except Exception:
+                                facecolor = None
+                            if facecolor == 'none' or facecolor is None:
+                                if hasattr(handle, 'get_color'):
+                                    try:
+                                        handle.set_markerfacecolor(handle.get_color())
+                                    except Exception:
+                                        pass
+                    title = legend.get_title()
+                    if title is not None:
+                        title.set_fontsize(26)
+                figx.subplots_adjust(right=0.70)
+            else:
+                # Fallback: create a combined figure legend if no legends were saved.
+                all_handles = []
+                all_labels = []
+                for ax in figx.axes:
+                    handles, labels = ax.get_legend_handles_labels()
+                    for h, l in zip(handles, labels):
+                        if l not in all_labels:
+                            if hasattr(h, 'set_fillstyle'):
+                                h.set_fillstyle('full')
+                            if hasattr(h, 'set_markerfacecolor'):
+                                facecolor = h.get_markerfacecolor()
+                                if facecolor == 'none' or facecolor is None:
+                                    if hasattr(h, 'get_color'):
+                                        h.set_markerfacecolor(h.get_color())
+                            all_handles.append(h)
+                            all_labels.append(l)
+                if all_handles:
+                    figx.legend(all_handles, all_labels,
+                                loc='upper left', bbox_to_anchor=(1.02, 0.98),
+                                bbox_transform=figx.transFigure,
+                                frameon=True, title='Legend', fontsize=24, title_fontsize=26)
+                    figx.subplots_adjust(right=0.70)
+
+            pdf_path = filename.replace(".fig.pickle", ".pdf")
+            if os.path.exists(pdf_path):
+                try:
+                    os.remove(pdf_path)
+                except FileNotFoundError:
+                    print(f"File not found when trying to remove existing PDF {pdf_path}.")
+                except Exception as e:
+                    print(f"Could not remove existing PDF {pdf_path}: {e}")
+            figx.savefig(pdf_path, bbox_inches='tight', pad_inches=0.5, dpi=300)
+            return figx
+    else:
+        print(f"Figure file not found: {filename}")
+        return None
+
+# Convenience aliases
+edit_figure = edit_figure_later
+edit_saved_figure = edit_figure_later
     # figx.savefig("data/2025-12-20_12-43_/osc_ConformalStormerVerletSolver_full_2.eps")
 
 # %%
@@ -644,6 +672,10 @@ def plot_3dsurface(fig, ax, xx, yy, zz):
     ax.set_xticks([0,1])
     ax.set_yticks([0,1])
     ax.set_zlim3d(-1, abs(zz).max())
+
+    adjust_axis_limits(ax, xx.flatten(), axis='x', is_log_scale=False)
+    adjust_axis_limits(ax, yy.flatten(), axis='y', is_log_scale=False)
+    adjust_axis_limits(ax, zz.flatten(), axis='z', is_log_scale=False, max_steps=2)
 
 def plot_pareto(time_lapsed, errors_r, errors_dr, solver_names, dt_space, data_folder):
     """
@@ -731,6 +763,21 @@ def plot_pareto(time_lapsed, errors_r, errors_dr, solver_names, dt_space, data_f
             ax.set_ylabel('Mean global error')
         ax.set_title(f'{solver_name}')
         ax.grid(True, which="both", ls="-", alpha=0.3)
+
+        # Adjust log-scale x and y axis limits
+        x_points = np.concatenate([
+            avg_time_red[i].flatten(), 
+            avg_time_hyper[i].flatten(), 
+            avg_time_full[i].flatten()
+        ])
+        y_points = np.concatenate([
+            mean_err_red[i].flatten(), 
+            mean_err_hyper[i].flatten()
+        ])
+        x_points_valid = x_points[np.isfinite(x_points) & (x_points > 0)]
+        y_points_valid = y_points[np.isfinite(y_points) & (y_points > 0)]
+        adjust_axis_limits(ax, x_points_valid, axis='x', is_log_scale=True, max_steps=5)
+        adjust_axis_limits(ax, y_points_valid, axis='y', is_log_scale=True, max_steps=5)
         
         # Collect handles for common legend on first pass
         if i == 0:
@@ -760,7 +807,10 @@ def adjust_axis_limits(ax, data_points, axis='y', is_log_scale=False, max_steps=
     Adjust axis limits based on data range and current tick intervals.
     Extends limits by tick steps if data overflows.
     """
-    if not data_points:
+    if data_points is None:
+        return
+    data_points = np.asarray(data_points)
+    if data_points.size == 0:
         return
 
     ax.relim()
@@ -1181,9 +1231,6 @@ def plot_prediction_results(solver_names, pod_tols, dt_space, data_folder,
     plt.close(fig)
 
 
-# %% Testing
-def test_PlotScript():
-    raise NotImplementedError
-
 if __name__ == '__main__':
-    test_PlotScript()
+    edit_figure_later()
+

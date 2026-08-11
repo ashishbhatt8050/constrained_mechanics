@@ -36,33 +36,12 @@ from dask.distributed import Client, wait, LocalCluster
 # Local application imports
 from ConcreteSolvers import (BaseSolverMixin, DiscreteGradientSolver, 
                             ConformalStormerVerletSolver, ConformalImplicitMidpointSolver,
-                            REDUCED_SOLVER_MAPPING, HYPERREDUCED_SOLVER_MAPPING)
+                            REDUCED_SOLVER_MAPPING, HYPERREDUCED_SOLVER_MAPPING,
+                            _matches_solver_family)
 from ReduceMechSystem import ReduceMechSystem
 from System import MechSystem, HamiltonianMechSystem, LagrangianMechSystem, load_symbolic_expressions, fast_dump, fast_load
 from SymbolicComputer import IndexedBaseSymbolicComputer, manage_cache
 from PlotScript import plot_omega_distribution, plot_pareto, plot_error_vs_basis_size, plot_prediction_results
-
-# ---------------------------------------------------------------------------
-# Helper functions for prediction-mode metric collection
-# ---------------------------------------------------------------------------
-def _matches_solver_family(solver, base_cls):
-    """Check if a solver belongs to the same family as base_cls (handles
-    Reduced/HyperReduced naming variants)."""
-    if solver is None:
-        return False
-    solver_class = getattr(solver, 'solver_class', None)
-    if solver_class is None:
-        return False
-    if solver_class is base_cls:
-        return True
-    if issubclass(solver_class, base_cls):
-        return True
-    if issubclass(base_cls, solver_class):
-        return True
-    # IMPORTANT: replace 'HyperReduced' BEFORE 'Reduced', otherwise
-    # 'HyperReduced' → 'Hyper' and the second replace can't catch it.
-    return (solver_class.__name__.replace('HyperReduced', '').replace('Reduced', '')
-            == base_cls.__name__.replace('HyperReduced', '').replace('Reduced', ''))
 
 
 def _collect_metric(solver_list, cls, metric_fn):
@@ -75,27 +54,6 @@ def _collect_metric(solver_list, cls, metric_fn):
     return np.array(values).reshape(MechSystem.dt_space_dim, -1)
 
 
-def _compute_lin_mom_error(solver):
-    """Max deviation of linear momentum from its initial value."""
-    nosc = solver.nosc
-    lin_mom = np.sum(solver.y[:, nosc:].reshape(-1, nosc // 3, 3), axis=1)
-    return np.amax(r_[0, LA.norm(lin_mom[1:] - lin_mom[0], axis=1)])
-
-
-def _compute_ang_mom_error(solver):
-    """Max deviation of angular momentum from its initial value."""
-    nosc = solver.nosc
-    q = solver.y[:, :nosc].reshape(-1, nosc // 3, 3)
-    p = solver.y[:, nosc:].reshape(-1, nosc // 3, 3)
-    ang_mom = np.sum(np.cross(q, p), axis=1)
-    return np.amax(r_[0, LA.norm(ang_mom[1:] - ang_mom[0], axis=1)])
-
-
-def _compute_phase_error(solver):
-    """Max constraint violation (‖g_λ(y)‖) over the whole trajectory."""
-    return np.amax([LA.norm(solver.g__lambda(y)) for y in solver.y])
-
-
 # ---------------------------------------------------------------------------
 # Metric descriptors – used to drive the repetitive collection loop
 # ---------------------------------------------------------------------------
@@ -105,11 +63,11 @@ def _compute_phase_error(solver):
 #   guard_check:            callable(solver_list) → bool; if False the metric
 #                           is skipped entirely for this tolerance
 _PREDICTION_METRICS = [
-    ('sym_error',   lambda s: np.amax(s.sym_error),   lambda sl: hasattr(sl[0], 'sym_error')),
-    ('energy_error', lambda s: np.amax(s.eng_error),   lambda sl: hasattr(sl[0], 'eng_error')),
-    ('phase_error',  _compute_phase_error,             lambda sl: True),
-    ('lin_mom_error', _compute_lin_mom_error,           lambda sl: True),
-    ('ang_mom_error', _compute_ang_mom_error,           lambda sl: True),
+    ('sym_error',      lambda s: np.amax(s.sym_error) if getattr(s, 'sym_error', None) is not None else np.nan,  lambda sl: any(s is not None and getattr(s, 'sym_error', None) is not None for s in sl)),
+    ('energy_error',   lambda s: np.amax(s.eng_error) if getattr(s, 'eng_error', None) is not None else np.nan,  lambda sl: any(s is not None and getattr(s, 'eng_error', None) is not None for s in sl)),
+    ('phase_error',    lambda s: getattr(s, 'phase_error', np.nan),  lambda sl: True),
+    ('lin_mom_error',  lambda s: getattr(s, 'lin_mom_error', np.nan), lambda sl: True),
+    ('ang_mom_error',  lambda s: getattr(s, 'ang_mom_error', np.nan), lambda sl: True),
 ]
 
 
@@ -193,7 +151,8 @@ if __name__ == '__main__':
 
     kwds.update({
         'Omega2_space': MechSystem.Omega2_space,
-        'Omega2_space_dim': len(MechSystem.Omega2_space)
+        'Omega2_space_dim': len(MechSystem.Omega2_space),
+        'pod_tol_sweep': MechSystem.pod_tol_sweep
         })
     
     # Dask Cluster Configuration
@@ -225,18 +184,22 @@ if __name__ == '__main__':
         
     cluster = LocalCluster(n_workers=n_workers, threads_per_worker=threads_per_worker)
     
-    print(f"Dask Dashboard: {cluster.dashboard_link}", flush=True)
+    print(f"Dask Dashboard (internal compute node address): {cluster.dashboard_link}", flush=True)
     
     if cluster.dashboard_link:
         try:
+            import socket
             from urllib.parse import urlparse
             parsed = urlparse(cluster.dashboard_link)
             port = parsed.port
-            host = parsed.hostname
-            print(f"\nTo access the dashboard from your local machine, run:")
-            print(f"ssh -N -L {port}:{host}:{port} <your_username>@<cluster_login_node>")
-            print(f"(If local port {port} is busy, try: ssh -N -L 8080:{host}:{port} ... and open http://localhost:8080/status)")
-            print(f"Then open http://localhost:{port}/status in your browser.\n", flush=True)
+            node_host = socket.gethostname()
+            print(f"\n[Dask Dashboard Access Instructions]", flush=True)
+            print(f"The dashboard is running on compute node '{node_host}' at port {port}.", flush=True)
+            print(f"Direct links to 127.0.0.1 will fail from your local browser because the dashboard is on a remote compute node.", flush=True)
+            print(f"To access the dashboard from your local machine, open a local terminal and run:", flush=True)
+            print(f"  ssh -N -L {port}:{node_host}:{port} <your_username>@<cluster_login_node>", flush=True)
+            print(f"(If local port {port} is busy on your machine, try: ssh -N -L 8080:{node_host}:{port} ... and open http://localhost:8080/status)", flush=True)
+            print(f"Then open http://localhost:{port}/status in your local web browser.\n", flush=True)
         except Exception:
             pass
 
@@ -265,7 +228,8 @@ if __name__ == '__main__':
             print("Creating new checkpoint for full model...")
             fast_dump(kwds, kwds_file)
             fast_dump(solvers, solvers_file)
-        BaseSolverMixin.measures(kwds, solvers)
+        BaseSolverMixin.compute_convergence_rates(kwds, solvers)
+        BaseSolverMixin.plot_solvers(kwds, solvers)
 
         # --- Reduced order solution ---
         print('Computing reduced bases...')
@@ -286,9 +250,9 @@ if __name__ == '__main__':
             'ang_mom_error_f': [], 'ang_mom_error_r': [], 'ang_mom_error_dr': []
         } for cls in original_solver_classes}
 
-        for tol in MechSystem.pod_tol_sweep:
+        for tol in kwds['pod_tol_sweep']:
             print(f"\n>>> Running MOR sweep for tolerance: {tol}")
-            MechSystem.pod_tol_ham = MechSystem.pod_tol_dg = tol
+            kwds['pod_tol'] = tol
             
             # Reset registered classes to original full-order versions at start of each sweep
             kwds['registered_solver_classes'] = list(original_solver_classes)
@@ -308,7 +272,7 @@ if __name__ == '__main__':
                     # Iterate through all solvers to ensure strict alignment between full, reduced, and hyper-reduced results
                     for s_f, s_r, s_dr in zip(solvers, solvers_r, solvers_dr):
                         # Only calculate error if the full order reference corresponds to the current class
-                        if s_f is not None and s_f.solver_class == cls:
+                        if s_f is not None and _matches_solver_family(s_f, cls):
                             # Convergence check: both reduced and hyper-reduced solvers must have succeeded
                             if s_r is not None and s_dr is not None:
                                 current_err_r = np.amax(abs(s_f.y - s_r.y)) / np.amax(abs(s_f.y))
@@ -323,15 +287,15 @@ if __name__ == '__main__':
                                     nosc_dr_for_tol = s_dr.RBxUx_inv_PxU.shape[1]//2
 
                     # Capture raw timing and errors for box plots
-                    times_r_list = [s.time_lapsed[0] if s else np.nan for s_f, s in zip(solvers, solvers_r) if s_f is not None and s_f.solver_class == cls]
-                    times_dr_list = [s.time_lapsed[0] if s else np.nan for s_f, s in zip(solvers, solvers_dr) if s_f is not None and s_f.solver_class == cls]
+                    times_r_list = [s.time_lapsed[0] if s else np.nan for s_f, s in zip(solvers, solvers_r) if s_f is not None and _matches_solver_family(s_f, cls)]
+                    times_dr_list = [s.time_lapsed[0] if s else np.nan for s_f, s in zip(solvers, solvers_dr) if s_f is not None and _matches_solver_family(s_f, cls)]
                     
                     study_data[cls.__name__]['times_r'].append(np.array(times_r_list).reshape(MechSystem.dt_space_dim, -1))
                     study_data[cls.__name__]['times_dr'].append(np.array(times_dr_list).reshape(MechSystem.dt_space_dim, -1))
 
                     # Print success counts for monitoring
                     num_success = len(errs_r_for_tol)
-                    num_expected = sum(1 for s in solvers if s and s.solver_class == cls)
+                    num_expected = sum(1 for s in solvers if s and _matches_solver_family(s, cls))
                     print(f"  [{cls.__name__}] Successful solvers for tol={tol}: {num_success}/{num_expected}")
 
                     if not np.isnan(nosc_r_for_tol): # Only append if at least one solver succeeded for this tol
@@ -379,8 +343,8 @@ if __name__ == '__main__':
                 print(f"  {name:40} | times_r: {len(t_r)} (tols) x {t_r[0].shape if len(t_r)>0 else 'N/A'} (dt x params)")
 
             # Prepare raw full order data
-            f_times_raw = {cls.__name__: np.array([s.time_lapsed[0] for s in solvers if s.solver_class == cls]).reshape(MechSystem.dt_space_dim, -1) for cls in original_solver_classes}
-            f_errs_raw = {cls.__name__: np.array([s.en_error if hasattr(s, 'en_error') else np.nan for s in solvers if s.solver_class == cls]).reshape(MechSystem.dt_space_dim, -1) for cls in original_solver_classes}
+            f_times_raw = {cls.__name__: np.array([s.time_lapsed[0] for s in solvers if s and _matches_solver_family(s, cls)]).reshape(MechSystem.dt_space_dim, -1) for cls in original_solver_classes}
+            f_errs_raw = {cls.__name__: np.array([s.en_error if hasattr(s, 'en_error') else np.nan for s in solvers if s and _matches_solver_family(s, cls)]).reshape(MechSystem.dt_space_dim, -1) for cls in original_solver_classes}
 
             plot_error_vs_basis_size(
                 [study_data[n]['sizes'] for n in study_data],
@@ -399,7 +363,7 @@ if __name__ == '__main__':
             full_time_map = {}
             for cls in original_solver_classes:
                 key = cls.__name__
-                t_full = np.array([s.time_lapsed[0] if s is not None else np.nan for s in solvers if s.solver_class == cls])
+                t_full = np.array([s.time_lapsed[0] if s is not None else np.nan for s in solvers if s is not None and _matches_solver_family(s, cls)])
                 full_time_map[key] = t_full.reshape(MechSystem.dt_space_dim, -1)
 
             # Debug: Print data structure info & metric averages before calling plot_prediction_results

@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 
 from System import (MechSystem, HamiltonianMechSystem, LagrangianMechSystem,
                    ReducedHamiltonianMechSystem, ReducedLagrangianMechSystem, HyperReducedHamiltonianMechSystem, HyperReducedLagrangianMechSystem,
-                   fast_dump, fast_load)
+                   fast_dump, fast_load, check_checkpoint_exists)
 from ODESolver import (ConformalStormerVerlet, ConformalImplicitMidpoint, 
                       DiscreteGradient)
 from ReduceMechSystem import ReduceMechSystem, HamiltonianReducer, DiscreteGradientReducer
@@ -416,12 +416,12 @@ class BaseSolverMixin:
         solvers_r = []
 
         # Try to load from checkpoint
-        checkpoint_path = os.path.join('data', f'{MechSystem.keep_time}')
+        checkpoint_path = MechSystem.data_folder
         tol_suffix = f"tol_{pod_tol:.1e}"
         kwds_file = os.path.join(checkpoint_path, f'kwds_r_{tol_suffix}.joblib')
         solvers_file = os.path.join(checkpoint_path, f'solvers_r_{tol_suffix}.joblib')
 
-        if os.path.exists(checkpoint_path) and os.path.exists(kwds_file) and os.path.exists(solvers_file):
+        if check_checkpoint_exists(checkpoint_path, kwds_file, solvers_file):
             try:
                 print("Loading from checkpoint...")
                 kwds = fast_load(kwds_file)
@@ -476,12 +476,12 @@ class BaseSolverMixin:
         solvers_dr = []
 
         # Try to load from checkpoint
-        checkpoint_path = os.path.join('data', f'{MechSystem.keep_time}')
+        checkpoint_path = MechSystem.data_folder
         tol_suffix = f"tol_{pod_tol:.1e}"
         kwds_file = os.path.join(checkpoint_path, f'kwds_dr_{tol_suffix}.joblib')
         solvers_file = os.path.join(checkpoint_path, f'solvers_dr_{tol_suffix}.joblib')
 
-        if os.path.exists(checkpoint_path) and os.path.exists(kwds_file) and os.path.exists(solvers_file):
+        if check_checkpoint_exists(checkpoint_path, kwds_file, solvers_file):
             try:
                 print("Loading from checkpoint...")
                 kwds = fast_load(kwds_file)

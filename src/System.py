@@ -27,17 +27,42 @@ rng = np.random.default_rng(
     seed=267257368022227711484290921317604022527
 )  # rng = np.random.default_rng(seed=408394104)  # Create RNG with fixed seed
 
+import shutil
+
 # High-performance compressed serialization helpers for large checkpoints
 def fast_dump(obj, filename):
     """Save object using cloudpickle with LZ4 compression and a 16MB I/O buffer."""
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
     tmp_filename = filename + ".tmp"
     with open(tmp_filename, 'wb', buffering=16 * 1024 * 1024) as raw_f:
         with lz4.frame.open(raw_f, 'wb') as f:
             pickle.dump(obj, f)
     os.replace(tmp_filename, filename)
 
+    # Immediately mirror checkpoint to persistent master node storage if running in local scratch
+    scratch_base = os.environ.get("SCRATCH_DIR") or os.environ.get("SLURM_TMPDIR")
+    if scratch_base and os.path.abspath(filename).startswith(os.path.abspath(scratch_base)):
+        rel_path = os.path.relpath(os.path.abspath(filename), os.path.abspath(scratch_base))
+        master_file = os.path.abspath(rel_path)
+        try:
+            os.makedirs(os.path.dirname(master_file), exist_ok=True)
+            shutil.copy2(filename, master_file)
+            print(f"💾 Mirrored checkpoint to master storage: {master_file}", flush=True)
+        except Exception as e:
+            print(f"Warning: Could not mirror checkpoint to master storage ({e})", flush=True)
+
 def fast_load(filename):
     """Load object using cloudpickle with LZ4 decompression and 16MB I/O buffer fallback."""
+    if not os.path.exists(filename):
+        scratch_base = os.environ.get("SCRATCH_DIR") or os.environ.get("SLURM_TMPDIR")
+        if scratch_base and os.path.abspath(filename).startswith(os.path.abspath(scratch_base)):
+            rel_path = os.path.relpath(os.path.abspath(filename), os.path.abspath(scratch_base))
+            master_file = os.path.abspath(rel_path)
+            if os.path.exists(master_file):
+                print(f"📥 Restoring checkpoint file from master storage fallback ({master_file})...", flush=True)
+                os.makedirs(os.path.dirname(filename), exist_ok=True)
+                shutil.copy2(master_file, filename)
+
     try:
         with open(filename, 'rb', buffering=16 * 1024 * 1024) as raw_f:
             with lz4.frame.open(raw_f, 'rb') as f:
@@ -47,12 +72,69 @@ def fast_load(filename):
         with open(filename, 'rb', buffering=16 * 1024 * 1024) as f:
             return pickle.load(f)
 
+def get_data_dir(subpath=""):
+    """
+    Return data directory path. Prefers local scratch directory if set via SCRATCH_DIR or SLURM_TMPDIR,
+    otherwise falls back to 'data' in current working directory.
+    """
+    scratch_base = os.environ.get("SCRATCH_DIR") or os.environ.get("SLURM_TMPDIR")
+    if scratch_base:
+        base = os.path.join(scratch_base, 'data')
+    else:
+        base = 'data'
+    if subpath:
+        return os.path.join(base, subpath)
+    return base
+
+def get_symbolic_expressions_file(nosc):
+    """
+    Locates symbolic expressions pickle file. Checks scratch data directory first,
+    falling back to root 'data' directory if present there.
+    """
+    filename = f"symbolic_expr_{nosc}_cse.pickle"
+    scratch_file = get_data_dir(filename)
+    persistent_file = os.path.join('data', filename)
+    
+    if not os.path.exists(scratch_file) and os.path.exists(persistent_file):
+        return persistent_file
+    return scratch_file
+
+def check_checkpoint_exists(checkpoint_path, *files):
+    """
+    Checks if checkpoint directory and specified files exist in local scratch or persistent master storage.
+    If present in master storage but missing in scratch, automatically restores them to scratch.
+    """
+    scratch_base = os.environ.get("SCRATCH_DIR") or os.environ.get("SLURM_TMPDIR")
+
+    # 1. Check if all files exist directly at target path
+    if os.path.exists(checkpoint_path) and all(os.path.exists(f) for f in files):
+        return True
+
+    # 2. If target path is in scratch, check if files exist in persistent master storage
+    if scratch_base and os.path.abspath(checkpoint_path).startswith(os.path.abspath(scratch_base)):
+        rel_checkpoint = os.path.relpath(os.path.abspath(checkpoint_path), os.path.abspath(scratch_base))
+        master_checkpoint = os.path.abspath(rel_checkpoint)
+
+        master_files = [
+            os.path.abspath(os.path.relpath(os.path.abspath(f), os.path.abspath(scratch_base)))
+            for f in files
+        ]
+
+        if os.path.exists(master_checkpoint) and all(os.path.exists(mf) for mf in master_files):
+            print(f"📥 Restoring checkpoint from master storage ({master_checkpoint}) to local scratch ({checkpoint_path})...", flush=True)
+            os.makedirs(checkpoint_path, exist_ok=True)
+            for mf, sf in zip(master_files, files):
+                shutil.copy2(mf, sf)
+            return True
+
+    return False
+
 # %%
 def load_symbolic_expressions(cls):
     """Decorator to handle loading/saving of symbolic expressions"""
     try:
         # Try to load expressions
-        expressions_file = os.path.join('data', f"symbolic_expr_{cls.nosc}_cse.pickle")
+        expressions_file = get_symbolic_expressions_file(cls.nosc)
         expressions = fast_load(expressions_file)
 
         # print("Loaded symbolic expressions from disk.")
@@ -117,11 +199,11 @@ class SysConfig:
     assert all(pod_tol_sweep[i] >= pod_tol_sweep[i + 1] for i in range(len(pod_tol_sweep) - 1)), "pod_tol_sweep must be in descending order"
     
     predict = True # False = reproduce results of the full model
-    train_ratio = 0.8
+    train_ratio = 0.7
     reducer = 'psd'
     hyperreducer = 'MDEIM'
     constraint_type = 'spherical'
-    constraints_reduce = True
+    constraints_reduce = False # True = hyper-reduce constraints, False = reduce constraints
     
     # System parameters
     nosc = 54 * 10  # Number of oscillators
@@ -130,8 +212,8 @@ class SysConfig:
     if predict: # prediction parameters
         # Time-stepping parameters
         dt_space_dim = 1
-        dt_space = np.array([0.005])
-        T_final = dt_space[-1] * 1e3
+        dt_space = np.array([0.001])
+        T_final = dt_space[-1] * 3e3
 
         # Parameter space for Omega^2
         _Omega2_space_dim = nosc // 3 - 2
@@ -146,7 +228,7 @@ class SysConfig:
 
     # Generate random parameter space for Omega^2 in range (0, 10]
     num_freqs = nosc // 3 - 2
-    _Omega2_space = np.sort(1 * (1 - rng.random((_Omega2_space_dim, num_freqs))), axis=1)
+    _Omega2_space = np.sort(3 * (1 - rng.random((_Omega2_space_dim, num_freqs))), axis=1)
 
     # Freeze higher frequencies across samples to match the first sample
     # freeze_idx = _Omega2_space_dim // 2
@@ -172,10 +254,8 @@ class MechSystem(SysConfig):
     and methods for evaluating system dynamics (Hamiltonian, Lagrangian, constraints).
     """
 
-    keep_time = datetime.now().strftime("%Y-%m-%d") #_%H-%M-%S")
-    data_folder = os.path.join('data', keep_time)
-    # if not os.path.exists(data_folder):
-    #     os.makedirs(data_folder)
+    keep_time = os.environ.get("JOB_KEEP_TIME") or datetime.now().strftime("%Y-%m-%d") #_%H-%M-%S")
+    data_folder = get_data_dir(keep_time)
     os.makedirs(data_folder, exist_ok=True)
 
     @staticmethod

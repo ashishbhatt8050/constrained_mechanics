@@ -1,10 +1,12 @@
 #!/bin/bash
 
-# Run this as "sbatch submit_job_slurm.sh"
-
-# Set a name for this run and the resource requirements,
-# Exclusive node access (all CPUs), all available memory and 24 hours wall time.
-# TODO: install latex on compute nodes
+# ==============================================================================
+# SLURM Job Submission & Monitoring Script for app8_lattice
+#
+# Usage:
+#   sbatch submit_job_slurm.sh          Submit job to SLURM cluster
+#   ./submit_job_slurm.sh monitor [ID]  Monitor running/recent job
+# ==============================================================================
 
 #SBATCH --job-name=app8_lattice
 #SBATCH --output=app8_lattice-%j.out
@@ -12,208 +14,200 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=100G
-#SBATCH --time=1-00:00:00
+#SBATCH --time=3-00:00:00
 #SBATCH --partition=high_cpuq
 #SBATCH --account=high_cpu_acct
 #SBATCH --qos=high_cpu_qos
 
-# To use GPU, uncomment the following two lines:
+# To use GPU, uncomment the following lines:
 # SBATCH --partition=gpuq
 # SBATCH --gres=gpu:1
 # SBATCH --account=gpu_users
 
-# Send an email when this job aborts, begins or ends.
-#SBATCH --mail-type=ALL
+# Notification settings
+# SBATCH --mail-type=ALL
 # SBATCH --mail-user=
 
-# Ensure the script exits with an error if the python command fails
-set -o pipefail
-set -e
+# -----------------------------------------------------------------------------
+# Interactive Monitoring Mode
+# -----------------------------------------------------------------------------
+monitor_job() {
+    local JOBID="$1"
+    
+    # Auto-detect job ID if not supplied
+    if [ -z "$JOBID" ]; then
+        JOBID=$(squeue -u "$USER" -o "%i %j" -h 2>/dev/null | grep "app8_lattice" | head -n 1 | awk '{print $1}')
+        if [ -z "$JOBID" ]; then
+            local LATEST_OUT=$(ls -t app8_lattice-*.out 2>/dev/null | head -n 1)
+            [ -n "$LATEST_OUT" ] && JOBID=$(echo "$LATEST_OUT" | sed -E 's/app8_lattice-([0-9]+)\.out/\1/')
+        fi
+    fi
 
-# Increase stack size to prevent segfaults from deep recursion in symbolic math
+    if [ -z "$JOBID" ]; then
+        echo "Error: No active or recent 'app8_lattice' job found."
+        echo "Usage: $0 monitor <jobid>"
+        exit 1
+    fi
+
+    local LOGFILE="app8_lattice-${JOBID}.out"
+    [ ! -f "$LOGFILE" ] && [ -f "logfile.txt" ] && LOGFILE="logfile.txt"
+
+    echo "🔎 Monitoring SLURM job ID: $JOBID (Press Ctrl+C to exit)"
+    
+    while true; do
+        clear
+        echo "===== SLURM Job Queue Status ====="
+        squeue -j "$JOBID" 2>/dev/null || echo "Job $JOBID not in active queue."
+
+        echo -e "\n===== Job Details ====="
+        scontrol show job "$JOBID" 2>/dev/null | egrep "JobId=|JobState=|RunTime=|NodeList=|NumCPUs=|NumNodes=|MinMemoryNode=|GRES=" || echo "No scontrol info available."
+
+        echo -e "\n===== Live Resource Usage ====="
+        sstat -j "${JOBID}.batch" --format=JobID,MaxRSS,AveRSS,AveCPU,MaxVMSize 2>/dev/null || echo "sstat output unavailable."
+
+        echo -e "\n===== GPU Usage (nvidia-smi via srun) ====="
+        srun --jobid="$JOBID" --exclusive -N1 nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits 2>/dev/null || echo "No GPU assigned or srun unavailable."
+
+        echo -e "\n===== Recent Log Output ($LOGFILE) ====="
+        if [ -f "$LOGFILE" ]; then
+            tail -n 15 "$LOGFILE"
+        else
+            echo "Log file $LOGFILE not found."
+        fi
+
+        sleep 10
+    done
+}
+
+# -----------------------------------------------------------------------------
+# Dispatcher: Monitor command or interactive invocation
+# -----------------------------------------------------------------------------
+if [ "$1" = "monitor" ] || [ "$1" = "status" ] || [[ "$1" =~ ^[0-9]+$ ]]; then
+    JOB_ARG="$1"
+    [ "$JOB_ARG" = "monitor" ] || [ "$JOB_ARG" = "status" ] && JOB_ARG="$2"
+    monitor_job "$JOB_ARG"
+    exit 0
+fi
+
+if [ -z "$SLURM_JOB_ID" ] && [ -t 0 ]; then
+    echo "Usage:"
+    echo "  sbatch submit_job_slurm.sh [YYYY-MM-DD]    Submit job to SLURM cluster (optional target date)"
+    echo "  ./submit_job_slurm.sh monitor [ID]         Monitor running job"
+    exit 0
+fi
+
+# -----------------------------------------------------------------------------
+# Batch Execution Mode (Runs when submitted via sbatch)
+# -----------------------------------------------------------------------------
+set -eo pipefail
+
+# System & memory configuration
 ulimit -s unlimited
 export SLURM_CPU_BIND=none
-
-# Change to the directory where the job was submitted from.
-cd $SLURM_SUBMIT_DIR
-
-# Activate the conda environment
-source /home/bhattah/miniconda3/etc/profile.d/conda.sh
-conda activate modred-dae-torch
-
-# Configure Dask to spill to local scratch ($TMPDIR) to prevent OOM
-# This ensures that when workers hit memory limits, they write to disk instead of crashing
-export DASK_TEMPORARY_DIRECTORY=${TMPDIR:-/tmp}
 export MALLOC_TRIM_THRESHOLD_=65536
 
-# Set SLURM_NTASKS to all available CPUs so the python script uses the full node
-# export SLURM_NTASKS=$(nproc) # No longer needed for Driver
+# Local scratch directory setup for fast compute node NVMe I/O
+LOCAL_SCRATCH="${SLURM_TMPDIR:-/tmp/constrained_mechanics_${SLURM_JOB_ID:-$$}}"
+mkdir -p "$LOCAL_SCRATCH"
+export SCRATCH_DIR="$LOCAL_SCRATCH"
+export DASK_TEMPORARY_DIRECTORY="${LOCAL_SCRATCH}/dask_tmp"
+mkdir -p "$DASK_TEMPORARY_DIRECTORY"
 
-# Set MPLCONFIGDIR to a specific directory to avoid cache locking issues on shared filesystems
-export MPLCONFIGDIR=$SLURM_SUBMIT_DIR/matplotlib_cache
-mkdir -p $MPLCONFIGDIR
+# Define target date directory for this run (supports positional $1, JOB_KEEP_TIME env var, or current date)
+if [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    export JOB_KEEP_TIME="$1"
+else
+    export JOB_KEEP_TIME="${JOB_KEEP_TIME:-$(date +%Y-%m-%d)}"
+fi
+TARGET_DATA_DIR="data/${JOB_KEEP_TIME}"
 
-# Verify LaTeX dependencies required by Matplotlib
+# Create directories on master storage and local scratch
+mkdir -p "${PWD}/${TARGET_DATA_DIR}"
+mkdir -p "${LOCAL_SCRATCH}/${TARGET_DATA_DIR}"
+
+# Automatic synchronization trap: copy target run checkpoints/data from local scratch back to master node disk
+sync_scratch_to_master() {
+    echo "🔄 Syncing run directory (${TARGET_DATA_DIR}) from local scratch to master node storage..."
+    if [ -d "${LOCAL_SCRATCH}/${TARGET_DATA_DIR}" ]; then
+        mkdir -p "${PWD}/${TARGET_DATA_DIR}"
+        rsync -a "${LOCAL_SCRATCH}/${TARGET_DATA_DIR}/" "${PWD}/${TARGET_DATA_DIR}/" 2>/dev/null || cp -r "${LOCAL_SCRATCH}/${TARGET_DATA_DIR}/"* "${PWD}/${TARGET_DATA_DIR}/" 2>/dev/null || true
+    fi
+    # Also sync any top-level symbolic expression pickles generated on scratch
+    find "${LOCAL_SCRATCH}/data" -maxdepth 1 -name "symbolic_expr_*.pickle" -exec cp -t "${PWD}/data/" {} + 2>/dev/null || true
+}
+trap sync_scratch_to_master EXIT INT TERM
+
+# Conda environment activation
+CONDA_SH="/home/bhattah/miniconda3/etc/profile.d/conda.sh"
+if [ -f "$CONDA_SH" ]; then
+    source "$CONDA_SH"
+    conda activate modred-dae-torch
+fi
+
+# Matplotlib cache setup
+export MPLCONFIGDIR="${PWD}/matplotlib_cache"
+mkdir -p "$MPLCONFIGDIR"
+
 echo "Checking LaTeX environment..."
-which latex || echo "Warning: 'latex' not found. Matplotlib usetex=True will fail."
-# which dvipng || echo "Warning: 'dvipng' not found. Matplotlib usetex=True will fail."
-# which gs || echo "Warning: 'gs' (Ghostscript) not found. Matplotlib usetex=True will fail."
+which latex >/dev/null 2>&1 || echo "Warning: 'latex' not found. Matplotlib usetex=True will fail."
 
-# Run on CPU by default. To run on GPU, add --device gpu
-{ time python -u scripts/app8_lattice.py | tee logfile.txt; } 2>>logfile.txt &
-PYTHON_PID=$!
-
-# Start monitoring in background (only useful in interactive SLURM allocations)
-if [ -t 1 ]; then
-    # We're in an interactive terminal, so monitor the job
-    python3 << 'MONITOR_EOF' &
-import subprocess
-import sys
-import os
-import time
-import re
-
-def run_sstat(jobid):
-    """Get resource usage from sstat"""
-    try:
-        result = subprocess.run(
-            ['sstat', '-j', f'{jobid}.batch', '--format=JobID,MaxRSS,AveRSS,AveCPU,MaxVMSize'],
-            capture_output=True, text=True, timeout=5
-        )
-        return result.stdout if result.returncode == 0 else "N/A"
-    except:
-        return "N/A"
-
-def run_scontrol(jobid):
-    """Get job details from scontrol"""
-    try:
-        result = subprocess.run(
-            ['scontrol', 'show', 'job', jobid],
-            capture_output=True, text=True, timeout=5
-        )
-        info = {}
-        for line in result.stdout.split('\n'):
-            if any(x in line for x in ['JobId=', 'JobState=', 'RunTime=', 'NodeList=', 'NumCPUs=', 'GRES=']):
-                info[line.strip()] = True
-        return info
-    except:
-        return {}
-
-jobid = os.environ.get('SLURM_JOB_ID', 'unknown')
-logfile = 'logfile.txt'
-last_lines_shown = 0
-monitor_count = 0
-
-print(f"[Monitor] Starting job monitoring for SLURM jobid={jobid}", flush=True)
-time.sleep(2)  # Give Python job time to start
-
-while True:
-    monitor_count += 1
-    if monitor_count % 30 == 1:  # Every 5 minutes at 10s intervals
-        print(f"\n[Monitor] Status update - {time.strftime('%H:%M:%S')}", flush=True)
-        
-        # Job details
-        details = run_scontrol(jobid)
-        for detail in details.keys():
-            print(f"  {detail}", flush=True)
-        
-        # Resource usage
-        sstat_out = run_sstat(jobid)
-        if sstat_out != "N/A":
-            for line in sstat_out.split('\n')[:3]:
-                if line.strip():
-                    print(f"  {line.strip()}", flush=True)
-    
-    # Show new log lines (without clearing screen in background)
-    try:
-        if os.path.exists(logfile):
-            with open(logfile) as f:
-                lines = f.readlines()
-            if len(lines) > last_lines_shown:
-                for line in lines[last_lines_shown:]:
-                    if any(x in line for x in ['Solving trajectory:', 'Worker', 'Submitting', 'complete', 'Error']):
-                        print(f"[Log] {line.rstrip()}", flush=True)
-                last_lines_shown = len(lines)
-    except:
-        pass
-    
-    time.sleep(10)
-MONITOR_EOF
-    MONITOR_PID=$!
+# Selective pre-staging: copy ONLY the specific target date directory and symbolic pickles from master to scratch
+if [ -d "${PWD}/${TARGET_DATA_DIR}" ]; then
+    echo "📥 Pre-staging target date directory (${TARGET_DATA_DIR}) from master node storage to local scratch..."
+    rsync -a "${PWD}/${TARGET_DATA_DIR}/" "${LOCAL_SCRATCH}/${TARGET_DATA_DIR}/" 2>/dev/null || cp -r "${PWD}/${TARGET_DATA_DIR}/"* "${LOCAL_SCRATCH}/${TARGET_DATA_DIR}/" 2>/dev/null || true
 fi
 
-# Wait for Python job to complete
-wait $PYTHON_PID
-PYTHON_EXIT=$?
+# Pre-stage symbolic expression pickle files (small files) from master node data to local scratch
+find "${PWD}/data" -maxdepth 1 -name "symbolic_expr_*.pickle" -exec cp -t "${LOCAL_SCRATCH}/data/" {} + 2>/dev/null || true
 
-# Kill monitoring process if it exists
-if [ ! -z "$MONITOR_PID" ]; then
-    kill $MONITOR_PID 2>/dev/null
-fi
+# Execute Python job with timing capture
+echo "Starting job execution..."
+{ time python -u scripts/app8_lattice.py; } 2>&1 | tee logfile.txt
 
-if [ $PYTHON_EXIT -ne 0 ]; then
-    echo "Warning: Python job exited with code $PYTHON_EXIT" >&2
-fi
-
-# Parse and format timing output with efficiency calculation
+# Calculate timing & parallelization efficiency
 python3 << 'TIMING_EOF'
-import re
-import sys
-import os
+import re, sys
 
 try:
     with open('logfile.txt') as f:
-        time_output = f.read()
-    
-    # Extract timing values in format "XXXmYY.ZZZs" (only lines starting with real/user/sys)
+        content = f.read()
+
     times = {}
-    for line in time_output.split('\n'):
-        match = re.match(r'^(real|user|sys)\s+(\d+)m([\d.]+)s', line)
-        if match:
-            label, mins, secs = match.groups()
-            total_secs = int(mins) * 60 + float(secs)
-            times[label] = total_secs
-    
+    for line in content.splitlines():
+        m = re.match(r'^(real|user|sys)\s+(\d+)m([\d.]+)s', line)
+        if m:
+            label, mins, secs = m.groups()
+            times[label] = int(mins) * 60 + float(secs)
+
     if len(times) == 3:
-        def secs_to_hms(seconds):
-            """Convert seconds to Hours:Minutes:Seconds format"""
-            h = int(seconds // 3600)
-            m = int((seconds % 3600) // 60)
-            s = int(seconds % 60)
-            return f"{h}h {m:02d}m {s:02d}s"
-        
-        real = times['real']
-        user = times['user']
-        sys_time = times['sys']
-        total_cpu = user + sys_time
-        efficiency = total_cpu / real if real > 0 else 0.0
-        cpu_utilization = (efficiency / 32.0) * 100.0
-        
-        # Format output
+        fmt = lambda s: f"{int(s//3600)}h {int((s%3600)//60):02d}m {int(s%60):02d}s"
+        real, user, sys_t = times['real'], times['user'], times['sys']
+        total_cpu = user + sys_t
+        eff = total_cpu / real if real > 0 else 0.0
+        util = (eff / 32.0) * 100.0
+
         summary = f"""
 ========== EXECUTION TIME SUMMARY ==========
-Wall-clock time:               {secs_to_hms(real)}
-User CPU time:                 {secs_to_hms(user)}
-System CPU time:               {secs_to_hms(sys_time)}
-Total CPU time:                {secs_to_hms(total_cpu)}
+Wall-clock time:            {fmt(real)}
+User CPU time:              {fmt(user)}
+System CPU time:            {fmt(sys_t)}
+Total CPU time:             {fmt(total_cpu)}
 ========== PARALLELIZATION EFFICIENCY ==========
-Parallelization efficiency:    {efficiency:.2f}x
-Core utilization:              {cpu_utilization:.1f}% of 32 available CPUs
+Parallelization efficiency: {eff:.2f}x
+Core utilization:           {util:.1f}% of 32 CPUs
 ============================================
 """
-        print(summary, end='')
-        # Append to logfile for permanent record
+        print(summary)
         with open('logfile.txt', 'a') as f:
             f.write(summary)
     else:
-        print("Warning: Could not parse timing output", file=sys.stderr)
-        
+        print("Warning: Could not parse timing output from logfile.txt", file=sys.stderr)
 except Exception as e:
-    print(f"Error processing timing: {e}", file=sys.stderr)
+    print(f"Timing parse warning: {e}", file=sys.stderr)
 TIMING_EOF
 
-# Move the SLURM output file to the latest data directory
-LATEST_DATA_DIR=$(ls -td data/*/ | grep -v "joblib_cache" | head -n 1)
-if [ -d "$LATEST_DATA_DIR" ]; then
-    mv "app8_lattice-${SLURM_JOB_ID}.out" "$LATEST_DATA_DIR"
+# Relocate SLURM log output to data directory
+LATEST_DATA_DIR=$(ls -td data/*/ 2>/dev/null | grep -v "joblib_cache" | head -n 1)
+if [ -n "$SLURM_JOB_ID" ] && [ -d "$LATEST_DATA_DIR" ]; then
+    [ -f "app8_lattice-${SLURM_JOB_ID}.out" ] && mv "app8_lattice-${SLURM_JOB_ID}.out" "$LATEST_DATA_DIR/"
 fi

@@ -39,7 +39,7 @@ from ConcreteSolvers import (BaseSolverMixin, DiscreteGradientSolver,
                             REDUCED_SOLVER_MAPPING, HYPERREDUCED_SOLVER_MAPPING,
                             _matches_solver_family)
 from ReduceMechSystem import ReduceMechSystem
-from System import MechSystem, HamiltonianMechSystem, LagrangianMechSystem, load_symbolic_expressions, fast_dump, fast_load
+from System import MechSystem, HamiltonianMechSystem, LagrangianMechSystem, load_symbolic_expressions, fast_dump, fast_load, get_data_dir, get_symbolic_expressions_file, check_checkpoint_exists
 from SymbolicComputer import IndexedBaseSymbolicComputer, manage_cache
 from PlotScript import plot_omega_distribution, plot_pareto, plot_error_vs_basis_size, plot_prediction_results
 
@@ -106,12 +106,12 @@ if __name__ == '__main__':
 
 
     # Define paths and hash
-    cache_dir = os.path.join('data', 'joblib_cache')
-    checkpoint_path = os.path.join('data', f'{MechSystem.keep_time}')
-    expressions_file = os.path.join('data', f"symbolic_expr_{MechSystem.nosc}_cse.pickle")
+    cache_dir = get_data_dir('joblib_cache')
+    checkpoint_path = MechSystem.data_folder
+    expressions_file = get_symbolic_expressions_file(MechSystem.nosc)
     config_hash = MechSystem.get_config_hash()
 
-    # Manage joblib cache consistency
+    # # Manage joblib cache consistency
     manage_cache(MechSystem.nosc, config_hash, cache_dir, checkpoint_path,      expressions_file,
                  clean_cache=args.clear_cache,
                  clean_checkpoints=args.clean,
@@ -124,8 +124,14 @@ if __name__ == '__main__':
         tl = computer.compute_all(expressions)
         print(f'Computed symbolic expressions in {tl:.2f} seconds.')
         
-        os.makedirs('data', exist_ok=True)
+        os.makedirs(os.path.dirname(expressions_file), exist_ok=True)
         fast_dump(expressions, expressions_file)
+        
+        # Also persist to master node directory if running in scratch mode
+        persistent_file = os.path.join('data', f"symbolic_expr_{MechSystem.nosc}_cse.pickle")
+        if os.path.abspath(expressions_file) != os.path.abspath(persistent_file):
+            os.makedirs('data', exist_ok=True)
+            fast_dump(expressions, persistent_file)
         
         # Load them now that they exist
         load_symbolic_expressions(HamiltonianMechSystem)
@@ -214,11 +220,11 @@ if __name__ == '__main__':
         # --- Full order solution ---
         solvers = []
         print('Computing full solution ...')
-        checkpoint_path = os.path.join('data', f'{MechSystem.keep_time}')
+        checkpoint_path = MechSystem.data_folder
         kwds_file = os.path.join(checkpoint_path, 'kwds.joblib')
         solvers_file = os.path.join(checkpoint_path, 'solvers.joblib')
 
-        if os.path.exists(checkpoint_path) and os.path.exists(kwds_file) and os.path.exists(solvers_file):
+        if check_checkpoint_exists(checkpoint_path, kwds_file, solvers_file):
             print("Loading full solution from checkpoint...")
             kwds = fast_load(kwds_file)
             solvers = fast_load(solvers_file)

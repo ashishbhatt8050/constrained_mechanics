@@ -37,9 +37,11 @@ def _run_method(computer, method_name, *args):
     result = method(*args)
     return cloudpickle.dumps(result)
 
+from System import get_data_dir
+
 # Setup persistent cache
 verbose_level = int(os.environ.get('JOBLIB_VERBOSE', 0))
-memory = joblib.Memory(os.path.join('data', 'joblib_cache'), verbose=verbose_level)
+memory = joblib.Memory(get_data_dir('joblib_cache'), verbose=verbose_level)
 
 def manage_cache(nosc, config_hash, cache_dir, checkpoint_dir, expressions_file, 
                  clean_cache=False, clean_checkpoints=False, clean_symbolic=False):

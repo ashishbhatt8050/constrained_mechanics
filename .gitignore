@@ -147,3 +147,4 @@ app8_lattice-*.out
 data
 matplotlib_cache
 dask_logs/
+.vscode/

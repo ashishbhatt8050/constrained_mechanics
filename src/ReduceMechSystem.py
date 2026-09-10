@@ -21,7 +21,28 @@ class ReduceMechSystem(MechSystem):
     
     Provides methods for computing reduced bases (POD), DEIM/MDEIM bases, 
     and setting up reduced/hyper-reduced models.
+
+    Traveling / Adaptive Reduced Basis
+    ------------------------------------
+    When ``N_WINDOWS > 1`` the algorithm adaptively partitions the snapshot
+    timeline into up to ``N_WINDOWS`` windows by monitoring Grassmann-distance
+    misalignment between a growing window basis and a rolling-window candidate
+    basis.  A new window is triggered when the minimum principal angle exceeds
+    ``GRASSMANN_COS_THRESHOLD`` (default: cos 26° ≈ 0.899).
+
+    Each window's basis is built **hierarchically**: local POD modes that are
+    *orthogonal* to the global basis are appended to the global basis, giving
+    every window a safety-net global component plus window-specific enrichment.
+
+    Set ``N_WINDOWS = 1`` (default-compatible) to recover the original
+    single-basis behaviour.
     """
+
+    # ── Traveling-basis configuration ─────────────────────────────────────────
+    N_WINDOWS: int = 5                        # Maximum number of adaptive windows
+    GRASSMANN_COS_THRESHOLD: float = 0.8988   # cos(26°) — misalignment trigger
+    ROLLING_FRAC: float = 0.05               # Fraction of each solver's snapshots used per rolling step
+
     _REDUCTION_ATTRS = [
         # Reduced Basis
         'RB', 'nosc_r',
@@ -42,7 +63,19 @@ class ReduceMechSystem(MechSystem):
         # Cached Master SVD results for sweeps
         '_Full_rb', '_Full_sv',
         '_Full_U1', '_Full_S1', '_Full_U2', '_Full_S2',
-        '_Full_Uj', '_Full_Sj'
+        '_Full_Uj', '_Full_Sj',
+        # Traveling-basis lists (one entry per window)
+        'RB_windows', 'nosc_r_windows',
+        'RBxUx_inv_PxU_windows',
+        'IP_Ux_inv_PxU_windows',
+        'ham_z_deim_windows', 'ham_zz_deim_windows',
+        'lag_dg_deim_windows', 'lag_dg_z_deim_windows',
+        'ham_zz_mdeim_windows', 'lag_dg_z_mdeim_windows',
+        # Traveling constraint hyper-reduction (one entry per window)
+        '_IP_Ux_inv_PxU_windows', 'g_prime_mdeim_windows',
+        'IP_g_prime_x_lambda_y_windows', 'g_prime_x_lambda_y_mdeim_windows',
+        # Adaptive window boundary positions (fractional, used for online lookup)
+        '_boundary_fracs',
     ]
 
     @staticmethod
@@ -200,8 +233,330 @@ class ReduceMechSystem(MechSystem):
         
         return U_full[:, :N], S_full[:N], N
 
+    @staticmethod
+    def _split_indices_by_window(solver_indices_list, n_windows):
+        """
+        Partition snapshot indices for each solver into ``n_windows`` equal
+        time-window buckets.
+
+        Parameters
+        ----------
+        solver_indices_list : list of array-like
+            List of index arrays – one per solver – giving the timestep indices
+            (into ``solver.y``) to use for POD.  Indices are assumed to be
+            contiguous within each solver's timeline.
+        n_windows : int
+            Number of equal time windows.
+
+        Returns
+        -------
+        window_index_list : list of list of array-like
+            ``window_index_list[w]`` is a list of per-solver index arrays that
+            belong to window ``w``.
+        """
+        window_index_list = [[] for _ in range(n_windows)]
+        for indices in solver_indices_list:
+            indices = np.asarray(indices)
+            n_steps = len(indices)
+            # Compute per-window boundaries in terms of position within indices
+            boundaries = np.linspace(0, n_steps, n_windows + 1, dtype=int)
+            for w in range(n_windows):
+                lo, hi = boundaries[w], boundaries[w + 1]
+                window_index_list[w].append(indices[lo:hi])
+        return window_index_list
+
+    @classmethod
+    def _detect_adaptive_windows(cls, solvers, filtered_indices, tol,
+                                  max_windows=None,
+                                  cos_threshold=None,
+                                  rolling_frac=None):
+        """
+        Adaptively detect snapshot-window boundaries using Grassmann distance.
+
+        Streams snapshots from the first (reference) solver chronologically.
+        Maintains two bases:
+
+        * **U_window** – incremental POD of all snapshots accumulated since the
+          last window boundary (the "current window" basis).
+        * **U_roll** – thin SVD of the most-recent rolling block of snapshots
+          (a local "candidate" basis representing the very latest dynamics).
+
+        A new window is triggered whenever the minimum principal angle between
+        ``U_window`` and ``U_roll`` exceeds ``GRASSMANN_COS_THRESHOLD`` (i.e.
+        the minimum singular value of ``U_window.T @ U_roll`` falls below the
+        threshold).  The same fractional boundaries are then applied to every
+        solver.
+
+        Parameters
+        ----------
+        solvers : list
+        filtered_indices : list of np.ndarray
+            Per-solver snapshot index arrays.
+        tol : float
+            POD energy tolerance for the rolling-window candidate basis.
+        max_windows : int, optional
+            Cap on the number of windows (default: ``cls.N_WINDOWS``).
+        cos_threshold : float, optional
+            Cosine of the misalignment trigger angle
+            (default: ``cls.GRASSMANN_COS_THRESHOLD``).
+        rolling_frac : float, optional
+            Fraction of the reference solver's snapshots used per rolling step
+            (default: ``cls.ROLLING_FRAC``).
+
+        Returns
+        -------
+        window_index_list : list[list[np.ndarray]]
+            ``window_index_list[w]`` is a list of per-solver index arrays for
+            window ``w``.
+        boundary_fracs : list[float]
+            Fractional positions ``[0, f1, f2, ..., 1]`` that mark where each
+            window starts/ends as a fraction of the reference solver's timeline.
+            Length = n_detected_windows + 1.
+        """
+        if max_windows is None:
+            max_windows = cls.N_WINDOWS
+        if cos_threshold is None:
+            cos_threshold = cls.GRASSMANN_COS_THRESHOLD
+        if rolling_frac is None:
+            rolling_frac = cls.ROLLING_FRAC
+
+        # ── Use first solver as reference for boundary detection ───────────────
+        ref_solver  = solvers[0]
+        ref_indices = np.asarray(filtered_indices[0])
+        n_ref       = len(ref_indices)
+        rolling_size = max(10, int(n_ref * rolling_frac))
+
+        print(f'\n  [Adaptive Windows] Detecting boundaries '
+              f'(max={max_windows}, cos_thr={cos_threshold:.4f}, '
+              f'rolling_size={rolling_size}/{n_ref})...', flush=True)
+
+        # ── Helper: return raw snapshot block (q-part only) ──────────────────
+        def _rolling_block(pos, size):
+            """Return raw snapshot matrix for positions [pos, pos+size)."""
+            end = min(pos + size, n_ref)
+            return np.column_stack([
+                ref_solver.y[ref_indices[j]][:cls.nosc]
+                for j in range(pos, end)
+            ])                                          # shape (nosc, block_size)
+
+        # ── Seed U_window and S_window from the first rolling block ──────────
+        U_window, S_window, _ = cls.incremental_POD(
+            [_rolling_block(0, rolling_size)], tol=tol)
+
+        boundary_fracs = [0.0]
+        n_windows      = 1
+        pos            = rolling_size
+
+        while pos + rolling_size <= n_ref and n_windows < max_windows:
+            # Compute a fresh basis for the current rolling block
+            U_roll, S_roll, _ = cls.incremental_POD(
+                [_rolling_block(pos, rolling_size)], tol=tol)
+
+            # ── Grassmann distance: σ_min of cross-Gram matrix ─────────────────
+            k = min(U_window.shape[1], U_roll.shape[1])
+            G = U_window[:, :k].T @ U_roll[:, :k]      # k × k
+            sigma   = LA.svd(G, compute_uv=False)
+            sig_min = float(sigma[-1]) if len(sigma) else 1.0
+            frac    = pos / n_ref
+
+            print(f'    pos={pos:>5}/{n_ref}  frac={frac:.3f}  '
+                  f'σ_min={sig_min:.4f}  (thr={cos_threshold:.4f})', flush=True)
+
+            if sig_min < cos_threshold:
+                # ── Misalignment: open a new window ───────────────────────────
+                boundary_fracs.append(frac)
+                n_windows += 1
+                U_window = U_roll   # fresh start — use pre-computed U and S
+                S_window = S_roll
+                print(f'    → New window {n_windows} opened at frac={frac:.3f}')
+            else:
+                # ── Still aligned: extend via incremental_POD (energy-weighted) ─
+                # Passes the raw block again so incremental_POD can use diag(S_window)
+                # in the M-matrix rather than the identity, giving proper energy weighting.
+                U_window, S_window, _ = cls.incremental_POD(
+                    [_rolling_block(pos, rolling_size)],
+                    tol=tol,
+                    initial_basis=(U_window, S_window))
+
+            pos += rolling_size
+
+        boundary_fracs.append(1.0)
+        print(f'\n  [Adaptive Windows] Detected {n_windows} window(s) at '
+              f'fracs={[f"{f:.3f}" for f in boundary_fracs]}', flush=True)
+
+        # ── Convert fractional boundaries to per-solver index lists ────────────
+        window_index_list = [[] for _ in range(n_windows)]
+        for indices in filtered_indices:
+            indices = np.asarray(indices)
+            n_s = len(indices)
+            for w in range(n_windows):
+                lo = int(boundary_fracs[w]     * n_s)
+                hi = int(boundary_fracs[w + 1] * n_s)
+                hi = max(hi, lo + 1)            # guarantee ≥ 1 snapshot per window
+                hi = min(hi, n_s)
+                window_index_list[w].append(indices[lo:hi])
+
+        return window_index_list, boundary_fracs
+
+    @classmethod
+    def setup_traveling_constraint_hyperreduction(cls, solvers, target_classes):
+        """
+        Build one MDEIM constraint hyper-reduction basis per adaptively-detected
+        time window.
+
+        Handles both Hamiltonian (``g_prime`` only) and DiscreteGradient
+        (``g_prime`` + ``g_prime_x_lambda_y``) solver families.
+
+        Requires that ``setup_traveling_basis`` has been called first so that
+        ``cls._window_indices`` is available.
+
+        Per window, re-runs the MDEIM snapshot / DEIM-point / lambdify pipeline
+        (the same computation as in ``hyperreduce_constraints``) but restricted to
+        the window's snapshot subset.
+
+        Stores on ``cls`` and every ``target_class``:
+        - ``_IP_Ux_inv_PxU_windows``        — sparse MDEIM matrix for ``g_prime``
+        - ``g_prime_mdeim_windows``          — lambdified MDEIM function for ``g_prime``
+        - ``IP_g_prime_x_lambda_y_windows``  — sparse MDEIM matrix for ``g'·λ·y`` (DG)
+        - ``g_prime_x_lambda_y_mdeim_windows``— lambdified MDEIM function (DG)
+        """
+        if not hasattr(cls, '_window_indices') or cls._window_indices is None:
+            raise RuntimeError(
+                'setup_traveling_constraint_hyperreduction requires '
+                '_window_indices to be set by setup_traveling_basis first.')
+
+        solver_type    = 'Hamiltonian' if issubclass(cls, HamiltonianMechSystem) else 'DiscreteGradient'
+        window_indices = cls._window_indices
+        n_windows      = len(window_indices)
+        tol            = cls.pod_tol_sweep[-1]
+
+        print(f'\n[{solver_type}Reducer] Building {n_windows}-window '
+              f'adaptive constraint hyper-reduction...', flush=True)
+
+        # ── One-time: align symbolic expression with the actual (sparsified) shape ─
+        sample_y      = solvers[0].y[0]
+        sample_lam    = solvers[0].Lambda[0] if hasattr(solvers[0], 'Lambda') else None
+
+        # g_prime
+        g_prime_expr  = cls.g_prime_expr
+        actual_gp_shape = solvers[0].g_prime__(sample_y).shape
+        if actual_gp_shape[0] != g_prime_expr.shape[0] or actual_gp_shape[1] != g_prime_expr.shape[1]:
+            m_sym = g_prime_expr.shape[0] // 2
+            m_act = actual_gp_shape[0]   // 2
+            idx_h = np.linspace(0, m_sym - 1, m_act, dtype=int)
+            mask  = np.concatenate([idx_h, idx_h + m_sym])
+            g_prime_expr = g_prime_expr.extract(mask, range(g_prime_expr.shape[1]))
+        gp_nz_indices = np.where(np.array(g_prime_expr.tolist()).flatten() != 0)[0]
+        g_prime_shape = g_prime_expr.shape
+
+        # g_prime_x_lambda_y (DG only)
+        if solver_type == 'DiscreteGradient':
+            gplxy_expr = cls.g_prime_x_lambda_y_expr
+            actual_gplxy_shape = solvers[0].g_prime_x_lambda_y_(sample_y, sample_lam).shape
+            if actual_gplxy_shape != gplxy_expr.shape:
+                m_sym = gplxy_expr.shape[0] // 2
+                m_act = actual_gplxy_shape[0] // 2
+                idx_h = np.linspace(0, m_sym - 1, m_act, dtype=int)
+                mask  = np.concatenate([idx_h, idx_h + m_sym])
+                gplxy_expr = gplxy_expr.extract(mask, range(gplxy_expr.shape[1]))
+            gplxy_nz_indices = np.where(np.array(gplxy_expr.tolist()).flatten() != 0)[0]
+            gplxy_shape = gplxy_expr.shape
+
+        # ── Per-window loop ────────────────────────────────────────────────────
+        _IP_windows, gp_mdeim_windows = [], []
+        IP_gplxy_windows, gplxy_mdeim_windows = [], []
+
+        for w in range(n_windows):
+            win_indices = window_indices[w]
+            print(f'\n  [Constraint Window {w+1}/{n_windows}]', flush=True)
+
+            # ── g_prime MDEIM ─────────────────────────────────────────────────
+            print(f'    Computing g_prime MDEIM...', flush=True)
+            results_gp = []
+            for solver, indices in zip(solvers, win_indices):
+                if len(indices) == 0:
+                    continue
+                gen = cls.compute_snapshots(
+                    solver, indices, solver.g_prime__,
+                    projection_indices=gp_nz_indices,
+                    yield_batches=True)
+                results_gp.append(gen)
+
+            Uj_gp, sv_gp, _ = cls.incremental_POD(
+                chain.from_iterable(results_gp), tol=tol)
+            Uj_gp, _, _ = cls._truncate_basis(Uj_gp, sv_gp, tol)
+            Pj_gp, _   = DEIM(Uj_gp, plot_deim=False)
+            B_hat_gp   = Uj_gp @ LA.inv(Pj_gp.T @ Uj_gp)
+            IP_gp_w    = cls._reconstruct_sparse_basis(
+                B_hat_gp, gp_nz_indices, int(np.prod(g_prime_shape)))
+
+            flat_gp        = g_prime_expr.flat()
+            sel_gp         = [flat_gp[i] for i in gp_nz_indices]
+            col_gp_w       = Pj_gp.T @ smp.Matrix(sel_gp)
+            gp_mdeim_w     = (lambda col=col_gp_w:
+                lambda *args: smp.lambdify(
+                    (cls.y,), col, modules=['numpy', 'scipy'])(*args).flatten())()
+
+            _IP_windows.append(IP_gp_w)
+            gp_mdeim_windows.append(gp_mdeim_w)
+            del results_gp, Uj_gp, B_hat_gp
+            gc.collect()
+
+            # ── g_prime_x_lambda_y MDEIM (DG only) ───────────────────────────
+            if solver_type == 'DiscreteGradient':
+                print(f'    Computing g_prime_x_lambda_y MDEIM...', flush=True)
+                results_gplxy = []
+                for solver, indices in zip(solvers, win_indices):
+                    if len(indices) == 0:
+                        continue
+                    gen = cls.compute_snapshots(
+                        solver, indices, solver.g_prime_x_lambda_y_,
+                        is_mdeim_gprime=True,
+                        projection_indices=gplxy_nz_indices,
+                        yield_batches=True)
+                    results_gplxy.append(gen)
+
+                Uj_xy, sv_xy, _ = cls.incremental_POD(
+                    chain.from_iterable(results_gplxy), tol=tol)
+                Uj_xy, _, _ = cls._truncate_basis(Uj_xy, sv_xy, tol)
+                Pj_xy, _   = DEIM(Uj_xy, plot_deim=False)
+                B_hat_xy   = Uj_xy @ LA.inv(Pj_xy.T @ Uj_xy)
+                IP_xy_w    = cls._reconstruct_sparse_basis(
+                    B_hat_xy, gplxy_nz_indices, int(np.prod(gplxy_shape)))
+
+                flat_xy     = gplxy_expr.flat()
+                sel_xy      = [flat_xy[i] for i in gplxy_nz_indices]
+                col_xy_w    = Pj_xy.T @ smp.Matrix(sel_xy)
+                gplxy_mdeim_w = (lambda col=col_xy_w:
+                    lambda *args: smp.lambdify(
+                        (cls.y, cls.lag_mult), col,
+                        modules=['numpy', 'scipy'])(*args).flatten())()
+
+                IP_gplxy_windows.append(IP_xy_w)
+                gplxy_mdeim_windows.append(gplxy_mdeim_w)
+                del results_gplxy, Uj_xy, B_hat_xy
+                gc.collect()
+            else:
+                IP_gplxy_windows.append(None)
+                gplxy_mdeim_windows.append(None)
+
+        # ── Store on cls and target classes ────────────────────────────────────
+        for target_class in target_classes:
+            setattr(target_class, '_IP_Ux_inv_PxU_windows',           _IP_windows)
+            setattr(target_class, 'g_prime_mdeim_windows',            gp_mdeim_windows)
+            setattr(target_class, 'IP_g_prime_x_lambda_y_windows',   IP_gplxy_windows)
+            setattr(target_class, 'g_prime_x_lambda_y_mdeim_windows', gplxy_mdeim_windows)
+        setattr(cls, '_IP_Ux_inv_PxU_windows',           _IP_windows)
+        setattr(cls, 'g_prime_mdeim_windows',            gp_mdeim_windows)
+        setattr(cls, 'IP_g_prime_x_lambda_y_windows',   IP_gplxy_windows)
+        setattr(cls, 'g_prime_x_lambda_y_mdeim_windows', gplxy_mdeim_windows)
+
+        print(f'\n[{solver_type}Reducer] Traveling constraint hyper-reduction '
+              f'complete ({n_windows} window(s)).', flush=True)
+
     @classmethod
     def hyperreduce_constraints(cls, solvers, target_classes):
+
         solver_type = "Hamiltonian" if issubclass(cls, HamiltonianMechSystem) else "DiscreteGradient"
         pod_tol = cls.pod_tol_sweep[-1]
         print('\nComputing constraints reduction in parallel...')
@@ -828,8 +1183,261 @@ class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
             if callable(mdeim_func):
                 setattr(target_class, 'ham_zz_mdeim', staticmethod(mdeim_func))
 
+    # ── Traveling / Adaptive Reduced Basis ─────────────────────────────────────
+
+    @classmethod
+    def setup_traveling_basis(cls, solvers, target_classes):
+        """
+        Build one hierarchical reduced basis per adaptively-detected time window
+        (Hamiltonian).
+
+        **Window detection** (offline, snapshot-processing phase):
+        Streams FOM snapshots chronologically and monitors the Grassmann distance
+        between the growing current-window basis and a rolling-window candidate
+        basis.  A new window is triggered when the minimum principal angle exceeds
+        ``GRASSMANN_COS_THRESHOLD``.  At most ``N_WINDOWS`` windows are created.
+
+        **Hierarchical enrichment** (per detected window):
+        Each window's local POD basis is projected onto the *complement* of the
+        global basis (``cls.RB``).  The orthogonal residual modes are appended to
+        the global basis, so every window basis = [global | local-enrichment].
+        This guarantees a global-quality floor while capturing window-specific
+        dynamics.
+        """
+        tol = cls.pod_tol_sweep[-1]
+
+        solver_to_indices = {s: idx for s, idx in zip(solvers, cls.indices_list)}
+        filtered_indices  = [solver_to_indices[s] for s in solvers]
+
+        # ── 1. Adaptive window detection ──────────────────────────────────────
+        window_indices, boundary_fracs = cls._detect_adaptive_windows(
+            solvers, filtered_indices, tol)
+        n_windows = len(window_indices)
+        print(f'\n[HamiltonianReducer] Building {n_windows}-window '
+              f'adaptive+hierarchical traveling basis...')
+
+        # Store for reuse by setup_traveling_hyperreduction
+        cls._window_indices   = window_indices
+        cls._boundary_fracs   = boundary_fracs
+
+        # ── 2. Global basis (already on cls from setup_reduced_model) ─────────
+        # Extract position-only part: cls.RB is (2*nosc × 2*nosc_r) block-diag
+        U_global = cls.RB[:cls.nosc, :cls.nosc_r]   # nosc × nosc_r
+
+        # Auxiliary for constraint condition-number augmentation
+        sample_y      = solvers[0].y[0]
+        g_prime_shape0 = cls.g_prime_(sample_y).shape[0] // 2
+        test_q        = sample_y[:cls.nosc]
+        G_test = cls.g_prime_(np.concatenate([test_q, np.zeros(cls.nosc)])
+                              )[:g_prime_shape0, :cls.nosc]
+
+        RB_windows, nosc_r_windows = [], []
+
+        for w in range(n_windows):
+            win_indices = window_indices[w]
+            print(f'\n  [Window {w+1}/{n_windows}] Computing local POD basis...')
+
+            # ── 2a. Local POD from window snapshots (q and p) ─────────────────
+            def get_state_snapshots_w(win_idx=win_indices):
+                for solver, indices in zip(solvers, win_idx):
+                    if len(indices) == 0:
+                        continue
+                    yield from cls.compute_snapshots(
+                        solver, indices, lambda y: y[:cls.nosc], yield_batches=True)
+                for solver, indices in zip(solvers, win_idx):
+                    if len(indices) == 0:
+                        continue
+                    yield from cls.compute_snapshots(
+                        solver, indices, lambda y: y[cls.nosc:], yield_batches=True)
+
+            weights = np.eye(cls.nosc)
+            rb_local, sv_local, _ = cls.incremental_POD(
+                get_state_snapshots_w(), Xh=weights, tol=tol)
+
+            # Augment with ham_z snapshots for this window
+            def get_f2_snapshots_w(win_idx=win_indices):
+                for solver, indices in zip(solvers, win_idx):
+                    if len(indices) == 0:
+                        continue
+                    batch_f2 = cls.compute_snapshots(solver, indices, solver.ham_z, is_dg=False)
+                    batch_f2_stacked = np.hstack([batch_f2[:cls.nosc, :], batch_f2[cls.nosc:, :]])
+                    n_y = LA.norm(solver.y[indices])
+                    n_f = LA.norm(batch_f2)
+                    weight_ratio = (n_y / n_f) if n_f > 1e-12 else 1.0
+                    yield batch_f2_stacked * weight_ratio
+
+            rb_local, sv_local, _ = cls.incremental_POD(
+                get_f2_snapshots_w(), Xh=weights, tol=tol,
+                initial_basis=(rb_local, sv_local))
+            rb_local, _, _ = cls._truncate_basis(rb_local, sv_local, tol)
+
+            # ── 2b. Hierarchical enrichment ───────────────────────────────────
+            # Project local modes onto complement of global basis
+            residual = rb_local - U_global @ (U_global.T @ rb_local)
+            residual_norm = LA.norm(residual, 'fro')
+
+            if residual_norm > 1e-10:
+                # Orthonormal enrichment modes via QR
+                Q_enrich, _ = LA.qr(residual, mode='reduced')
+                # Keep only columns with non-negligible norm
+                col_norms = LA.norm(Q_enrich, axis=0)
+                Q_enrich = Q_enrich[:, col_norms > 1e-8]
+            else:
+                Q_enrich = np.empty((cls.nosc, 0))
+
+            # Hierarchical basis = [global | enrichment]
+            if Q_enrich.shape[1] > 0:
+                rb_w = np.hstack([U_global, Q_enrich])
+                # Final re-orthogonalisation (numerical safety)
+                rb_w, _ = LA.qr(rb_w, mode='reduced')
+            else:
+                rb_w = U_global.copy()
+
+            # ── 2c. Constraint-gradient augmentation on the hierarchical basis ─
+            candidates_w = [(slv, int(idx))
+                            for slv, idxs in zip(solvers, win_indices)
+                            for idx in idxs]
+
+            cand_idx = 0
+            cond_val = LA.cond(G_test @ rb_w) if rb_w.shape[1] > 0 else np.inf
+            print(f'    Initial cond(G_test @ rb_w) = {cond_val:.2e}')
+
+            while cond_val > 10.0 and cand_idx < len(candidates_w):
+                batch_grads, batch_norms_y = [], 0.0
+                for _ in range(min(50, len(candidates_w) - cand_idx)):
+                    slv, i = candidates_w[cand_idx]
+                    q = slv.y[i][:cls.nosc]
+                    G = cls.g_prime_(np.concatenate([q, np.zeros(cls.nosc)])
+                                     )[:g_prime_shape0, :cls.nosc]
+                    batch_grads.append(G.T)
+                    batch_norms_y += LA.norm(slv.y[i])**2
+                    cand_idx += 1
+                grad_matrix = np.hstack(batch_grads)
+                w_grad = (np.sqrt(batch_norms_y) / LA.norm(grad_matrix)
+                          if LA.norm(grad_matrix) > 1e-12 else 1.0)
+                rb_w, sv_w2, _ = cls.incremental_POD(
+                    [grad_matrix * w_grad], tol=tol,
+                    initial_basis=(rb_w, np.ones(rb_w.shape[1])))
+                rb_w, _, _ = cls._truncate_basis(rb_w, sv_w2, tol)
+                cond_val = LA.cond(G_test @ rb_w)
+
+            # ── 2d. Safety cap ────────────────────────────────────────────────
+            nosc_r_w = rb_w.shape[1]
+            if nosc_r_w > cls.nosc:
+                print(f'    [Warning] Window {w+1} rank ({nosc_r_w}) > DOFs '
+                      f'({cls.nosc}). Capping to global basis.')
+                rb_w     = U_global.copy()
+                nosc_r_w = cls.nosc_r
+
+            RB_w = np.block([[rb_w,                np.zeros_like(rb_w)],
+                             [np.zeros_like(rb_w), rb_w              ]])
+            print(f'    Window {w+1}: RB={RB_w.shape}, '
+                  f'local_enrich={Q_enrich.shape[1] if Q_enrich.shape[1] > 0 else 0}, '
+                  f'cond={LA.cond(G_test @ rb_w):.2e}')
+
+            RB_windows.append(RB_w)
+            nosc_r_windows.append(nosc_r_w)
+            del rb_local, rb_w, RB_w
+            gc.collect()
+
+        # Store on class and target classes
+        for target_class in target_classes:
+            setattr(target_class, 'RB_windows',     RB_windows)
+            setattr(target_class, 'nosc_r_windows', nosc_r_windows)
+        setattr(cls, 'RB_windows',     RB_windows)
+        setattr(cls, 'nosc_r_windows', nosc_r_windows)
+
+        print(f'[HamiltonianReducer] Traveling basis complete ({n_windows} windows).')
+
+    @classmethod
+    def setup_traveling_hyperreduction(cls, solvers, target_classes):
+        """
+        Build one DEIM/MDEIM hyper-reduction basis per time window (Hamiltonian).
+
+        Requires that ``setup_traveling_basis`` has already been called so that
+        ``RB_windows``, ``nosc_r_windows``, and ``_window_indices`` are available
+        on ``cls``.  Window boundaries are reused directly from the adaptive
+        detection run in ``setup_traveling_basis``.
+        """
+        # Reuse adaptively-detected window indices from setup_traveling_basis
+        window_indices = cls._window_indices
+        n_windows      = len(window_indices)
+        print(f'\n[HamiltonianReducer] Building {n_windows}-window '
+              f'adaptive traveling hyper-reduction...')
+        tol = cls.pod_tol_sweep[-1]
+
+        non_zero_indices = cls.ham_zz_nonzero_indices
+
+        RBxUx_windows, IP_Ux_windows = [], []
+        ham_z_deim_windows, ham_zz_mdeim_windows = [], []
+
+        for w in range(n_windows):
+            win_indices = window_indices[w]
+            RB_w = cls.RB_windows[w]
+            nosc_r_w = cls.nosc_r_windows[w]
+            print(f'\n  [Window {w+1}/{n_windows}] Computing hyper-reduction...')
+
+            # ── DEIM for ham_z ──────────────────────────────────────────────────
+            attr_11 = RB_w[:cls.nosc, :nosc_r_w]
+            P11, _ = DEIM(attr_11, plot_deim=False)
+            attr_22 = RB_w[cls.nosc:, nosc_r_w:]
+            P22, _ = DEIM(attr_22, plot_deim=False)
+            P = np.block([
+                [P11, np.zeros((P11.shape[0], P22.shape[1]))],
+                [np.zeros((P22.shape[0], P11.shape[1])), P22]
+            ])
+            RBxUx_inv_PxU_w = RB_w.T @ RB_w @ LA.inv(P.T @ RB_w)
+            deim_func_w = cls._create_indexed_deim_func(cls.ham_z_expr, P, "Hamiltonian")
+
+            # ── MDEIM for ham_zz (if requested) ────────────────────────────────
+            IP_Ux_inv_PxU_w = None
+            mdeim_func_w = None
+            if cls.hyperreducer == 'MDEIM':
+                # Build window-specific MDEIM basis
+                def gen_mdeim_w(win_idx=win_indices):
+                    for solver, indices in zip(solvers, win_idx):
+                        if len(indices) == 0:
+                            continue
+                        yield from cls.compute_snapshots(
+                            solver, indices, solver.ham_zz,
+                            is_dg=False, projection_indices=non_zero_indices,
+                            yield_batches=True)
+
+                Uj_w, Sj_w, _ = cls.incremental_POD(gen_mdeim_w(), tol=tol)
+                Uj_w, _, _ = cls._truncate_basis(Uj_w, Sj_w, tol)
+                Pj_w, _ = DEIM(Uj_w, plot_deim=False)
+                B_hat_w = Uj_w @ LA.inv(Pj_w.T @ Uj_w)
+                IP_Ux_inv_PxU_w = cls._reconstruct_sparse_basis(
+                    B_hat_w, non_zero_indices, (2 * cls.nosc)**2)
+
+                flat_expr = cls.ham_zz_expr.flat()
+                selected_elems = [flat_expr[i] for i in non_zero_indices]
+                mdeim_col_w = Pj_w.T @ smp.Matrix(selected_elems)
+                mdeim_func_w = lambda *args, col=mdeim_col_w: smp.lambdify(
+                    (cls.y, cls.omega2, cls.beta), col,
+                    modules=['numpy', 'scipy'])(*args).flatten()
+
+            RBxUx_windows.append(RBxUx_inv_PxU_w)
+            IP_Ux_windows.append(IP_Ux_inv_PxU_w)
+            ham_z_deim_windows.append(deim_func_w)
+            ham_zz_mdeim_windows.append(mdeim_func_w)
+
+        # Store on class and all target classes
+        for target_class in target_classes:
+            setattr(target_class, 'RBxUx_inv_PxU_windows', RBxUx_windows)
+            setattr(target_class, 'IP_Ux_inv_PxU_windows', IP_Ux_windows)
+            setattr(target_class, 'ham_z_deim_windows', ham_z_deim_windows)
+            setattr(target_class, 'ham_zz_mdeim_windows', ham_zz_mdeim_windows)
+        setattr(cls, 'RBxUx_inv_PxU_windows', RBxUx_windows)
+        setattr(cls, 'IP_Ux_inv_PxU_windows', IP_Ux_windows)
+        setattr(cls, 'ham_z_deim_windows', ham_z_deim_windows)
+        setattr(cls, 'ham_zz_mdeim_windows', ham_zz_mdeim_windows)
+
+        print(f'[HamiltonianReducer] Traveling hyper-reduction complete ({n_windows} windows).')
+
 class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
     """Reducer for Discrete Gradient solvers."""
+
 
     @classmethod
     def setup_reduced_model(cls, solvers, target_classes):
@@ -1072,7 +1680,6 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
         fig, ax = logplot(sv, xlabel=f'index of singular values of lag_dg_z', xlims=(1, len(sv)), ylabel="singular value magnitude")
         filename = os.path.join(MechSystem.data_folder, "sv_mdeim_DG.pdf")
         save_figure(fig, filename, fig_data=None)
-
         Pj, _ = DEIM(Uj, plot_deim=False)
         
         # Reconstruct the full sparse basis matrix from the DEIM results
@@ -1091,3 +1698,237 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
             setattr(target_class, 'IP_Ux_inv_PxU', IP_Ux_inv_PxU)
             if callable(mdeim_func):
                 setattr(target_class, 'lag_dg_z_mdeim', staticmethod(mdeim_func))
+
+    # ── Traveling / Adaptive Reduced Basis ─────────────────────────────────────
+
+    @classmethod
+    def setup_traveling_basis(cls, solvers, target_classes):
+        """
+        Build one hierarchical reduced basis per adaptively-detected time window
+        (DiscreteGradient).
+
+        Mirrors the Hamiltonian version: adaptive window detection via
+        Grassmann-distance monitoring, followed by hierarchical enrichment of the
+        global basis with window-local POD modes that are orthogonal to it.
+        """
+        tol = cls.pod_tol_sweep[-1]
+
+        solver_to_indices = {s: idx for s, idx in zip(solvers, cls.indices_list)}
+        filtered_indices  = [solver_to_indices[s] for s in solvers]
+
+        # ── 1. Adaptive window detection ──────────────────────────────────────
+        window_indices, boundary_fracs = cls._detect_adaptive_windows(
+            solvers, filtered_indices, tol)
+        n_windows = len(window_indices)
+        print(f'\n[DiscreteGradientReducer] Building {n_windows}-window '
+              f'adaptive+hierarchical traveling basis...')
+
+        # Store for reuse by setup_traveling_hyperreduction
+        cls._window_indices  = window_indices
+        cls._boundary_fracs  = boundary_fracs
+
+        # ── 2. Global basis ───────────────────────────────────────────────────
+        U_global = cls.RB[:cls.nosc, :cls.nosc_r]   # nosc × nosc_r
+
+        sample_y      = solvers[0].y[0]
+        g_prime_shape0 = cls.g_prime_(sample_y).shape[0] // 2
+        test_q        = sample_y[:cls.nosc]
+        G_test = cls.g_prime_(np.concatenate([test_q, np.zeros(cls.nosc)])
+                              )[:g_prime_shape0, :cls.nosc]
+
+        RB_windows, nosc_r_windows = [], []
+
+        for w in range(n_windows):
+            win_indices = window_indices[w]
+            print(f'\n  [Window {w+1}/{n_windows}] Computing local POD basis...')
+
+            # ── 2a. Local POD from window snapshots ───────────────────────────
+            def get_state_snapshots_w(win_idx=win_indices):
+                for solver, indices in zip(solvers, win_idx):
+                    if len(indices) == 0:
+                        continue
+                    yield from cls.compute_snapshots(
+                        solver, indices, lambda y: y[:cls.nosc], yield_batches=True)
+                for solver, indices in zip(solvers, win_idx):
+                    if len(indices) == 0:
+                        continue
+                    yield from cls.compute_snapshots(
+                        solver, indices, lambda y: y[cls.nosc:], yield_batches=True)
+
+            weights = np.eye(cls.nosc)
+            rb_local, sv_local, _ = cls.incremental_POD(
+                get_state_snapshots_w(), Xh=weights, tol=tol)
+            rb_local, _, _ = cls._truncate_basis(rb_local, sv_local, tol)
+
+            # ── 2b. Hierarchical enrichment ───────────────────────────────────
+            residual = rb_local - U_global @ (U_global.T @ rb_local)
+            if LA.norm(residual, 'fro') > 1e-10:
+                Q_enrich, _ = LA.qr(residual, mode='reduced')
+                col_norms   = LA.norm(Q_enrich, axis=0)
+                Q_enrich    = Q_enrich[:, col_norms > 1e-8]
+            else:
+                Q_enrich = np.empty((cls.nosc, 0))
+
+            if Q_enrich.shape[1] > 0:
+                rb_w = np.hstack([U_global, Q_enrich])
+                rb_w, _ = LA.qr(rb_w, mode='reduced')
+            else:
+                rb_w = U_global.copy()
+
+            # ── 2c. Constraint-gradient augmentation ──────────────────────────
+            candidates_w = [(slv, int(idx))
+                            for slv, idxs in zip(solvers, win_indices)
+                            for idx in idxs]
+
+            cand_idx = 0
+            cond_val = LA.cond(G_test @ rb_w) if rb_w.shape[1] > 0 else np.inf
+            print(f'    Initial cond(G_test @ rb_w) = {cond_val:.2e}')
+
+            while cond_val > 10.0 and cand_idx < len(candidates_w):
+                batch_grads, batch_norms_y = [], 0.0
+                for _ in range(min(50, len(candidates_w) - cand_idx)):
+                    slv, i = candidates_w[cand_idx]
+                    q = slv.y[i][:cls.nosc]
+                    G = cls.g_prime_(np.concatenate([q, np.zeros(cls.nosc)])
+                                     )[:g_prime_shape0, :cls.nosc]
+                    batch_grads.append(G.T)
+                    batch_norms_y += LA.norm(slv.y[i])**2
+                    cand_idx += 1
+                grad_matrix = np.hstack(batch_grads)
+                w_grad = (np.sqrt(batch_norms_y) / LA.norm(grad_matrix)
+                          if LA.norm(grad_matrix) > 1e-12 else 1.0)
+                rb_w, sv_w2, _ = cls.incremental_POD(
+                    [grad_matrix * w_grad], Xh=weights, tol=tol,
+                    initial_basis=(rb_w, np.ones(rb_w.shape[1])))
+                rb_w, _, _ = cls._truncate_basis(rb_w, sv_w2, tol)
+                cond_val = LA.cond(G_test @ rb_w)
+
+            # ── 2d. Safety cap ────────────────────────────────────────────────
+            nosc_r_w = rb_w.shape[1]
+            if nosc_r_w > cls.nosc:
+                print(f'    [Warning] Window {w+1} rank ({nosc_r_w}) > DOFs '
+                      f'({cls.nosc}). Capping to global basis.')
+                rb_w     = U_global.copy()
+                nosc_r_w = cls.nosc_r
+
+            RB_w = np.block([[rb_w,                np.zeros_like(rb_w)],
+                             [np.zeros_like(rb_w), rb_w              ]])
+            print(f'    Window {w+1}: RB={RB_w.shape}, '
+                  f'local_enrich={Q_enrich.shape[1] if Q_enrich.shape[1] > 0 else 0}, '
+                  f'cond={LA.cond(G_test @ rb_w):.2e}')
+
+            RB_windows.append(RB_w)
+            nosc_r_windows.append(nosc_r_w)
+            del rb_w, RB_w
+            gc.collect()
+
+        for target_class in target_classes:
+            setattr(target_class, 'RB_windows', RB_windows)
+            setattr(target_class, 'nosc_r_windows', nosc_r_windows)
+        setattr(cls, 'RB_windows', RB_windows)
+        setattr(cls, 'nosc_r_windows', nosc_r_windows)
+
+        print(f'[DiscreteGradientReducer] Traveling basis complete ({n_windows} windows).')
+
+    @classmethod
+    def setup_traveling_hyperreduction(cls, solvers, target_classes):
+        """
+        Build one DEIM/MDEIM hyper-reduction basis per time window
+        (DiscreteGradient).
+
+        Requires that ``setup_traveling_basis`` has already been called so that
+        ``RB_windows``, ``nosc_r_windows``, and ``_window_indices`` are available
+        on ``cls``.  Window boundaries are reused directly from the adaptive
+        detection run in ``setup_traveling_basis``.
+        """
+        # Reuse adaptively-detected window indices from setup_traveling_basis
+        window_indices = cls._window_indices
+        n_windows      = len(window_indices)
+        print(f'\n[DiscreteGradientReducer] Building {n_windows}-window '
+              f'adaptive traveling hyper-reduction...')
+        tol = cls.pod_tol_sweep[-1]
+
+        non_zero_indices = cls.lag_dg_z_nonzero_indices
+
+        RBxUx_windows, IP_Ux_windows = [], []
+        lag_dg_deim_windows, lag_dg_z_mdeim_windows = [], []
+
+        for w in range(n_windows):
+            win_indices = window_indices[w]
+            RB_w = cls.RB_windows[w]
+            nosc_r_w = cls.nosc_r_windows[w]
+            print(f'\n  [Window {w+1}/{n_windows}] Computing hyper-reduction...')
+
+            # ── DEIM for lag_dg ─────────────────────────────────────────────────
+            def get_lag_dg_snapshots_w(win_idx=win_indices):
+                for solver, indices in zip(solvers, win_idx):
+                    if len(indices) == 0:
+                        continue
+                    yield from cls.compute_snapshots(
+                        solver, indices, solver.lag_dg, is_dg=True, yield_batches=True)
+
+            weights = np.eye(cls.nosc)
+            U1_w, S1_w, _ = cls.incremental_POD(
+                (b[:cls.nosc, :] for b in get_lag_dg_snapshots_w()), Xh=weights, tol=tol)
+            U2_w, S2_w, _ = cls.incremental_POD(
+                (b[cls.nosc:, :] for b in get_lag_dg_snapshots_w()), Xh=weights, tol=tol)
+
+            U1_w, _, _ = cls._truncate_basis(U1_w, S1_w, tol)
+            U2_w, _, _ = cls._truncate_basis(U2_w, S2_w, tol)
+
+            P1_w, _ = DEIM(U1_w, plot_deim=False)
+            P2_w, _ = DEIM(U2_w, plot_deim=False)
+            P_w = np.block([
+                [P1_w, np.zeros((P1_w.shape[0], P2_w.shape[1]))],
+                [np.zeros((P2_w.shape[0], P1_w.shape[1])), P2_w]
+            ])
+            U_nonlinear_w = np.block([
+                [U1_w, np.zeros((U1_w.shape[0], U2_w.shape[1]))],
+                [np.zeros((U2_w.shape[0], U1_w.shape[1])), U2_w]
+            ])
+            RBxUx_inv_PxU_w = RB_w.T @ U_nonlinear_w @ LA.inv(P_w.T @ U_nonlinear_w)
+            deim_func_w = cls._create_indexed_deim_func(cls.lag_dg_expr, P_w, "DiscreteGradient")
+
+            # ── MDEIM for lag_dg_z (if requested) ──────────────────────────────
+            IP_Ux_inv_PxU_w = None
+            mdeim_func_w = None
+            if cls.hyperreducer == 'MDEIM':
+                def gen_mdeim_w(win_idx=win_indices):
+                    for solver, indices in zip(solvers, win_idx):
+                        if len(indices) == 0:
+                            continue
+                        yield from cls.compute_snapshots(
+                            solver, indices, solver.lag_dg_z,
+                            is_dg=True, projection_indices=non_zero_indices,
+                            yield_batches=True)
+
+                Uj_w, Sj_w, _ = cls.incremental_POD(gen_mdeim_w(), tol=tol)
+                Uj_w, _, _ = cls._truncate_basis(Uj_w, Sj_w, tol)
+                Pj_w, _ = DEIM(Uj_w, plot_deim=False)
+                B_hat_w = Uj_w @ LA.inv(Pj_w.T @ Uj_w)
+                IP_Ux_inv_PxU_w = cls._reconstruct_sparse_basis(
+                    B_hat_w, non_zero_indices, (2 * cls.nosc)**2)
+
+                flat_expr = cls.lag_dg_z_expr.flat()
+                selected_elems = [flat_expr[i] for i in non_zero_indices]
+                mdeim_col_w = Pj_w.T @ smp.Matrix(selected_elems)
+                mdeim_func_w = lambda *args, col=mdeim_col_w: smp.lambdify(
+                    (cls.y, cls.y1, cls.omega2), col,
+                    modules=['numpy', 'scipy'])(*args).flatten()
+
+            RBxUx_windows.append(RBxUx_inv_PxU_w)
+            IP_Ux_windows.append(IP_Ux_inv_PxU_w)
+            lag_dg_deim_windows.append(deim_func_w)
+            lag_dg_z_mdeim_windows.append(mdeim_func_w)
+
+        for target_class in target_classes:
+            setattr(target_class, 'RBxUx_inv_PxU_windows', RBxUx_windows)
+            setattr(target_class, 'IP_Ux_inv_PxU_windows', IP_Ux_windows)
+            setattr(target_class, 'lag_dg_deim_windows', lag_dg_deim_windows)
+            setattr(target_class, 'lag_dg_z_mdeim_windows', lag_dg_z_mdeim_windows)
+        setattr(cls, 'RBxUx_inv_PxU_windows', RBxUx_windows)
+        setattr(cls, 'IP_Ux_inv_PxU_windows', IP_Ux_windows)
+        setattr(cls, 'lag_dg_deim_windows', lag_dg_deim_windows)
+        setattr(cls, 'lag_dg_z_mdeim_windows', lag_dg_z_mdeim_windows)
+
+        print(f'[DiscreteGradientReducer] Traveling hyper-reduction complete ({n_windows} windows).')

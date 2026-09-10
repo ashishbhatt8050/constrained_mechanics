@@ -137,7 +137,12 @@ class BaseSolverMixin:
 
     @timing
     def solve_trajectory(self):
-        """Solve the system trajectory over the specified time range."""
+        """Solve the system trajectory over the specified time range.
+
+        When per-window bases are available (``RB_windows`` attribute is set on
+        the instance), the solver automatically swaps the active reduced basis
+        and hyper-reduction operators at every time-window boundary.
+        """
 
         if not hasattr(self, 'RB'):
             self.y = np.zeros((self.n+1, 2*self.nosc))
@@ -150,6 +155,115 @@ class BaseSolverMixin:
         if self.store: self.info = []
         self.Lambda = np.zeros((self.n+1, self.g_(np.zeros(2*self.nosc)).shape[0]))
 
+        # ── Traveling-basis setup ────────────────────────────────────────────────
+        # Detect whether per-window bases have been loaded onto this instance.
+        # They are stored in lists indexed by window (0-based).
+        _traveling = (
+            hasattr(self, 'RB_windows') and
+            self.RB_windows is not None and
+            len(self.RB_windows) >= 1
+        )
+        if _traveling:
+            _n_windows = len(self.RB_windows)
+            _current_window = -1   # force swap on first step
+
+            # ── Build a step-to-window lookup from the adaptive boundary fracs ──
+            # _boundary_fracs = [0.0, f1, f2, ..., 1.0] (length n_windows + 1)
+            # stored on the instance via _REDUCTION_ATTRS.
+            # Convert fractional positions to absolute step numbers once.
+            _has_adaptive_boundaries = (
+                hasattr(self, '_boundary_fracs') and
+                self._boundary_fracs is not None and
+                len(self._boundary_fracs) == _n_windows + 1
+            )
+            if _has_adaptive_boundaries:
+                # Step boundaries: step k belongs to window w when
+                #   _step_boundaries[w] <= k < _step_boundaries[w+1]
+                _step_boundaries = [
+                    int(f * self.n) for f in self._boundary_fracs
+                ]
+                import bisect as _bisect
+                def _window_for_step(k):
+                    # bisect_right gives insertion point → index of the
+                    # boundary that k falls before = window index.
+                    w = _bisect.bisect_right(_step_boundaries, k) - 1
+                    return max(0, min(w, _n_windows - 1))
+            else:
+                # Fallback: equal-size windows (old checkpoints / N_WINDOWS=1 case)
+                _window_size = self.n / _n_windows
+                def _window_for_step(k):
+                    return min(int(k / _window_size), _n_windows - 1)
+
+            # Helper: set the per-window hyper-reduction operators on self so that
+            # the methods in MechSystem (ham_z_hyperreduced, etc.) pick them up.
+            def _activate_window(w):
+                self.RB = self.RB_windows[w]
+                self.nosc_r = self.nosc_r_windows[w]
+
+                if hasattr(self, 'RBxUx_inv_PxU_windows') and self.RBxUx_inv_PxU_windows:
+                    rbu = self.RBxUx_inv_PxU_windows[w]
+                    if rbu is not None:
+                        self.RBxUx_inv_PxU = rbu
+
+                if hasattr(self, 'IP_Ux_inv_PxU_windows') and self.IP_Ux_inv_PxU_windows:
+                    ipu = self.IP_Ux_inv_PxU_windows[w]
+                    if ipu is not None:
+                        self.IP_Ux_inv_PxU = ipu
+
+                # Hamiltonian DEIM/MDEIM functions
+                if hasattr(self, 'ham_z_deim_windows') and self.ham_z_deim_windows:
+                    fn = self.ham_z_deim_windows[w]
+                    if fn is not None:
+                        self.__class__.ham_z_deim = staticmethod(fn)
+
+                if hasattr(self, 'ham_zz_mdeim_windows') and self.ham_zz_mdeim_windows:
+                    fn = self.ham_zz_mdeim_windows[w]
+                    if fn is not None:
+                        self.__class__.ham_zz_mdeim = staticmethod(fn)
+
+                # Lagrangian DEIM/MDEIM functions
+                if hasattr(self, 'lag_dg_deim_windows') and self.lag_dg_deim_windows:
+                    fn = self.lag_dg_deim_windows[w]
+                    if fn is not None:
+                        self.__class__.lag_dg_deim = staticmethod(fn)
+
+                if hasattr(self, 'lag_dg_z_mdeim_windows') and self.lag_dg_z_mdeim_windows:
+                    fn = self.lag_dg_z_mdeim_windows[w]
+                    if fn is not None:
+                        self.__class__.lag_dg_z_mdeim = staticmethod(fn)
+
+                # ── Constraint MDEIM operators ─────────────────────────────────────
+                if hasattr(self, '_IP_Ux_inv_PxU_windows') and self._IP_Ux_inv_PxU_windows:
+                    ip = self._IP_Ux_inv_PxU_windows[w]
+                    if ip is not None:
+                        self._IP_Ux_inv_PxU = ip
+
+                if hasattr(self, 'g_prime_mdeim_windows') and self.g_prime_mdeim_windows:
+                    fn = self.g_prime_mdeim_windows[w]
+                    if fn is not None:
+                        self.__class__.g_prime_mdeim = staticmethod(fn)
+
+                if hasattr(self, 'IP_g_prime_x_lambda_y_windows') and self.IP_g_prime_x_lambda_y_windows:
+                    ip = self.IP_g_prime_x_lambda_y_windows[w]
+                    if ip is not None:
+                        self.IP_g_prime_x_lambda_y = ip
+
+                if hasattr(self, 'g_prime_x_lambda_y_mdeim_windows') and self.g_prime_x_lambda_y_mdeim_windows:
+                    fn = self.g_prime_x_lambda_y_mdeim_windows[w]
+                    if fn is not None:
+                        self.__class__.g_prime_x_lambda_y_mdeim = staticmethod(fn)
+
+                # Re-initialise JJ to match the potentially new nosc_r
+                from System import MechSystem as _MS
+                if self.reducer == 'psd':
+                    self.JJ = _MS.compute_J(self.nosc_r)
+
+                print(f'  [Traveling basis] Activated window {w+1}/{_n_windows} '
+                      f'at step k={k} '
+                      f'(nosc_r={self.nosc_r}, RB={self.RB.shape})', flush=True)
+
+        # ── End traveling-basis setup ────────────────────────────────────────────
+
         # Calculate update frequency (10% of iterations)
         update_freq = max(1, self.n // 10)  
 
@@ -161,6 +275,14 @@ class BaseSolverMixin:
                 leave=True) as pbar:
 
             for k in range(self.n):
+
+                # ── Traveling-basis: swap at window boundary ─────────────────────
+                if _traveling:
+                    new_window = _window_for_step(k)
+                    if new_window != _current_window:
+                        _current_window = new_window
+                        _activate_window(_current_window)
+                # ── End swap ─────────────────────────────────────────────────────
 
                 if self.store: self.info.append(self.y[k])
                 y_ = np.array([self.y[k], self.y[k]])
@@ -515,6 +637,29 @@ class BaseSolverMixin:
                 if dg_solvers:
                     DiscreteGradientReducer.hyperreduce_constraints(dg_solvers, dg_classes)
 
+            # ── Traveling / Adaptive Reduced Basis ───────────────────────────────
+            # When N_WINDOWS > 1, build per-window local bases and hyper-reduction
+            # operators.  These are appended to the class/target attributes as lists
+            # and serialised to workers via _transfer_reduction_attrs, enabling the
+            # online solver to swap bases at each window boundary.
+            if ReduceMechSystem.N_WINDOWS > 1:
+                print(f'\n[setup_and_solve_hyperreduced_system] '
+                      f'Building {ReduceMechSystem.N_WINDOWS}-window traveling bases...')
+                if ham_solvers and ham_classes:
+                    HamiltonianReducer.setup_traveling_basis(ham_solvers, ham_classes)
+                    HamiltonianReducer.setup_traveling_hyperreduction(ham_solvers, ham_classes)
+                    if ReduceMechSystem.constraints_reduce:
+                        HamiltonianReducer.setup_traveling_constraint_hyperreduction(
+                            ham_solvers, ham_classes)
+                if dg_solvers and dg_classes:
+                    DiscreteGradientReducer.setup_traveling_basis(dg_solvers, dg_classes)
+                    DiscreteGradientReducer.setup_traveling_hyperreduction(dg_solvers, dg_classes)
+                    if ReduceMechSystem.constraints_reduce:
+                        DiscreteGradientReducer.setup_traveling_constraint_hyperreduction(
+                            dg_solvers, dg_classes)
+            # ── End traveling-basis setup ─────────────────────────────────────────
+
+
             # Update registered classes to hyper-reduced versions
             kwds['registered_solver_classes'] = [HYPERREDUCED_SOLVER_MAPPING.get(cls, cls) for cls in kwds['registered_solver_classes']]
 
@@ -529,6 +674,7 @@ class BaseSolverMixin:
             print("Creating new checkpoint...")
             fast_dump(kwds, kwds_file)
             fast_dump(solvers_dr, solvers_file)
+
 
         BaseSolverMixin.compute_convergence_rates(kwds, solvers_dr)
         BaseSolverMixin.plot_solvers(kwds, solvers_dr)
@@ -694,9 +840,7 @@ class BaseSolverMixin:
             fig_data['eng_error'] = self.eng_error
 
         solver_name_short = self.solver_class.__name__.replace('Conformal', 'C').replace('StormerVerlet', 'SV').replace('ImplicitMidpoint', 'IM').replace('DiscreteGradient', 'DG').replace('HyperReduced', 'HR').replace('Reduced', 'R')
-        # suffix = '_full' if not hasattr(self, 'RB') else '_r' if not hasattr(MechSystem, 'RBxUx_inv_PxU') else '_dr'
-        suffix = '_predict' if self.predict else '' if not hasattr(self, 'RB') else '_repro'
-        filename = os.path.join(MechSystem.data_folder, f"{solver_name_short}{suffix}.pdf")
+        filename = os.path.join(MechSystem.data_folder, f"{solver_name_short}.pdf")
         save_figure(fig, filename, fig_data=fig_data)
 
 class DiscreteGradientFixedPointMixin:

@@ -130,11 +130,11 @@ def check_checkpoint_exists(checkpoint_path, *files):
     return False
 
 # %%
-def load_symbolic_expressions(cls):
-    """Decorator to handle loading/saving of symbolic expressions"""
+def load_symbolic_expressions(cls, expressions_file=None):
+    """Decorator or function to handle loading/saving of symbolic expressions"""
     try:
-        # Try to load expressions
-        expressions_file = get_symbolic_expressions_file(cls.nosc)
+        if expressions_file is None:
+            expressions_file = get_symbolic_expressions_file(cls.nosc)
         expressions = fast_load(expressions_file)
 
         # print("Loaded symbolic expressions from disk.")
@@ -438,6 +438,8 @@ class MechSystem(SysConfig):
     def __init__(self, kwds):        
         if 'pool' in kwds:
             self.__dict__.update(kwds['pool'])
+        if 'nosc' in kwds:
+            self.nosc = kwds['nosc']
 
         self.ham = self.ham_lambda
         self.beta = (max(1e-2, 0 * rng.random() / 10)) * 0 # Damping coefficient, obsolete

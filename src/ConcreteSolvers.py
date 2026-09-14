@@ -37,6 +37,8 @@ def _dask_worker(idx, *arg):
             return result
     except Exception as e:
         print(f"Worker {idx} failed with error: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
         return e
 
 def compose_solver_solves(func):
@@ -144,17 +146,6 @@ class BaseSolverMixin:
         and hyper-reduction operators at every time-window boundary.
         """
 
-        if not hasattr(self, 'RB'):
-            self.y = np.zeros((self.n+1, 2*self.nosc))
-        else:
-            self.y = np.zeros((self.n+1, 2*self.nosc_r))
-            self.y_full = np.zeros((self.n+1, 2*self.nosc))
-            self.y_full[0] = MechSystem.y_init
-
-        self.y[0] = self.y_init
-        if self.store: self.info = []
-        self.Lambda = np.zeros((self.n+1, self.g_(np.zeros(2*self.nosc)).shape[0]))
-
         # ── Traveling-basis setup ────────────────────────────────────────────────
         # Detect whether per-window bases have been loaded onto this instance.
         # They are stored in lists indexed by window (0-based).
@@ -163,9 +154,27 @@ class BaseSolverMixin:
             self.RB_windows is not None and
             len(self.RB_windows) >= 1
         )
+
+        if not hasattr(self, 'RB'):
+            self.y = np.zeros((self.n+1, 2*self.nosc))
+            self.y[0] = self.y_init
+        elif _traveling:
+            self.y_full = np.zeros((self.n+1, 2*self.nosc))
+            self.y_full[0] = MechSystem.y_init
+            self.y = np.zeros((self.n+1, 2*self.nosc))
+            self.y[0] = MechSystem.y_init
+        else:
+            self.y = np.zeros((self.n+1, 2*self.nosc_r))
+            self.y_full = np.zeros((self.n+1, 2*self.nosc))
+            self.y_full[0] = MechSystem.y_init
+            self.y[0] = self.y_init
+
+        if self.store: self.info = []
+        self.Lambda = np.zeros((self.n+1, self.g_(np.zeros(2*self.nosc)).shape[0]))
+
         if _traveling:
             _n_windows = len(self.RB_windows)
-            _current_window = -1   # force swap on first step
+            _current_window = 0
 
             # ── Build a step-to-window lookup from the adaptive boundary fracs ──
             # _boundary_fracs = [0.0, f1, f2, ..., 1.0] (length n_windows + 1)
@@ -196,7 +205,7 @@ class BaseSolverMixin:
 
             # Helper: set the per-window hyper-reduction operators on self so that
             # the methods in MechSystem (ham_z_hyperreduced, etc.) pick them up.
-            def _activate_window(w):
+            def _activate_window(w, k=0):
                 self.RB = self.RB_windows[w]
                 self.nosc_r = self.nosc_r_windows[w]
 
@@ -214,22 +223,26 @@ class BaseSolverMixin:
                 if hasattr(self, 'ham_z_deim_windows') and self.ham_z_deim_windows:
                     fn = self.ham_z_deim_windows[w]
                     if fn is not None:
+                        self.ham_z_deim = fn
                         self.__class__.ham_z_deim = staticmethod(fn)
 
                 if hasattr(self, 'ham_zz_mdeim_windows') and self.ham_zz_mdeim_windows:
                     fn = self.ham_zz_mdeim_windows[w]
                     if fn is not None:
+                        self.ham_zz_mdeim = fn
                         self.__class__.ham_zz_mdeim = staticmethod(fn)
 
                 # Lagrangian DEIM/MDEIM functions
                 if hasattr(self, 'lag_dg_deim_windows') and self.lag_dg_deim_windows:
                     fn = self.lag_dg_deim_windows[w]
                     if fn is not None:
+                        self.lag_dg_deim = fn
                         self.__class__.lag_dg_deim = staticmethod(fn)
 
                 if hasattr(self, 'lag_dg_z_mdeim_windows') and self.lag_dg_z_mdeim_windows:
                     fn = self.lag_dg_z_mdeim_windows[w]
                     if fn is not None:
+                        self.lag_dg_z_mdeim = fn
                         self.__class__.lag_dg_z_mdeim = staticmethod(fn)
 
                 # ── Constraint MDEIM operators ─────────────────────────────────────
@@ -241,6 +254,7 @@ class BaseSolverMixin:
                 if hasattr(self, 'g_prime_mdeim_windows') and self.g_prime_mdeim_windows:
                     fn = self.g_prime_mdeim_windows[w]
                     if fn is not None:
+                        self.g_prime_mdeim = fn
                         self.__class__.g_prime_mdeim = staticmethod(fn)
 
                 if hasattr(self, 'IP_g_prime_x_lambda_y_windows') and self.IP_g_prime_x_lambda_y_windows:
@@ -251,6 +265,7 @@ class BaseSolverMixin:
                 if hasattr(self, 'g_prime_x_lambda_y_mdeim_windows') and self.g_prime_x_lambda_y_mdeim_windows:
                     fn = self.g_prime_x_lambda_y_mdeim_windows[w]
                     if fn is not None:
+                        self.g_prime_x_lambda_y_mdeim = fn
                         self.__class__.g_prime_x_lambda_y_mdeim = staticmethod(fn)
 
                 # Re-initialise JJ to match the potentially new nosc_r
@@ -261,6 +276,8 @@ class BaseSolverMixin:
                 print(f'  [Traveling basis] Activated window {w+1}/{_n_windows} '
                       f'at step k={k} '
                       f'(nosc_r={self.nosc_r}, RB={self.RB.shape})', flush=True)
+
+            _activate_window(0, k=0)
 
         # ── End traveling-basis setup ────────────────────────────────────────────
 
@@ -281,18 +298,22 @@ class BaseSolverMixin:
                     new_window = _window_for_step(k)
                     if new_window != _current_window:
                         _current_window = new_window
-                        _activate_window(_current_window)
+                        _activate_window(_current_window, k=k)
+                    y_k = self.RB.T @ self.y_full[k]
+                    y_ = np.array([y_k, y_k])
+                else:
+                    y_ = np.array([self.y[k], self.y[k]])
                 # ── End swap ─────────────────────────────────────────────────────
 
-                if self.store: self.info.append(self.y[k])
-                y_ = np.array([self.y[k], self.y[k]])
+                if self.store:
+                    self.info.append(self.y_full[k] if hasattr(self, 'RB') else self.y[k])
 
                 y_, y_full_, self.Lambda[k+1] = self.solve_for_w(y_, k)
 
-                self.y[k+1] = y_[-1]
-
                 if hasattr(self, 'RB'):
                     self.y_full[k+1] = y_full_[-1]
+                if not _traveling:
+                    self.y[k+1] = y_[-1]
 
                 # Update progress bar every update_freq iterations
                 if (k + 1) % update_freq == 0:
@@ -305,11 +326,14 @@ class BaseSolverMixin:
                 pbar.update(remaining)
 
         if self.store:
-            self.info.append(self.y[k+1])
+            self.info.append(self.y_full[-1] if hasattr(self, 'RB') else self.y[-1])
             self.info = np.vstack(self.info)
 
         if hasattr(self, 'RB'):
-            self.y_red = self.y.copy()
+            if not _traveling:
+                self.y_red = self.y.copy()
+            else:
+                self.y_red = self.y_full @ self.RB_windows[0] if hasattr(self, 'RB_windows') and self.RB_windows else None
             self.y = self.y_full.copy()
             del self.y_full
             gc.collect()
@@ -326,8 +350,39 @@ class BaseSolverMixin:
     def compute_sym_error(self):
         """Compute time-series symplectic error."""
         if getattr(self, 'var', False):
-            y = self.y_red if hasattr(self, 'y_red') else self.y
-            self.sym_error = self.var_solve(y)
+            if hasattr(self, 'RB'):
+                y = getattr(self, 'y_red', None)
+                if y is None and hasattr(self, 'y') and self.y is not None:
+                    if hasattr(self, 'RB_windows') and self.RB_windows:
+                        y = self.y @ self.RB_windows[0]
+                        self.y_red = y
+                    elif self.RB is not None:
+                        y = self.y @ self.RB
+                        self.y_red = y
+                if hasattr(self, 'RB_windows') and self.RB_windows:
+                    self.RB = self.RB_windows[0]
+                    self.nosc_r = self.nosc_r_windows[0]
+                    if hasattr(self, 'ham_z_deim_windows') and self.ham_z_deim_windows and self.ham_z_deim_windows[0] is not None:
+                        self.ham_z_deim = self.ham_z_deim_windows[0]
+                    if hasattr(self, 'ham_zz_mdeim_windows') and self.ham_zz_mdeim_windows and self.ham_zz_mdeim_windows[0] is not None:
+                        self.ham_zz_mdeim = self.ham_zz_mdeim_windows[0]
+                    if hasattr(self, 'RBxUx_inv_PxU_windows') and self.RBxUx_inv_PxU_windows and self.RBxUx_inv_PxU_windows[0] is not None:
+                        self.RBxUx_inv_PxU = self.RBxUx_inv_PxU_windows[0]
+                    if hasattr(self, 'IP_Ux_inv_PxU_windows') and self.IP_Ux_inv_PxU_windows and self.IP_Ux_inv_PxU_windows[0] is not None:
+                        self.IP_Ux_inv_PxU = self.IP_Ux_inv_PxU_windows[0]
+                    from System import MechSystem as _MS
+                    self.JJ = _MS.compute_J(self.nosc_r)
+                    self.JJ_r = self.JJ
+            else:
+                y = getattr(self, 'y', None)
+
+            if y is not None:
+                try:
+                    self.sym_error = self.var_solve(y)
+                except Exception:
+                    self.sym_error = None
+            else:
+                self.sym_error = None
         else:
             self.sym_error = None
 
@@ -408,6 +463,8 @@ class BaseSolverMixin:
         except Exception as e:
             print(f"Error in solve_mech_system: {str(e)}")
             print(f"Error type: {type(e)}")
+            import traceback
+            traceback.print_exc()
             raise
 
     @staticmethod
@@ -461,6 +518,12 @@ class BaseSolverMixin:
             for idx, res in zip(valid_indices, gathered_results):
                  if not isinstance(res, Exception):
                      results[idx] = res
+                 else:
+                     print(f"ERROR: Worker task {idx} failed with: {res}", flush=True)
+
+            if any(s is None for s in results):
+                failed_count = results.count(None)
+                print(f"WARNING: {failed_count} of {len(results)} tasks failed or were skipped.", flush=True)
 
             MSsolvers.extend(results)
             
@@ -767,7 +830,7 @@ class BaseSolverMixin:
         ax_pp = fig.add_subplot(gs[:5, -1], projection='3d')
         ax_pp.set_box_aspect([1, 1, 1])  # Set aspect ratio to be equal for all axes
 
-        if hasattr(self, 'sym_error'):
+        if getattr(self, 'sym_error', None) is not None:
             plot_data(ax0, self.t_points, self.sym_error, xlims=(0, self.T_final), \
                     ylabel=r'$\Delta Sp$', margins=10)
 
@@ -797,16 +860,47 @@ class BaseSolverMixin:
                     ylabel=r'$\Delta J$', margins=10)
 
         ax4.set_xlabel('time')
-        # Plot the particle positions over time
-        coords = self.y[:, :self.nosc].reshape(-1, self.nosc//3, 3)
+        # Plot the particle positions / beam centerline over time
+        coords = self.y[:, :self.nosc].reshape(-1, self.nosc // 3, 3)
         sc = None
-        for i in range(coords.shape[1]):
-            ax_pp.scatter(coords[0, i, 0], coords[0, i, 1], coords[0, i, 2], s=20, c='teal')  # plot initial configuration
-            # ax_pp.plot(coords[:, i, 0], coords[:, i, 1], coords[:, i, 2], 'k-')  # plot system evolution
-            sc = ax_pp.scatter(coords[:, i, 0], coords[:, i, 1], coords[:, i, 2], c=self.t_points, cmap='viridis', s=1, alpha=0.1)
+        is_beam = (
+            getattr(self, 'is_elastica', False) or
+            hasattr(self, 'boundary') or
+            'Elastica' in self.__class__.__name__ or
+            (hasattr(self, 'ds') and hasattr(self, 'length'))
+        )
+        if is_beam:
+            n_steps = coords.shape[0]
+            # Pinned support marker at origin
+            ax_pp.scatter([coords[0, 0, 0]], [coords[0, 0, 1]], [coords[0, 0, 2]],
+                          s=80, c='black', marker='s', label='Pinned root', zorder=5)
+            # Trace tip path
+            ax_pp.plot(coords[:, -1, 0], coords[:, -1, 1], coords[:, -1, 2],
+                       'r--', lw=1.2, alpha=0.7, label='Tip path')
+            # Select 15 evenly-spaced snapshots
+            n_snaps = min(15, n_steps)
+            snap_indices = np.linspace(0, n_steps - 1, n_snaps, dtype=int)
+            import matplotlib.cm as mcm
+            import matplotlib.colors as mcolors
+            cmap = mcm.get_cmap('viridis')
+            norm = mcolors.Normalize(vmin=self.t_points[0], vmax=self.t_points[-1])
+            for s_idx in snap_indices:
+                t_val = self.t_points[s_idx]
+                color = cmap(norm(t_val))
+                ax_pp.plot(coords[s_idx, :, 0], coords[s_idx, :, 1], coords[s_idx, :, 2],
+                           color=color, lw=2.2, alpha=0.85)
+                ax_pp.scatter(coords[s_idx, :, 0], coords[s_idx, :, 1], coords[s_idx, :, 2],
+                              color=color, s=12, alpha=0.9)
+            sc = mcm.ScalarMappable(norm=norm, cmap=cmap)
+            sc.set_array(self.t_points)
+        else:
+            for i in range(coords.shape[1]):
+                ax_pp.scatter(coords[0, i, 0], coords[0, i, 1], coords[0, i, 2], s=20, c='teal')  # plot initial configuration
+                # ax_pp.plot(coords[:, i, 0], coords[:, i, 1], coords[:, i, 2], 'k-')  # plot system evolution
+                sc = ax_pp.scatter(coords[:, i, 0], coords[:, i, 1], coords[:, i, 2], c=self.t_points, cmap='viridis', s=1, alpha=0.1)
 
-            # Plot projection onto x-y plane (z=0)
-            ax_pp.plot(coords[:, i, 0], coords[:, i, 1], np.zeros_like(coords[:, i, 2]), 'r-', alpha=0.7)
+                # Plot projection onto x-y plane (z=0)
+                ax_pp.plot(coords[:, i, 0], coords[:, i, 1], np.zeros_like(coords[:, i, 2]), 'r-', alpha=0.7)
 
         # Set the axes' labels and title
         ax_pp.set_xlabel('x', labelpad=10)

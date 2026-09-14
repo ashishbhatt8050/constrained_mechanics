@@ -1049,10 +1049,11 @@ def _plot_metric_panel(ax, metric_data, i, j, marker, color, ms, all_y_values):
         arr = metric_data[i][j]
         if isinstance(arr, np.ndarray) and arr.size > 0:
             val = np.nanmean(np.nanmean(arr, axis=1))
-            ax.semilogy([i], [val], marker=marker, color=color,
+            val_plot = max(abs(val), 1e-16) if np.isfinite(val) else val
+            ax.semilogy([i], [val_plot], marker=marker, color=color,
                         linestyle='None', markersize=ms,
                         markerfacecolor=color, markeredgecolor=color)
-            all_y_values.append(val)
+            all_y_values.append(val_plot)
 
 
 def _plot_speedup_panel(ax, times_raw, i, j, marker, color, avg_full, all_y_values):
@@ -1191,15 +1192,16 @@ def plot_prediction_results(solver_names, pod_tols, dt_space, data_folder,
     for ax in [ax_fom, ax_sym_r, ax_sym_dr, ax_speed_r, ax_speed_dr]:
         configure_axis(ax)
         ax.tick_params(axis='both', labelsize=22)
-        ax.set_xlim(-0.5, 1.5)
-        ax.set_xticks([0, 1])
+        n_solvers = len(solver_names)
+        ax.set_xlim(-0.5, max(0.5, n_solvers - 0.5))
+        ax.set_xticks(list(range(n_solvers)))
         # Build tick labels from solver_names
         tick_labels = []
-        for sn in solver_names[:2]:  # at most 2 solvers
+        for sn in solver_names:
             if 'StormerVerlet' in sn:
-                tick_labels.append('Model 1')
+                tick_labels.append('Model 1' if n_solvers > 1 else 'Stormer-Verlet')
             elif 'DiscreteGradient' in sn:
-                tick_labels.append('Model 2')
+                tick_labels.append('Model 2' if n_solvers > 1 else 'Discrete Gradient')
             else:
                 tick_labels.append(sn)
         ax.set_xticklabels(tick_labels)

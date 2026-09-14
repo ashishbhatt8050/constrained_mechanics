@@ -493,9 +493,8 @@ class ReduceMechSystem(MechSystem):
             flat_gp        = g_prime_expr.flat()
             sel_gp         = [flat_gp[i] for i in gp_nz_indices]
             col_gp_w       = Pj_gp.T @ smp.Matrix(sel_gp)
-            gp_mdeim_w     = (lambda col=col_gp_w:
-                lambda *args: smp.lambdify(
-                    (cls.y,), col, modules=['numpy', 'scipy'])(*args).flatten())()
+            _gp_fn         = smp.lambdify((cls.y,), col_gp_w, modules=['numpy', 'scipy'])
+            gp_mdeim_w     = lambda *args, _fn=_gp_fn, col=col_gp_w: _fn(*args).flatten()
 
             _IP_windows.append(IP_gp_w)
             gp_mdeim_windows.append(gp_mdeim_w)
@@ -527,10 +526,8 @@ class ReduceMechSystem(MechSystem):
                 flat_xy     = gplxy_expr.flat()
                 sel_xy      = [flat_xy[i] for i in gplxy_nz_indices]
                 col_xy_w    = Pj_xy.T @ smp.Matrix(sel_xy)
-                gplxy_mdeim_w = (lambda col=col_xy_w:
-                    lambda *args: smp.lambdify(
-                        (cls.y, cls.lag_mult), col,
-                        modules=['numpy', 'scipy'])(*args).flatten())()
+                _gplxy_fn   = smp.lambdify((cls.y, cls.lag_mult), col_xy_w, modules=['numpy', 'scipy'])
+                gplxy_mdeim_w = lambda *args, _fn=_gplxy_fn, col=col_xy_w: _fn(*args).flatten()
 
                 IP_gplxy_windows.append(IP_xy_w)
                 gplxy_mdeim_windows.append(gplxy_mdeim_w)
@@ -667,12 +664,14 @@ class ReduceMechSystem(MechSystem):
             # Create and wrap lambdified function
             # Handle argument signature for g_prime_x_lambda_y
             if func_name == 'g_prime_x_lambda_y_':
-                mdeim_func = lambda *args: smp.lambdify((cls.y, cls.lag_mult), col, modules=['numpy', 'scipy'])(*args).flatten()
+                _fn = smp.lambdify((cls.y, cls.lag_mult), col, modules=['numpy', 'scipy'])
+                mdeim_func = lambda *args, _f=_fn: _f(*args).flatten()
             elif func_name in ["g_"]:
                 # mdeim_func = smp.lambdify((cls.y,), col, modules=['scipy'])
                 mdeim_func = cls._create_indexed_deim_func(expr, Pj, solver_type)
             else:
-                mdeim_func = lambda *args: smp.lambdify((cls.y,), col, modules=['numpy', 'scipy'])(*args).flatten()
+                _fn = smp.lambdify((cls.y,), col, modules=['numpy', 'scipy'])
+                mdeim_func = lambda *args, _f=_fn: _f(*args).flatten()
 
             if callable(mdeim_func) and not isinstance(mdeim_func, type):
                 # Set attributes based on solver type
@@ -1048,6 +1047,10 @@ class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
         # Perform energy-based truncation for the current tolerance
         rb, _sv, _ = cls._truncate_basis(cls._Full_rb, cls._Full_sv, tol)
 
+        # Ensure condition number is bounded by taking columns from Master Basis if needed
+        while LA.cond(G_test @ rb) > 100.0 and rb.shape[1] < cls._Full_rb.shape[1] and rb.shape[1] + 2 <= cls.nosc:
+            rb = cls._Full_rb[:, :rb.shape[1] + 2]
+
         nosc_r = rb.shape[1]
         if nosc_r > cls.nosc:
             print(f"  [Warning] Basis rank ({nosc_r}) exceeds DOFs ({cls.nosc}). Basis is 'fat'. Skipping solver.")
@@ -1176,7 +1179,8 @@ class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
         flat_expr = cls.ham_zz_expr.flat()
         selected_expr_elements = [flat_expr[i] for i in non_zero_indices]
         mdeim_col = Pj.T @ smp.Matrix(selected_expr_elements) # This is a column vector
-        mdeim_func = lambda *args: smp.lambdify((cls.y, cls.omega2, cls.beta), mdeim_col, modules=['numpy', 'scipy'])(*args).flatten()
+        _mdeim_lambdified = smp.lambdify((cls.y, cls.omega2, cls.beta), mdeim_col, modules=['numpy', 'scipy'])
+        mdeim_func = lambda *args, _f=_mdeim_lambdified, col=mdeim_col: _f(*args).flatten()
 
         for target_class in target_classes:
             setattr(target_class, 'IP_Ux_inv_PxU', IP_Ux_inv_PxU)
@@ -1413,9 +1417,10 @@ class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
                 flat_expr = cls.ham_zz_expr.flat()
                 selected_elems = [flat_expr[i] for i in non_zero_indices]
                 mdeim_col_w = Pj_w.T @ smp.Matrix(selected_elems)
-                mdeim_func_w = lambda *args, col=mdeim_col_w: smp.lambdify(
-                    (cls.y, cls.omega2, cls.beta), col,
-                    modules=['numpy', 'scipy'])(*args).flatten()
+                _mdeim_w_lambdified = smp.lambdify(
+                    (cls.y, cls.omega2, cls.beta), mdeim_col_w,
+                    modules=['numpy', 'scipy'])
+                mdeim_func_w = lambda *args, _f=_mdeim_w_lambdified, col=mdeim_col_w: _f(*args).flatten()
 
             RBxUx_windows.append(RBxUx_inv_PxU_w)
             IP_Ux_windows.append(IP_Ux_inv_PxU_w)
@@ -1504,6 +1509,10 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
 
         # Truncate based on current tol
         rb_1, sv_1, _ = cls._truncate_basis(cls._Full_rb, cls._Full_sv, tol)
+
+        # Ensure condition number is bounded by taking columns from Master Basis if needed
+        while LA.cond(G_test @ rb_1) > 100.0 and rb_1.shape[1] < cls._Full_rb.shape[1] and rb_1.shape[1] + 2 <= cls.nosc:
+            rb_1 = cls._Full_rb[:, :rb_1.shape[1] + 2]
 
         nosc_r = rb_1.shape[1]
         if nosc_r > cls.nosc:
@@ -1692,7 +1701,8 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
         flat_expr = cls.lag_dg_z_expr.flat()
         selected_expr_elements = [flat_expr[i] for i in non_zero_indices]
         mdeim_col = Pj.T @ smp.Matrix(selected_expr_elements) # This is a column vector
-        mdeim_func = lambda *args: smp.lambdify((cls.y, cls.y1, cls.omega2), mdeim_col, modules=['numpy', 'scipy'])(*args).flatten()
+        _mdeim_lambdified = smp.lambdify((cls.y, cls.y1, cls.omega2), mdeim_col, modules=['numpy', 'scipy'])
+        mdeim_func = lambda *args, _f=_mdeim_lambdified, col=mdeim_col: _f(*args).flatten()
 
         for target_class in target_classes:
             setattr(target_class, 'IP_Ux_inv_PxU', IP_Ux_inv_PxU)
@@ -1912,9 +1922,10 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
                 flat_expr = cls.lag_dg_z_expr.flat()
                 selected_elems = [flat_expr[i] for i in non_zero_indices]
                 mdeim_col_w = Pj_w.T @ smp.Matrix(selected_elems)
-                mdeim_func_w = lambda *args, col=mdeim_col_w: smp.lambdify(
-                    (cls.y, cls.y1, cls.omega2), col,
-                    modules=['numpy', 'scipy'])(*args).flatten()
+                _mdeim_w_lambdified = smp.lambdify(
+                    (cls.y, cls.y1, cls.omega2), mdeim_col_w,
+                    modules=['numpy', 'scipy'])
+                mdeim_func_w = lambda *args, _f=_mdeim_w_lambdified, col=mdeim_col_w: _f(*args).flatten()
 
             RBxUx_windows.append(RBxUx_inv_PxU_w)
             IP_Ux_windows.append(IP_Ux_inv_PxU_w)

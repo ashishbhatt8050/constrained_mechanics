@@ -148,3 +148,5 @@ data
 matplotlib_cache
 dask_logs/
 .vscode/
+research_notes.md
+.github/copilot-instructions.md

@@ -29,6 +29,7 @@ from pylab import log, r_, c_, sqrt, reshape, linspace, roll, figure
 import cloudpickle as pickle
 from tqdm.auto import tqdm
 from matplotlib import rc
+import matplotlib.pyplot as plt
 
 # Dask imports
 from dask.distributed import Client, wait, LocalCluster
@@ -41,7 +42,8 @@ from ConcreteSolvers import (BaseSolverMixin, DiscreteGradientSolver,
 from ReduceMechSystem import ReduceMechSystem
 from System import MechSystem, HamiltonianMechSystem, LagrangianMechSystem, load_symbolic_expressions, fast_dump, fast_load, get_data_dir, get_symbolic_expressions_file, check_checkpoint_exists
 from SymbolicComputer import IndexedBaseSymbolicComputer, manage_cache
-from PlotScript import plot_omega_distribution, plot_pareto, plot_error_vs_basis_size, plot_prediction_results
+from PlotScript import (plot_omega_distribution, plot_pareto, plot_error_vs_basis_size,
+                        plot_prediction_results, save_figure, OKABE_ITO_PALETTE)
 
 
 def _collect_metric(solver_list, cls, metric_fn):
@@ -69,6 +71,155 @@ _PREDICTION_METRICS = [
     ('lin_mom_error',  lambda s: getattr(s, 'lin_mom_error', np.nan), lambda sl: True),
     ('ang_mom_error',  lambda s: getattr(s, 'ang_mom_error', np.nan), lambda sl: True),
 ]
+
+
+def run_prediction_sanity_check(kwds, solvers_r, solvers_dr, original_solver_classes):
+    """
+    Sanity check for prediction experiments:
+    Solves a FOM for the last unseen Omega2 test parameter, directly compares
+    trajectories and physical invariants against ROM and HROM, prints a summary,
+    and saves diagnostic comparison plots.
+    """
+    if not getattr(MechSystem, 'predict', False):
+        return
+
+    if not solvers_r or not solvers_dr:
+        print("\n[Sanity Check] No ROM/HROM solvers available to compare against. Skipping.")
+        return
+
+    last_omega2 = MechSystem.Omega2_space_test[-1]
+    tol = kwds.get('pod_tol', MechSystem.pod_tol_sweep[-1])
+
+    print("\n" + "=" * 88)
+    print(">>> [SANITY CHECK] Evaluating Prediction Fidelity on Unseen Test Parameter")
+    print(f"    Omega2 (test[-1]): {np.array2string(last_omega2, precision=3, separator=', ')}")
+    print(f"    Basis Tolerance:   {tol}")
+    print("=" * 88)
+
+    for cls in original_solver_classes:
+        cls_name = cls.__name__
+        for dt in MechSystem.dt_space:
+            # 1. Match ROM and HROM solvers from the test sweep
+            s_r = next((s for s in solvers_r if s is not None 
+                        and _matches_solver_family(s, cls) 
+                        and np.isclose(s.dt, dt) 
+                        and np.allclose(s.Omega2, last_omega2)), None)
+            s_dr = next((s for s in solvers_dr if s is not None 
+                         and _matches_solver_family(s, cls) 
+                         and np.isclose(s.dt, dt) 
+                         and np.allclose(s.Omega2, last_omega2)), None)
+
+            if s_r is None or s_dr is None:
+                print(f"  [Warning] Missing ROM or HROM result for {cls_name} (dt={dt:.4f}). Skipping.")
+                continue
+
+            # 2. Run the ground-truth FOM solve for this test parameter
+            print(f"\n--> Running test FOM solve: {cls_name} (dt={dt:.4f}) ...", flush=True)
+            kwds_fom = {
+                'nosc': MechSystem.nosc,
+                'registered_solver_classes': [cls],
+            }
+            s_f = BaseSolverMixin.solve_mech_system(cls, dt, last_omega2, kwds_fom)
+
+            # 3. Compute trajectory difference metrics
+            fom_norm_inf = np.amax(np.abs(s_f.y))
+            fom_norm_frob = LA.norm(s_f.y)
+
+            # Max absolute and relative errors
+            err_r_inf = np.amax(np.abs(s_f.y - s_r.y))
+            err_r_rel = err_r_inf / (fom_norm_inf + 1e-15)
+            err_r_l2 = LA.norm(s_f.y - s_r.y) / (fom_norm_frob + 1e-15)
+
+            err_dr_inf = np.amax(np.abs(s_f.y - s_dr.y))
+            err_dr_rel = err_dr_inf / (fom_norm_inf + 1e-15)
+            err_dr_l2 = LA.norm(s_f.y - s_dr.y) / (fom_norm_frob + 1e-15)
+
+            # Position (q) and momentum (p) sub-state errors
+            nosc = MechSystem.nosc
+            err_r_q = np.amax(np.abs(s_f.y[:, :nosc] - s_r.y[:, :nosc]))
+            err_r_p = np.amax(np.abs(s_f.y[:, nosc:] - s_r.y[:, nosc:]))
+            err_dr_q = np.amax(np.abs(s_f.y[:, :nosc] - s_dr.y[:, :nosc]))
+            err_dr_p = np.amax(np.abs(s_f.y[:, nosc:] - s_dr.y[:, nosc:]))
+
+            # Runtimes & Speedups
+            t_f = s_f.time_lapsed[0]
+            t_r = s_r.time_lapsed[0]
+            t_dr = s_dr.time_lapsed[0]
+            sp_r = t_f / t_r if t_r > 0 else np.nan
+            sp_dr = t_f / t_dr if t_dr > 0 else np.nan
+
+            # Invariant errors
+            eng_f = np.amax(np.abs(s_f.eng_error)) if getattr(s_f, 'eng_error', None) is not None else np.nan
+            eng_r = np.amax(np.abs(s_r.eng_error)) if getattr(s_r, 'eng_error', None) is not None else np.nan
+            eng_dr = np.amax(np.abs(s_dr.eng_error)) if getattr(s_dr, 'eng_error', None) is not None else np.nan
+
+            sym_f = np.amax(np.abs(s_f.sym_error)) if getattr(s_f, 'sym_error', None) is not None else np.nan
+            sym_r = np.amax(np.abs(s_r.sym_error)) if getattr(s_r, 'sym_error', None) is not None else np.nan
+            sym_dr = np.amax(np.abs(s_dr.sym_error)) if getattr(s_dr, 'sym_error', None) is not None else np.nan
+
+            # Basis dimensions
+            rom_dim = f"{2 * s_r.nosc_r}" if hasattr(s_r, 'nosc_r') else "N/A"
+            hrom_dim = f"{s_dr.deim_field.shape[1]}" if hasattr(s_dr, 'deim_field') and s_dr.deim_field is not None else str(getattr(s_dr, 'nosc_r', 'N/A'))
+
+            # 4. Print Summary Table
+            print(f"\n--- Sanity Check Summary: {cls_name} (dt={dt:.4f}) ---")
+            print(f"{'Model':<8} | {'Dim':<8} | {'Rel-Linf Err':<13} | {'Rel-L2 Err':<12} | {'Max ΔH':<10} | {'Max ΔSp':<10} | {'Time (s)':<9} | {'Speedup'}")
+            print("-" * 88)
+            print(f"{'FOM':<8} | {2*nosc:<8} | {'Reference':<13} | {'Reference':<12} | {eng_f:<10.2e} | {sym_f:<10.2e} | {t_f:<9.3f} | 1.00x")
+            print(f"{'ROM':<8} | {rom_dim:<8} | {err_r_rel:<13.2e} | {err_r_l2:<12.2e} | {eng_r:<10.2e} | {sym_r:<10.2e} | {t_r:<9.3f} | {sp_r:.2f}x")
+            print(f"{'HROM':<8} | {hrom_dim:<8} | {err_dr_rel:<13.2e} | {err_dr_l2:<12.2e} | {eng_dr:<10.2e} | {sym_dr:<10.2e} | {t_dr:<9.3f} | {sp_dr:.2f}x")
+            print(f"  Component breakdown: ROM (q_err={err_r_q:.2e}, p_err={err_r_p:.2e}) | HROM (q_err={err_dr_q:.2e}, p_err={err_dr_p:.2e})")
+
+            # 5. Generate Diagnostic Plot
+            fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+            t = s_f.t_points
+
+            # (a) Pointwise Trajectory Error over time (log scale)
+            err_r_t = np.amax(np.abs(s_f.y - s_r.y), axis=1)
+            err_dr_t = np.amax(np.abs(s_f.y - s_dr.y), axis=1)
+            axes[0, 0].semilogy(t, err_r_t, label='ROM Error', color=OKABE_ITO_PALETTE[0], lw=1.8)
+            axes[0, 0].semilogy(t, err_dr_t, label='HROM Error', color=OKABE_ITO_PALETTE[1], ls='--', lw=1.8)
+            axes[0, 0].set_title(r"Max State Error $\|y_{\mathrm{FOM}}(t) - y_{\mathrm{model}}(t)\|_\infty$")
+            axes[0, 0].set_xlabel("Time (s)")
+            axes[0, 0].grid(True, which="both", ls=":")
+            axes[0, 0].legend()
+
+            # (b) Representative Coordinate Comparison (particle 0 position q_0)
+            axes[0, 1].plot(t, s_f.y[:, 0], label='FOM', color='black', lw=2.0)
+            axes[0, 1].plot(t, s_r.y[:, 0], label='ROM', color=OKABE_ITO_PALETTE[0], ls='--', lw=1.8)
+            axes[0, 1].plot(t, s_dr.y[:, 0], label='HROM', color=OKABE_ITO_PALETTE[1], ls=':', lw=1.8)
+            axes[0, 1].set_title(r"Trajectory Comparison ($q_0(t)$)")
+            axes[0, 1].set_xlabel("Time (s)")
+            axes[0, 1].grid(True, ls=":")
+            axes[0, 1].legend()
+
+            # (c) Energy Invariant Drift
+            if getattr(s_f, 'eng_error', None) is not None:
+                axes[1, 0].semilogy(t, np.abs(s_f.eng_error) + 1e-16, label='FOM', color='black', lw=1.5)
+                axes[1, 0].semilogy(t, np.abs(s_r.eng_error) + 1e-16, label='ROM', color=OKABE_ITO_PALETTE[0], ls='--', lw=1.5)
+                axes[1, 0].semilogy(t, np.abs(s_dr.eng_error) + 1e-16, label='HROM', color=OKABE_ITO_PALETTE[1], ls=':', lw=1.5)
+                axes[1, 0].set_title(r"Energy Drift $|\Delta H(t)|$")
+                axes[1, 0].set_xlabel("Time (s)")
+                axes[1, 0].grid(True, which="both", ls=":")
+                axes[1, 0].legend()
+
+            # (d) Symplectic Invariant Error
+            if getattr(s_f, 'sym_error', None) is not None:
+                axes[1, 1].semilogy(t, np.abs(s_f.sym_error) + 1e-16, label='FOM', color='black', lw=1.5)
+                axes[1, 1].semilogy(t, np.abs(s_r.sym_error) + 1e-16, label='ROM', color=OKABE_ITO_PALETTE[0], ls='--', lw=1.5)
+                axes[1, 1].semilogy(t, np.abs(s_dr.sym_error) + 1e-16, label='HROM', color=OKABE_ITO_PALETTE[1], ls=':', lw=1.5)
+                axes[1, 1].set_title(r"Symplectic Error $|\Delta \mathrm{Sp}(t)|$")
+                axes[1, 1].set_xlabel("Time (s)")
+                axes[1, 1].grid(True, which="both", ls=":")
+                axes[1, 1].legend()
+
+            fig.suptitle(f"Sanity Check: {cls_name} | dt={dt:.4f} | Omega2 (test[-1])", fontsize=14)
+            plt.tight_layout()
+
+            plot_path = os.path.join(MechSystem.data_folder, f"sanity_check_{cls_name}_dt_{dt:.4f}.pdf")
+            save_figure(fig, plot_path)
+            plt.close(fig)
+            print(f"  Saved comparison plot to: {plot_path}")
 
 
 # ===========================================================================
@@ -290,7 +441,7 @@ if __name__ == '__main__':
                                 if np.isnan(nosc_r_for_tol): # Capture the basis size for this tolerance level
                                     nosc_r_for_tol = s_r.nosc_r                            
                                 if np.isnan(nosc_dr_for_tol):
-                                    nosc_dr_for_tol = s_dr.RBxUx_inv_PxU.shape[1]//2
+                                    nosc_dr_for_tol = s_dr.deim_field.shape[1] // 2
 
                     # Capture raw timing and errors for box plots
                     times_r_list = [s.time_lapsed[0] if s else np.nan for s_f, s in zip(solvers, solvers_r) if s_f is not None and _matches_solver_family(s_f, cls)]
@@ -410,6 +561,10 @@ if __name__ == '__main__':
                 [study_data[n]['times_dr'] for n in study_data],
                 **metric_kwargs,
             )
+
+            # Sanity check: evaluate ground-truth test FOM vs ROM and HROM predictions
+            if 'solvers_r' in locals() and 'solvers_dr' in locals():
+                run_prediction_sanity_check(kwds, solvers_r, solvers_dr, original_solver_classes)
 
     finally:
         if client:

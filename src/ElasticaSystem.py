@@ -7,9 +7,11 @@ import json
 import numpy as np
 from datetime import datetime
 
-from System import (SysConfig, MechSystem, get_data_dir, fast_load, fast_dump, 
-                    check_checkpoint_exists)
-from ConcreteSolvers import (BaseSolverMixin, ConformalStormerVerletFixedPointMixin,
+from System import (SysConfig, MechSystem, HamiltonianMechSystem,
+                    ReducedHamiltonianMechSystem, HyperReducedHamiltonianMechSystem,
+                    get_data_dir, fast_load, fast_dump, check_checkpoint_exists)
+from ConcreteSolvers import (BaseSolverMixin, ReducedSolverMixin, HyperReducedSolverMixin,
+                             ConformalStormerVerletFixedPointMixin,
                              ConformalStormerVerlet, REDUCED_SOLVER_MAPPING,
                              HYPERREDUCED_SOLVER_MAPPING)
 from ReduceMechSystem import HamiltonianReducer
@@ -65,7 +67,6 @@ class ElasticaConfig(SysConfig):
     tol = 1e-12
     tol_reduced = 1e-8
     M = 500
-    store = False
     pod_tol_sweep = [1e-4]
 
     if predict:
@@ -164,47 +165,30 @@ class ElasticaMechSystem(ElasticaConfig, MechSystem):
     # Initial state satisfying g(q0) = 0 and G(q0) p0 = 0 (q0 . p0 = 0)
     y_init = make_elastica_initial_conditions(ElasticaConfig.n_nodes, ElasticaConfig.ds, ElasticaConfig.boundary)
 
-    def __init__(self, kwds):
+    def __init__(self, kwds=None, **kwargs):
+        if kwds is None:
+            kwds = {}
+        if kwargs:
+            kwds = {**kwds, **kwargs}
         super().__init__(kwds)
         # Ensure JJ matches the elastica nosc
         self.JJ = self.compute_J(self.nosc_r if hasattr(self, 'RB') else self.nosc)
 
 
 @load_symbolic_expressions_elastica
-class HamiltonianElasticaMechSystem(ElasticaMechSystem):
+class HamiltonianElasticaMechSystem(HamiltonianMechSystem, ElasticaMechSystem):
     """Full-order Hamiltonian Elastica system."""
-    def __init__(self, kwds):
-        super().__init__(kwds)
-        self.ham_z = self.ham_z_lambda
-        self.ham_zz = self.ham_zz_lambda
-        self.g__ = self.g__lambda
-        self.g_prime__ = self.g_prime__lambda
+    pass
 
 
-class ReducedHamiltonianElasticaMechSystem(HamiltonianElasticaMechSystem):
+class ReducedHamiltonianElasticaMechSystem(ReducedHamiltonianMechSystem, HamiltonianElasticaMechSystem):
     """Reduced-order Hamiltonian Elastica system."""
-    def __init__(self, kwds):
-        if 'solver_data' in kwds and self.__class__.__name__ in kwds['solver_data']:
-            for k, v in kwds['solver_data'][self.__class__.__name__].items():
-                setattr(self, k, v)
-        super().__init__(kwds)
-        self.tol = self.tol_reduced
-        self.ham_z = self.ham_z_reduced
-        self.ham_zz = self.ham_zz_reduced
-        self.g__ = self.g_reduced
-        self.g_prime__ = self.g_prime_reduced
+    pass
 
 
-class HyperReducedHamiltonianElasticaMechSystem(ReducedHamiltonianElasticaMechSystem):
+class HyperReducedHamiltonianElasticaMechSystem(HyperReducedHamiltonianMechSystem, ReducedHamiltonianElasticaMechSystem):
     """Hyper-reduced order Hamiltonian Elastica system."""
-    def __init__(self, kwds):
-        super().__init__(kwds)
-        self.ham_z = self.ham_z_hyperreduced
-        self.ham_zz = self.ham_zz_hyperreduced
-        if self.hyperreducer == 'MDEIM':
-            self.ham_zz = self.ham_zz_mdeim_hyperreduced
-        if self.constraints_reduce:
-            self.g_prime__ = self.g_prime_hyperreduced
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -214,19 +198,23 @@ class HyperReducedHamiltonianElasticaMechSystem(ReducedHamiltonianElasticaMechSy
 class ElasticaStormerVerletSolver(BaseSolverMixin, ConformalStormerVerletFixedPointMixin,
                                  ConformalStormerVerlet, HamiltonianElasticaMechSystem):
     """Full-order Stormer-Verlet (RATTLE) solver for Elastica."""
-    pass
+    model_tier = 'fom'
 
 
-class ReducedElasticaStormerVerletSolver(BaseSolverMixin, ConformalStormerVerletFixedPointMixin,
-                                        ConformalStormerVerlet, ReducedHamiltonianElasticaMechSystem):
+class ReducedElasticaStormerVerletSolver(ReducedSolverMixin, ElasticaStormerVerletSolver,
+                                        ReducedHamiltonianElasticaMechSystem):
     """Reduced-order Stormer-Verlet (RATTLE) solver for Elastica."""
-    pass
+    model_tier = 'rom'
 
 
-class HyperReducedElasticaStormerVerletSolver(BaseSolverMixin, ConformalStormerVerletFixedPointMixin,
-                                             ConformalStormerVerlet, HyperReducedHamiltonianElasticaMechSystem):
+class HyperReducedElasticaStormerVerletSolver(HyperReducedSolverMixin, ReducedElasticaStormerVerletSolver,
+                                             HyperReducedHamiltonianElasticaMechSystem):
     """Hyper-reduced order Stormer-Verlet (RATTLE) solver for Elastica."""
-    pass
+    model_tier = 'hrom'
+
+
+ElasticaStormerVerletSolver.reduced_solver = ReducedElasticaStormerVerletSolver
+ElasticaStormerVerletSolver.hyperreduced_solver = HyperReducedElasticaStormerVerletSolver
 
 
 ELASTICA_REDUCED_SOLVER_MAPPING = {

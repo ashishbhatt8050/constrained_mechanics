@@ -5,73 +5,104 @@ This repository contains Python implementations of structure-preserving solvers 
 ## Features
 
 *   **Solvers**:
-    *   Energy-momentum preserving Discrete Gradient (DG) solvers for constrained Lagrangian formulation.
-    *   Symplectic RATTLE for constrained Hamiltonian formulation.
-*   **Model Reduction**:
-    *   Proper Orthogonal Decomposition (POD)
-    *   Discrete Empirical Interpolation Method (DEIM)
-    *   Sparse Matrix DEIM (SMDEIM) for hyper-reduction of nonlinearities and constraints both
-*   **Performance**:
+    *   Energy-momentum preserving Discrete Gradient (DG) solvers for constrained Lagrangian formulations.
+    *   Symplectic Conformal Störmer-Verlet (CSV / RATTLE) for constrained Hamiltonian formulations.
+    *   Conformal Implicit Midpoint (IM) symplectic solvers.
+*   **Model Order Reduction**:
+    *   Proper Orthogonal Decomposition (POD) for kinematic/momentum coordinates.
+    *   Discrete Empirical Interpolation Method (DEIM) for nonlinear vector fields.
+    *   Matrix DEIM (MDEIM) for hyper-reduction of Hessians, Jacobian matrices, and constraint variations.
+    *   Windowed traveling bases with online basis switching and adaptive constraint normal-space enrichment.
+*   **Architecture & Performance**:
+    *   Unified solver hierarchy (Path C) with zero-branching polymorphic dispatch in hot inner loops.
+    *   Centralized simulation configuration in `src/System.py`.
     *   Parallel execution support using `dask` and `dask_jobqueue` (SLURM integration).
-    *   Centralized configuration for simulation parameters in `src/System.py`.
 
-## Architecture overview
+## Architecture Overview
 
-The core codebase follows a hierarchical class design centered on system configuration, physics definition, reduction, and solver integration.
+The codebase follows an object-oriented, structure-preserving design separating physical system formulations, reduction algorithms, and numerical time integrators.
 
 ```mermaid
 flowchart TD
-    MechSystem[MechSystem]
-    HamiltonianMechSystem[HamiltonianMechSystem]
-    LagrangianMechSystem[LagrangianMechSystem]
-    ReduceMechSystem[ReduceMechSystem]
-    HamiltonianReducer[HamiltonianReducer]
-    DiscreteGradientReducer[DiscreteGradientReducer]
-    ReducedHamiltonianMechSystem[ReducedHamiltonianMechSystem]
-    ReducedLagrangianMechSystem[ReducedLagrangianMechSystem]
-    HyperReducedHamiltonianMechSystem[HyperReducedHamiltonianMechSystem]
-    HyperReducedLagrangianMechSystem[HyperReducedLagrangianMechSystem]
-    ODESolver[ODESolver]
-    ConformalStormerVerlet[ConformalStormerVerlet]
-    DiscreteGradient[DiscreteGradient]
-    ConformalStormerVerletSolver[ConformalStormerVerletSolver]
-    DiscreteGradientSolver[DiscreteGradientSolver]
+    subgraph Physics["Physics Formulation Hierarchy"]
+        MechSystem["MechSystem"]
+        HamiltonianMechSystem["HamiltonianMechSystem"]
+        LagrangianMechSystem["LagrangianMechSystem"]
+        ReducedHamiltonianMechSystem["ReducedHamiltonianMechSystem"]
+        ReducedLagrangianMechSystem["ReducedLagrangianMechSystem"]
+        HyperReducedHamiltonianMechSystem["HyperReducedHamiltonianMechSystem"]
+        HyperReducedLagrangianMechSystem["HyperReducedLagrangianMechSystem"]
 
-    MechSystem --> HamiltonianMechSystem
-    MechSystem --> LagrangianMechSystem
-    MechSystem --> ReduceMechSystem
-    ReduceMechSystem --> HamiltonianReducer
-    HamiltonianMechSystem --> HamiltonianReducer
-    ReduceMechSystem --> DiscreteGradientReducer
-    LagrangianMechSystem --> DiscreteGradientReducer
-    HamiltonianMechSystem --> ReducedHamiltonianMechSystem
-    LagrangianMechSystem --> ReducedLagrangianMechSystem
-    ReducedHamiltonianMechSystem --> HyperReducedHamiltonianMechSystem
-    ReducedLagrangianMechSystem --> HyperReducedLagrangianMechSystem
-    ODESolver --> DiscreteGradient
-    ODESolver --> ConformalStormerVerlet
-    DiscreteGradient --> DiscreteGradientSolver
-    LagrangianMechSystem --> DiscreteGradientSolver
-    ConformalStormerVerlet --> ConformalStormerVerletSolver
-    HamiltonianMechSystem --> ConformalStormerVerletSolver
+        MechSystem --> HamiltonianMechSystem
+        MechSystem --> LagrangianMechSystem
+        HamiltonianMechSystem --> ReducedHamiltonianMechSystem
+        LagrangianMechSystem --> ReducedLagrangianMechSystem
+        ReducedHamiltonianMechSystem --> HyperReducedHamiltonianMechSystem
+        ReducedLagrangianMechSystem --> HyperReducedLagrangianMechSystem
+    end
 
+    subgraph Reduction["Model Reduction"]
+        ReduceMechSystem["ReduceMechSystem"]
+        HamiltonianReducer["HamiltonianReducer"]
+        DiscreteGradientReducer["DiscreteGradientReducer"]
 
-    linkStyle default stroke-width:2.5px;
+        MechSystem --> ReduceMechSystem
+        ReduceMechSystem --> HamiltonianReducer
+        ReduceMechSystem --> DiscreteGradientReducer
+    end
 
-    classDef lagrangian fill:#1e293b,stroke:#38bdf8,color:#f0f9ff,stroke-width:1.5px,font-weight:bold;
-    classDef hamiltonian fill:#331e11,stroke:#fb923c,color:#fff7ed,stroke-width:1.5px,font-weight:bold;
-    classDef default fill:#0f172a,stroke:#64748b,color:#f8fafc,stroke-width:1.5px,font-weight:bold;
-    class LagrangianMechSystem,DiscreteGradient,DiscreteGradientSolver,DiscreteGradientReducer,ReducedLagrangianMechSystem,HyperReducedLagrangianMechSystem lagrangian;
-    class HamiltonianMechSystem,ConformalStormerVerlet,ConformalStormerVerletSolver,HamiltonianReducer,ReducedHamiltonianMechSystem,HyperReducedHamiltonianMechSystem hamiltonian;
+    subgraph Solvers["Structure-Preserving Solvers (Path C)"]
+        BaseSolverMixin["BaseSolverMixin"]
+        ReducedSolverMixin["ReducedSolverMixin"]
+        HyperReducedSolverMixin["HyperReducedSolverMixin"]
+
+        DiscreteGradientSolver["DiscreteGradientSolver (FOM)"]
+        ReducedDiscreteGradientSolver["ReducedDiscreteGradientSolver (ROM)"]
+        HyperReducedDiscreteGradientSolver["HyperReducedDiscreteGradientSolver (HROM)"]
+
+        ConformalStormerVerletSolver["ConformalStormerVerletSolver (FOM)"]
+        ReducedConformalStormerVerletSolver["ReducedConformalStormerVerletSolver (ROM)"]
+        HyperReducedConformalStormerVerletSolver["HyperReducedConformalStormerVerletSolver (HROM)"]
+
+        BaseSolverMixin --> DiscreteGradientSolver
+        BaseSolverMixin --> ConformalStormerVerletSolver
+
+        ReducedSolverMixin --> ReducedDiscreteGradientSolver
+        DiscreteGradientSolver --> ReducedDiscreteGradientSolver
+        ReducedLagrangianMechSystem --> ReducedDiscreteGradientSolver
+
+        HyperReducedSolverMixin --> HyperReducedDiscreteGradientSolver
+        ReducedDiscreteGradientSolver --> HyperReducedDiscreteGradientSolver
+        HyperReducedLagrangianMechSystem --> HyperReducedDiscreteGradientSolver
+
+        ReducedSolverMixin --> ReducedConformalStormerVerletSolver
+        ConformalStormerVerletSolver --> ReducedConformalStormerVerletSolver
+        ReducedHamiltonianMechSystem --> ReducedConformalStormerVerletSolver
+
+        HyperReducedSolverMixin --> HyperReducedConformalStormerVerletSolver
+        ReducedConformalStormerVerletSolver --> HyperReducedConformalStormerVerletSolver
+        HyperReducedHamiltonianMechSystem --> HyperReducedConformalStormerVerletSolver
+    end
+
+    linkStyle default stroke-width:2px;
 ```
 
-- `MechSystem` defines system physics and constraints.
-- `ReduceMechSystem` adds POD/DEIM/MDEIM reduction on top of `MechSystem`.
-- `ODESolver` provides the generic solver framework used by concrete integrators.
+### Projection Operators Nomenclature
+
+The codebase uses canonical, domain-specific names for all interpolation and projection operators:
+
+| Canonical Name | Legacy Alias | Description |
+|---|---|---|
+| `deim_field` | `RBxUx_inv_PxU` | DEIM projection-interpolation matrix for the vector field: $V_r^T U_f (P^T U_f)^{-1}$ |
+| `mdeim_Hessian` | `IP_Ux_inv_PxU` | Sparse MDEIM projection matrix for system Hessians: $U_j (P_j^T U_j)^{-1}$ |
+| `mdeim_g_prime` | `_IP_Ux_inv_PxU` | Sparse MDEIM projection matrix for the constraint Jacobian $\nabla g$ |
+| `mdeim_g_var` | `IP_g_prime_x_lambda_y` | Sparse MDEIM projection for constraint variation $g' \cdot \lambda \cdot y$ (DG) |
+
+All operators support windowed variants (`*_windows`) for traveling basis simulations, and bidirectional properties ensure full backward compatibility with legacy checkpoints.
 
 ## Installation
 
-It is highly recommended to install the project and its dependencies in a dedicated virtual environment to avoid conflicts with other projects. This project uses `conda` for environment management.
+It is recommended to install the project and its dependencies in a dedicated virtual environment.
 
 1.  Clone the repository:
     ```bash
@@ -79,74 +110,69 @@ It is highly recommended to install the project and its dependencies in a dedica
     cd constrained_mechanics
     ```
 
-2.  Create and activate a new conda environment (e.g., named `constrained_mechanics_env`):
+2.  Create and activate a conda environment:
     ```bash
-    conda create --name constrained_mechanics_env python=3.11
-    conda activate constrained_mechanics_env
+    conda create --name modred-dae-torch python=3.11
+    conda activate modred-dae-torch
     ```
 
-3.  Install the project in "editable" mode. This command reads the `pyproject.toml` file, installs all required dependencies into your active environment, and makes your local source code available on your Python path.
+3.  Install the project in editable mode:
     ```bash
     pip install -e .
     ```
 
 ## Usage
 
-The main driver script is `scripts/app8_lattice.py`. All core simulation parameters (number of oscillators, final time, etc.) are now centralized in the `SysConfig` class within `src/System.py`. Select between prediction and reproduction experiment therein.
+The repository includes two main benchmark applications:
 
-### Running the Main Simulation
+1. **Constrained Particle Lattice (`scripts/app8_lattice.py`)**:
+   Simulates coupled harmonic and nonlinear oscillator chains subject to holonomic distance constraints.
+2. **Discrete Euler Elastica (`scripts/app9_elastica.py`)**:
+   Simulates geometrically exact discrete elastica beams under large deformations with inextensibility constraints.
 
-To run the simulation on a HPC cluster using SLURM (edit the script according to your cluster configuration and available resources):
-```bash
-sbatch submit_job_slurm.sh
-```
+### Running Simulations
 
-To run the simulation:
+To run the lattice benchmark locally:
 ```bash
 python scripts/app8_lattice.py
 ```
 
-To run the simulation and clear any previous checkpoints:
+To run the discrete elastica benchmark:
 ```bash
-python scripts/app8_lattice.py --clean
+python scripts/app9_elastica.py
 ```
 
-To run without using LaTeX for plot rendering:
+Useful command-line options:
+* `--clean`: Remove existing checkpoints and recompute solutions from scratch.
+* `--no-latex`: Disable LaTeX font rendering for matplotlib plots (useful for fast headless execution).
+* `--clear-cache`: Clear cached joblib computations.
+* `--clear-symbolic`: Recompute SymPy symbolic expressions.
+
+### Running on a SLURM Cluster
+
+A submission script is provided for HPC clusters:
 ```bash
-python scripts/app8_lattice.py --no-latex
+sbatch submit_job_slurm.sh
+```
+
+To monitor an active or recent job:
+```bash
+./submit_job_slurm.sh monitor
 ```
 
 ### Running the Symbolics Benchmark
 
-A script for benchmarking different symbolic computation strategies is available. 
+To benchmark symbolic computation and code-generation strategies:
 ```bash
 python scripts/benchmark_symbolics.py
 ```
 
-## Debugging
+## Contribution Guide
 
-You can selectively disable parts of the simulation for easier debugging.
-
-### Running on a Local Machine
-
-The script automatically detects if the `sbatch` command is available. If not, it defaults to using `dask.distributed.LocalCluster`. To force local execution on a machine that has SLURM, you can temporarily modify the check in `scripts/app8_lattice.py`:
-
-```python
-# In scripts/app8_lattice.py, change this line:
-if False and shutil.which('sbatch') and not "PYTEST_CURRENT_TEST" in os.environ:
-#  ^ Change to False to disable SLURM detection
-```
-
-*Note: The script is configured to use a SLURM cluster by default. Ensure you adjust the `dask` client configuration in the `__main__` block of the script according to your own cluster configuration.*
-
-## Contribution guide
-
-To extend the project, start from the area that best matches your goal:
-*   Define new system physics by updating the Hamiltonian, Lagrangian, and constraint expressions in `src/SymbolicComputer.py`
-*   Add new time integrators or solver logic in `src/ConcreteSolvers.py` and extend the base framework in `src/ODESolver.py`
-*   Implement custom model reduction or hyper-reduction workflows in `src/ReduceMechSystem.py`
-
-Aim to keep new code consistent with the existing simulation and reduction patterns, and include tests or example usage when possible.
+To extend the framework:
+* **Define new physics models**: Extend `MechSystem` and update symbolic expressions in `src/SymbolicComputer.py` (or `src/ElasticaSymbolicComputer.py`).
+* **Add time integrators**: Inherit from `BaseSolverMixin` in `src/ConcreteSolvers.py` and extend `src/ODESolver.py`.
+* **Add reduction algorithms**: Implement new POD/DEIM/MDEIM routines in `src/ReduceMechSystem.py`.
 
 ## Citation
 

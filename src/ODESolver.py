@@ -146,8 +146,8 @@ class ODESolver:
     
 class ForwardEuler(ODESolver):
     def __call__(self, y, t, *y1, **kwargs):
-        f = self.JJ @ self.ham_z(y) - self.drag(y)
-        dfdy = self.JJ @ self.ham_zz(y) - self.drag_z(y)
+        f = self.JJ @ self.ham_z(y)
+        dfdy = self.JJ @ self.ham_zz(y)
         return f if kwargs['func'] else dfdy
     
     def advance(self):
@@ -180,7 +180,7 @@ Could not import module "Newton". Place Newton.py in this directory
 
             self.discrete_derivative =True
         else:
-            neq = np.size(MechSys.u_init)
+            neq = np.size(MechSys.y_init)
             self.discrete_derivative = False
             self.dfdw = lambda u, t, dt: np.eye(neq)-dt*np.asarray(self.dfdu(u, t, dt), float)
 
@@ -223,10 +223,10 @@ class RungeKutta4(ODESolver):
 class ConformalStormerVerlet(ODESolver):
 
     def f(self, y, t, *arg):
-        return self.JJ @ self.ham_z(y, 0)
+        return self.JJ @ self.ham_z(y)
     
     def dfdu(self, y, t, *arg):
-        return self.JJ @ self.ham_zz(y, 0)
+        return self.JJ @ self.ham_zz(y)
     
     def __init__(self, kwds):
         ODESolver.__init__(self, kwds)
@@ -285,8 +285,8 @@ class ConformalStormerVerlet(ODESolver):
     
 class ImplicitMidpoint(ODESolver):
     def __call__(self, y, t, *y1, **kwargs):
-        f = self.JJ @ self.ham_z(y) - self.drag(y)
-        dfdy = self.JJ @ self.ham_zz(y) - self.drag_z(y)
+        f = self.JJ @ self.ham_z(y)
+        dfdy = self.JJ @ self.ham_zz(y)
         return f if kwargs['func'] else dfdy
     
     def __init__(self, kwds):

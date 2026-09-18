@@ -6,9 +6,11 @@ import sys
 import shutil
 import argparse
 import numpy as np
+from numpy import linalg as LA
 from pylab import linspace
 from tqdm.auto import tqdm
 from matplotlib import rc
+import matplotlib.pyplot as plt
 
 # Set environment variables for single-thread control per worker
 os.environ['OMP_NUM_THREADS'] = '1'
@@ -34,7 +36,8 @@ from ElasticaSystem import (ElasticaConfig, ElasticaMechSystem,
                             get_symbolic_expressions_file_elastica,
                             make_elastica_initial_conditions,
                             plot_elastica_beam)
-from PlotScript import plot_omega_distribution, plot_error_vs_basis_size, plot_prediction_results
+from PlotScript import (plot_omega_distribution, plot_error_vs_basis_size,
+                        plot_prediction_results, save_figure, OKABE_ITO_PALETTE)
 
 
 class TeeLogger:
@@ -82,6 +85,172 @@ _PREDICTION_METRICS = [
     ('lin_mom_error',  lambda s: getattr(s, 'lin_mom_error', np.nan), lambda sl: True),
     ('ang_mom_error',  lambda s: getattr(s, 'ang_mom_error', np.nan), lambda sl: True),
 ]
+
+
+def run_prediction_sanity_check(kwds, solvers_r, solvers_dr, original_solver_classes):
+    """
+    Sanity check for prediction experiments on Constrained Euler Elastica:
+    Solves a FOM for the last unseen Omega2 test parameter (bending stiffnesses),
+    directly compares trajectories, tip deflections, and physical invariants against
+    ROM and HROM, prints a summary, and saves diagnostic comparison plots.
+    """
+    if not getattr(MechSystem, 'predict', False):
+        return
+
+    if not solvers_r or not solvers_dr:
+        print("\n[Sanity Check] No ROM/HROM solvers available to compare against. Skipping.")
+        return
+
+    last_omega2 = MechSystem.Omega2_space_test[-1]
+    tol = kwds.get('pod_tol', MechSystem.pod_tol_sweep[-1])
+
+    print("\n" + "=" * 88)
+    print(">>> [SANITY CHECK] Evaluating Prediction Fidelity on Unseen Elastica Test Parameter")
+    print(f"    Omega2 (test[-1]): {np.array2string(last_omega2, precision=3, separator=', ')}")
+    print(f"    Basis Tolerance:   {tol}")
+    print("=" * 88)
+
+    for cls in original_solver_classes:
+        cls_name = cls.__name__
+        for dt in MechSystem.dt_space:
+            # 1. Match ROM and HROM solvers from the test sweep
+            s_r = next((s for s in solvers_r if s is not None 
+                        and _matches_solver_family(s, cls) 
+                        and np.isclose(s.dt, dt) 
+                        and np.allclose(s.Omega2, last_omega2)), None)
+            s_dr = next((s for s in solvers_dr if s is not None 
+                         and _matches_solver_family(s, cls) 
+                         and np.isclose(s.dt, dt) 
+                         and np.allclose(s.Omega2, last_omega2)), None)
+
+            if s_r is None or s_dr is None:
+                print(f"  [Warning] Missing ROM or HROM result for {cls_name} (dt={dt:.4f}). Skipping.")
+                continue
+
+            # 2. Run the ground-truth FOM solve for this test parameter
+            print(f"\n--> Running test FOM solve: {cls_name} (dt={dt:.4f}) ...", flush=True)
+            kwds_fom = {
+                'nosc': MechSystem.nosc,
+                'registered_solver_classes': [cls],
+            }
+            s_f = BaseSolverMixin.solve_mech_system(cls, dt, last_omega2, kwds_fom)
+
+            # 3. Compute trajectory difference metrics
+            fom_norm_inf = np.amax(np.abs(s_f.y))
+            fom_norm_frob = LA.norm(s_f.y)
+
+            # Max absolute and relative errors
+            err_r_inf = np.amax(np.abs(s_f.y - s_r.y))
+            err_r_rel = err_r_inf / (fom_norm_inf + 1e-15)
+            err_r_l2 = LA.norm(s_f.y - s_r.y) / (fom_norm_frob + 1e-15)
+
+            err_dr_inf = np.amax(np.abs(s_f.y - s_dr.y))
+            err_dr_rel = err_dr_inf / (fom_norm_inf + 1e-15)
+            err_dr_l2 = LA.norm(s_f.y - s_dr.y) / (fom_norm_frob + 1e-15)
+
+            # Position (q) and momentum (p) sub-state errors
+            nosc = MechSystem.nosc
+            n_nodes = nosc // 3
+            err_r_q = np.amax(np.abs(s_f.y[:, :nosc] - s_r.y[:, :nosc]))
+            err_r_p = np.amax(np.abs(s_f.y[:, nosc:] - s_r.y[:, nosc:]))
+            err_dr_q = np.amax(np.abs(s_f.y[:, :nosc] - s_dr.y[:, :nosc]))
+            err_dr_p = np.amax(np.abs(s_f.y[:, nosc:] - s_dr.y[:, nosc:]))
+
+            # Tip deflection extraction (z_tip at node n_nodes-1)
+            coords_f = s_f.y[:, :nosc].reshape(-1, n_nodes, 3)
+            coords_r = s_r.y[:, :nosc].reshape(-1, n_nodes, 3)
+            coords_dr = s_dr.y[:, :nosc].reshape(-1, n_nodes, 3)
+            z_tip_f = coords_f[:, -1, 2]
+            z_tip_r = coords_r[:, -1, 2]
+            z_tip_dr = coords_dr[:, -1, 2]
+            err_tip_r = np.amax(np.abs(z_tip_f - z_tip_r))
+            err_tip_dr = np.amax(np.abs(z_tip_f - z_tip_dr))
+
+            # Runtimes & Speedups
+            t_f = s_f.time_lapsed[0]
+            t_r = s_r.time_lapsed[0]
+            t_dr = s_dr.time_lapsed[0]
+            sp_r = t_f / t_r if t_r > 0 else np.nan
+            sp_dr = t_f / t_dr if t_dr > 0 else np.nan
+
+            # Invariant errors
+            eng_f = np.amax(np.abs(s_f.eng_error)) if getattr(s_f, 'eng_error', None) is not None else np.nan
+            eng_r = np.amax(np.abs(s_r.eng_error)) if getattr(s_r, 'eng_error', None) is not None else np.nan
+            eng_dr = np.amax(np.abs(s_dr.eng_error)) if getattr(s_dr, 'eng_error', None) is not None else np.nan
+
+            sym_f = np.amax(np.abs(s_f.sym_error)) if getattr(s_f, 'sym_error', None) is not None else np.nan
+            sym_r = np.amax(np.abs(s_r.sym_error)) if getattr(s_r, 'sym_error', None) is not None else np.nan
+            sym_dr = np.amax(np.abs(s_dr.sym_error)) if getattr(s_dr, 'sym_error', None) is not None else np.nan
+
+            # Basis dimensions
+            rom_dim = f"{2 * s_r.nosc_r}" if hasattr(s_r, 'nosc_r') else "N/A"
+            hrom_dim = f"{s_dr.deim_field.shape[1]}" if hasattr(s_dr, 'deim_field') and s_dr.deim_field is not None else str(getattr(s_dr, 'nosc_r', 'N/A'))
+
+            # 4. Print Summary Table
+            print(f"\n--- Sanity Check Summary: {cls_name} (dt={dt:.4f}) ---")
+            print(f"{'Model':<8} | {'Dim':<8} | {'Rel-Linf Err':<13} | {'Rel-L2 Err':<12} | {'Tip Err (m)':<12} | {'Max ΔH':<10} | {'Max ΔSp':<10} | {'Time (s)':<9} | {'Speedup'}")
+            print("-" * 103)
+            print(f"{'FOM':<8} | {2*nosc:<8} | {'Reference':<13} | {'Reference':<12} | {'Reference':<12} | {eng_f:<10.2e} | {sym_f:<10.2e} | {t_f:<9.3f} | 1.00x")
+            print(f"{'ROM':<8} | {rom_dim:<8} | {err_r_rel:<13.2e} | {err_r_l2:<12.2e} | {err_tip_r:<12.2e} | {eng_r:<10.2e} | {sym_r:<10.2e} | {t_r:<9.3f} | {sp_r:.2f}x")
+            print(f"{'HROM':<8} | {hrom_dim:<8} | {err_dr_rel:<13.2e} | {err_dr_l2:<12.2e} | {err_tip_dr:<12.2e} | {eng_dr:<10.2e} | {sym_dr:<10.2e} | {t_dr:<9.3f} | {sp_dr:.2f}x")
+            print(f"  Component breakdown: ROM (q_err={err_r_q:.2e}, p_err={err_r_p:.2e}) | HROM (q_err={err_dr_q:.2e}, p_err={err_dr_p:.2e})")
+
+            # 5. Generate Diagnostic Plot
+            fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+            t = s_f.t_points
+
+            # (a) Pointwise Trajectory Error over time (log scale)
+            err_r_t = np.amax(np.abs(s_f.y - s_r.y), axis=1)
+            err_dr_t = np.amax(np.abs(s_f.y - s_dr.y), axis=1)
+            axes[0, 0].semilogy(t, err_r_t, label='ROM Error', color=OKABE_ITO_PALETTE[0], lw=1.8)
+            axes[0, 0].semilogy(t, err_dr_t, label='HROM Error', color=OKABE_ITO_PALETTE[1], ls='--', lw=1.8)
+            axes[0, 0].set_title(r"Max State Error $\|y_{\mathrm{FOM}}(t) - y_{\mathrm{model}}(t)\|_\infty$")
+            axes[0, 0].set_xlabel("Time (s)")
+            axes[0, 0].grid(True, which="both", ls=":")
+            axes[0, 0].legend()
+
+            # (b) Tip Vertical Deflection Comparison z_tip(t)
+            axes[0, 1].plot(t, z_tip_f, label='FOM', color='black', lw=2.0)
+            axes[0, 1].plot(t, z_tip_r, label='ROM', color=OKABE_ITO_PALETTE[0], ls='--', lw=1.8)
+            axes[0, 1].plot(t, z_tip_dr, label='HROM', color=OKABE_ITO_PALETTE[1], ls=':', lw=1.8)
+            axes[0, 1].set_title(r"Tip Deflection $z_{\mathrm{tip}}(t)$")
+            axes[0, 1].set_xlabel("Time (s)")
+            axes[0, 1].set_ylabel("Tip Deflection (m)")
+            axes[0, 1].grid(True, ls=":")
+            axes[0, 1].legend()
+
+            # (c) Energy Invariant Drift
+            if getattr(s_f, 'eng_error', None) is not None:
+                axes[1, 0].semilogy(t, np.abs(s_f.eng_error) + 1e-16, label='FOM', color='black', lw=1.5)
+                axes[1, 0].semilogy(t, np.abs(s_r.eng_error) + 1e-16, label='ROM', color=OKABE_ITO_PALETTE[0], ls='--', lw=1.5)
+                axes[1, 0].semilogy(t, np.abs(s_dr.eng_error) + 1e-16, label='HROM', color=OKABE_ITO_PALETTE[1], ls=':', lw=1.5)
+                axes[1, 0].set_title(r"Energy Drift $|\Delta H(t)|$")
+                axes[1, 0].set_xlabel("Time (s)")
+                axes[1, 0].grid(True, which="both", ls=":")
+                axes[1, 0].legend()
+
+            # (d) Symplectic Invariant Error
+            if getattr(s_f, 'sym_error', None) is not None:
+                axes[1, 1].semilogy(t, np.abs(s_f.sym_error) + 1e-16, label='FOM', color='black', lw=1.5)
+                axes[1, 1].semilogy(t, np.abs(s_r.sym_error) + 1e-16, label='ROM', color=OKABE_ITO_PALETTE[0], ls='--', lw=1.5)
+                axes[1, 1].semilogy(t, np.abs(s_dr.sym_error) + 1e-16, label='HROM', color=OKABE_ITO_PALETTE[1], ls=':', lw=1.5)
+                axes[1, 1].set_title(r"Symplectic Error $|\Delta \mathrm{Sp}(t)|$")
+                axes[1, 1].set_xlabel("Time (s)")
+                axes[1, 1].grid(True, which="both", ls=":")
+                axes[1, 1].legend()
+
+            fig.suptitle(f"Sanity Check: Elastica {cls_name} | dt={dt:.4f} | Omega2 (test[-1])", fontsize=14)
+            plt.tight_layout()
+
+            plot_path = os.path.join(MechSystem.data_folder, f"sanity_check_{cls_name}_dt_{dt:.4f}.pdf")
+            save_figure(fig, plot_path)
+            plt.close(fig)
+            print(f"  Saved comparison plot to: {plot_path}")
+
+            # 6. Generate dedicated 3D/2D Elastica beam plot for this test parameter
+            beam_test_pdf = f"elastica_beam_test_sanity_check_{cls_name}_dt_{dt:.4f}.pdf"
+            plot_elastica_beam([s_f], [s_r], [s_dr], data_folder=MechSystem.data_folder, filename=beam_test_pdf)
+            print(f"  Saved Elastica 3D/2D beam sanity check plot to: {os.path.join(MechSystem.data_folder, beam_test_pdf)}")
 
 
 if __name__ == '__main__':
@@ -138,7 +307,6 @@ if __name__ == '__main__':
     MechSystem.tol = ElasticaConfig.tol
     MechSystem.tol_reduced = ElasticaConfig.tol_reduced
     MechSystem.M = ElasticaConfig.M
-    MechSystem.store = ElasticaConfig.store
     MechSystem.data_folder = ElasticaMechSystem.data_folder
     os.makedirs(MechSystem.data_folder, exist_ok=True)
 
@@ -319,7 +487,7 @@ if __name__ == '__main__':
                                 if np.isnan(nosc_r_for_tol):
                                     nosc_r_for_tol = s_r.nosc_r
                                 if np.isnan(nosc_dr_for_tol):
-                                    nosc_dr_for_tol = s_dr.RBxUx_inv_PxU.shape[1] // 2
+                                    nosc_dr_for_tol = s_dr.deim_field.shape[1] // 2
 
                     if not np.isnan(nosc_r_for_tol):
                         study_data[cls.__name__]['sizes'].append(nosc_r_for_tol)
@@ -383,6 +551,10 @@ if __name__ == '__main__':
                 ang_mom_error_r=[study_data[n]['ang_mom_error_r'] for n in study_data],
                 ang_mom_error_dr=[study_data[n]['ang_mom_error_dr'] for n in study_data]
             )
+
+            # Sanity check: evaluate ground-truth test FOM vs ROM and HROM predictions
+            if 'solvers_r' in locals() and 'solvers_dr' in locals():
+                run_prediction_sanity_check(kwds, solvers_r, solvers_dr, original_solver_classes)
 
         # Dedicated 3D and 2D Elastica beam visualization
         print("\nGenerating dedicated 3D and 2D Elastica beam plots...")

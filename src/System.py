@@ -191,25 +191,33 @@ class SysConfig:
     assert np.isclose(sum(w_values), 1), 'sum_i w_i must be 1'
     
     # Solver and reduction settings
-    tol, M, var, store = 1.0E-12, 500, True, False
+    tol, M, var = 1.0E-12, 500, True
     tol_reduced = 1.0E-8
     # pod_tol_ham = 1e-10
     # pod_tol_dg = 1e-10
-    pod_tol_sweep = [1e-4] #, 1e-6, 1e-8, 1e-10] # must be in descending order
-    assert all(pod_tol_sweep[i] >= pod_tol_sweep[i + 1] for i in range(len(pod_tol_sweep) - 1)), "pod_tol_sweep must be in descending order"
-    
-    predict = True # False = reproduce results of the full model
-    train_ratio = 0.7
     reducer = 'psd'
     hyperreducer = 'MDEIM'
     constraint_type = 'spherical'
-    constraints_reduce = False # True = hyper-reduce constraints, False = reduce constraints
+    constraints_reduce = True # True = hyper-reduce constraints, False = reduce constraints
+
+    # MDEIM snapshot sampling settings (subsamples Hessian/Jacobian snapshots across FOM solves)
+    mdeim_max_snapshots_per_solver = int(1e3)  # Maximum snapshots sampled per solver trajectory for MDEIM
+    mdeim_target_total_snapshots = int(5e4)   # Global snapshot budget across all solves for MDEIM
+    mdeim_min_snapshots_per_solver = 3        # Minimum snapshots per solver
+    mdeim_sampling_method = 'uniform'         # 'uniform', 'stride', or 'random'
+    mdeim_snapshot_stride = None              # Fixed stride if specified, else uniform spacing
+    mdeim_max_solvers = None                  # Optional cap on number of solvers sampled
     
     # System parameters
     nosc = 54 * 10  # Number of oscillators
     assert nosc % 6 == 0, 'nosc must be divisible by 6'
 
+    predict = True # False = reproduce results of the full model
+
     if predict: # prediction parameters
+        pod_tol_sweep = [1e-3]
+        train_ratio = 0.7
+
         # Time-stepping parameters
         dt_space_dim = 1
         dt_space = np.array([0.001])
@@ -218,6 +226,8 @@ class SysConfig:
         # Parameter space for Omega^2
         _Omega2_space_dim = nosc // 3 - 2
     else: # reproduction parameters
+        pod_tol_sweep = [1e-4, 1e-6, 1e-8, 1e-10] # must be in descending order
+
         # Time-stepping parameters
         dt_space_dim = 5
         dt_space = np.logspace(-4, -4 - dt_space_dim, num=dt_space_dim, base=2, endpoint=False)
@@ -225,6 +235,8 @@ class SysConfig:
 
         # Parameter space for Omega^2
         _Omega2_space_dim = 3
+
+    assert pod_tol_sweep == sorted(pod_tol_sweep, reverse=True), "pod_tol_sweep must be in descending order"
 
     # Generate random parameter space for Omega^2 in range (0, 10]
     num_freqs = nosc // 3 - 2
@@ -247,6 +259,49 @@ class SysConfig:
     else:
         Omega2_space = Omega2_space_test = _Omega2_space
 
+def make_lattice_initial_conditions(nosc):
+    """
+    Construct initial state for double-helix spring lattice satisfying
+    inter-helix distance constraints and momentum orthogonality.
+    """
+    _i = np.arange(nosc // 3 // 2)
+    _radius = 0.5
+    _pitch = 0.5 * nosc / 18  # Scale pitch with number of particles
+    _t = _i * 2 * np.pi / (nosc // 3)
+    _phase = np.pi
+
+    positions_1 = np.stack((
+        _radius * np.cos(_t),
+        _radius * np.sin(_t),
+        _pitch * _t / (2 * np.pi)
+    ), axis=1)
+
+    positions_2 = np.stack((
+        _radius * np.cos(_t + _phase),
+        _radius * np.sin(_t + _phase),
+        _pitch * _t / (2 * np.pi)
+    ), axis=1)
+
+    # Combine the two helices, interleaving their positions
+    positions = np.zeros((nosc // 3, 3))
+    positions[::2] = positions_1
+    positions[1::2] = positions_2
+
+    # Assert that the corresponding coordinates of positions_1 and positions_2 are distant 1 apart
+    distances = np.linalg.norm(positions[::2] - positions[1::2], axis=1)
+    assert np.allclose(distances, 1), "The corresponding coordinates of positions_1 and positions_2 are not distant 1 apart."
+
+    positions = positions.flatten().reshape(-1, 1)
+
+    momenta = np.zeros((nosc // 3, 3))
+    momenta[::2] = rng.uniform(-0.001, 0.001, momenta[::2].shape)
+    momenta[1::2] = momenta[::2]
+    assert np.allclose(momenta[1::2], momenta[::2]), 'position and momenta are not orthogonal'
+    momenta = momenta.flatten().reshape(-1, 1)
+
+    return r_[positions, momenta].flatten()
+
+
 # @load_symbolic_expressions # Moved decorator to concrete subclasses or base if needed
 class MechSystem(SysConfig):
     """
@@ -260,113 +315,169 @@ class MechSystem(SysConfig):
 
     @staticmethod
     def compute_J(d):
-        return r_[c_[zeros((d, d)), eye(d)], c_[-eye(d), zeros((d, d))]]
+        return r_[c_[zeros((d, d)), eye(d)], 
+                    c_[-eye(d), zeros((d, d))]]
 
-    _i = np.arange(SysConfig.nosc//3//2)
-    _radius = 0.5
-    _pitch = 0.5 * SysConfig.nosc/18  # Scale pitch with number of particles
-    _t = _i * 2 * np.pi / (SysConfig.nosc//3)
-    _phase = np.pi
+    y_init = make_lattice_initial_conditions(SysConfig.nosc)
 
-    positions_1 = np.stack((
-        _radius * np.cos(_t),
-        _radius * np.sin(_t),
-        _pitch * _t / (2*np.pi)
-    ), axis=1)
-
-    positions_2 = np.stack((
-        _radius * np.cos(_t + _phase),
-        _radius * np.sin(_t + _phase),
-        _pitch * _t / (2*np.pi)
-    ), axis=1)
-
-    # Combine the two helices, interleaving their positions
-    positions = np.zeros((SysConfig.nosc//3, 3))
-    positions[::2] = positions_1
-    positions[1::2] = positions_2
-
-    # Assert that the corresponding coordinates of positions_1 and positions_2 are distant 1 apart
-    distances = np.linalg.norm(positions[::2] - positions[1::2], axis=1)
-    assert np.allclose(distances, 1), "The corresponding coordinates of positions_1 and positions_2 are not distant 1 apart."
-
-    positions = positions.flatten().reshape(-1, 1)
-
-    momenta = np.zeros((SysConfig.nosc//3, 3))
-    momenta[::2] = rng.uniform(-0.001, 0.001, momenta[::2].shape)
-    momenta[1::2] = momenta[::2]
-    assert np.allclose(momenta[1::2], momenta[::2]), 'position and momenta are not orthogonal'
-    momenta = momenta.flatten().reshape(-1, 1)
-
-    y_init = r_[positions, momenta].flatten()
-
-    drag = lambda self, y: 0 #beta/2 * r_[x, u]
-    drag_z = lambda self, y: 0 #beta/2 * eye(2*x.shape[0])
-
-    non_quad = None
-
-    "y_init alias"
-    @property
-    def u_init(self):
-        return self.y_init
-
-    @u_init.setter
-    def u_init(self, value):
-        self.y_init = value
-
-    def ham_lambda(self, y, beta=0):
+    def ham(self, y, beta=0):
         return self.ham_(y, self.Omega2, beta)
 
-    def ham_z_lambda(self, y, beta=0):
-        return self.ham_z_(y, self.Omega2, beta)
-
-    def ham_zz_lambda(self, y, beta=0):
-        return self.ham_zz_(y, self.Omega2, beta)
-
-    def lag_dg_lambda(self, y):
-        return self.lag_dg_(*y, self.Omega2)
-
-    def lag_dg_z_lambda(self, y):
-        return self.lag_dg_z_(*y, self.Omega2)
-
-    def g__lambda(self, y):
+    def g_vec(self, y):
         return self.g_(y)
 
-    def g_prime__lambda(self, y):
+    def g_prime(self, y):
         return self.g_prime_(y)
 
-    def g_prime_x_lambda_y__(self, y, lag_mult):
-        """Compute g_prime_x_lambda_y for full order system"""
-        # Compute g_prime_x_lambda_y using the full order system
-        return self.g_prime_x_lambda_y_(y, lag_mult)
+    # ── Projection operator property aliases (canonical <-> legacy) ──
+    @property
+    def deim_field(self):
+        return self.__dict__.get('deim_field', self.__dict__.get('RBxUx_inv_PxU', None))
 
-    def ham_z_reduced(self, y, beta=0):
-        return self.RB.T @ self.ham_z_(y @ self.RB.T, self.Omega2, beta)
+    @deim_field.setter
+    def deim_field(self, val):
+        self.__dict__['deim_field'] = val
+        self.__dict__['RBxUx_inv_PxU'] = val
 
-    def ham_zz_reduced(self, y, beta=0):
-        # print(f'Computing ham_zz inside ham_zz_reduced')
-        return self.RB.T @ self.ham_zz_(y @ self.RB.T, self.Omega2, beta) @ self.RB
+    @property
+    def RBxUx_inv_PxU(self):
+        return self.__dict__.get('deim_field', self.__dict__.get('RBxUx_inv_PxU', None))
 
-    def lag_dg_reduced(self, y):
-        return self.RB.T @ self.lag_dg_(*(y @ self.RB.T), self.Omega2)
+    @RBxUx_inv_PxU.setter
+    def RBxUx_inv_PxU(self, val):
+        self.__dict__['deim_field'] = val
+        self.__dict__['RBxUx_inv_PxU'] = val
 
-    def lag_dg_z_reduced(self, y):
-        # print(f'Computing lag_dg_z inside lag_dg_z_reduced')
-        return self.RB.T @ self.lag_dg_z_(*(y @ self.RB.T), self.Omega2) @ self.RB
+    @property
+    def mdeim_Hessian(self):
+        return self.__dict__.get('mdeim_Hessian', self.__dict__.get('IP_Ux_inv_PxU', None))
 
-    def g_reduced(self, y):
-        return self.g_(y @ self.RB.T)
+    @mdeim_Hessian.setter
+    def mdeim_Hessian(self, val):
+        self.__dict__['mdeim_Hessian'] = val
+        self.__dict__['IP_Ux_inv_PxU'] = val
 
-    def g_prime_reduced(self, y):
-        return self.g_prime_(y @ self.RB.T) @ self.RB
+    @property
+    def IP_Ux_inv_PxU(self):
+        return self.__dict__.get('mdeim_Hessian', self.__dict__.get('IP_Ux_inv_PxU', None))
 
-    def g_prime_x_lambda_y_reduced(self, y, lag_mult):
-        """Compute g_prime_x_lambda_y for reduced order system"""
-        # Compute g_prime_x_lambda_y using the reduced order system
-        return self.RB.T @ self.g_prime_x_lambda_y_(y @ self.RB.T, lag_mult) @ self.RB
+    @IP_Ux_inv_PxU.setter
+    def IP_Ux_inv_PxU(self, val):
+        self.__dict__['mdeim_Hessian'] = val
+        self.__dict__['IP_Ux_inv_PxU'] = val
+
+    @property
+    def mdeim_g_prime(self):
+        return self.__dict__.get('mdeim_g_prime', self.__dict__.get('_IP_Ux_inv_PxU', None))
+
+    @mdeim_g_prime.setter
+    def mdeim_g_prime(self, val):
+        self.__dict__['mdeim_g_prime'] = val
+        self.__dict__['_IP_Ux_inv_PxU'] = val
+
+    @property
+    def _IP_Ux_inv_PxU(self):
+        return self.__dict__.get('mdeim_g_prime', self.__dict__.get('_IP_Ux_inv_PxU', None))
+
+    @_IP_Ux_inv_PxU.setter
+    def _IP_Ux_inv_PxU(self, val):
+        self.__dict__['mdeim_g_prime'] = val
+        self.__dict__['_IP_Ux_inv_PxU'] = val
+
+    @property
+    def mdeim_g_var(self):
+        return self.__dict__.get('mdeim_g_var', self.__dict__.get('IP_g_prime_x_lambda_y', None))
+
+    @mdeim_g_var.setter
+    def mdeim_g_var(self, val):
+        self.__dict__['mdeim_g_var'] = val
+        self.__dict__['IP_g_prime_x_lambda_y'] = val
+
+    @property
+    def IP_g_prime_x_lambda_y(self):
+        return self.__dict__.get('mdeim_g_var', self.__dict__.get('IP_g_prime_x_lambda_y', None))
+
+    @IP_g_prime_x_lambda_y.setter
+    def IP_g_prime_x_lambda_y(self, val):
+        self.__dict__['mdeim_g_var'] = val
+        self.__dict__['IP_g_prime_x_lambda_y'] = val
+
+    # Window lists
+    @property
+    def deim_field_windows(self):
+        return self.__dict__.get('deim_field_windows', self.__dict__.get('RBxUx_inv_PxU_windows', None))
+
+    @deim_field_windows.setter
+    def deim_field_windows(self, val):
+        self.__dict__['deim_field_windows'] = val
+        self.__dict__['RBxUx_inv_PxU_windows'] = val
+
+    @property
+    def RBxUx_inv_PxU_windows(self):
+        return self.__dict__.get('deim_field_windows', self.__dict__.get('RBxUx_inv_PxU_windows', None))
+
+    @RBxUx_inv_PxU_windows.setter
+    def RBxUx_inv_PxU_windows(self, val):
+        self.__dict__['deim_field_windows'] = val
+        self.__dict__['RBxUx_inv_PxU_windows'] = val
+
+    @property
+    def mdeim_Hessian_windows(self):
+        return self.__dict__.get('mdeim_Hessian_windows', self.__dict__.get('IP_Ux_inv_PxU_windows', None))
+
+    @mdeim_Hessian_windows.setter
+    def mdeim_Hessian_windows(self, val):
+        self.__dict__['mdeim_Hessian_windows'] = val
+        self.__dict__['IP_Ux_inv_PxU_windows'] = val
+
+    @property
+    def IP_Ux_inv_PxU_windows(self):
+        return self.__dict__.get('mdeim_Hessian_windows', self.__dict__.get('IP_Ux_inv_PxU_windows', None))
+
+    @IP_Ux_inv_PxU_windows.setter
+    def IP_Ux_inv_PxU_windows(self, val):
+        self.__dict__['mdeim_Hessian_windows'] = val
+        self.__dict__['IP_Ux_inv_PxU_windows'] = val
+
+    @property
+    def mdeim_g_prime_windows(self):
+        return self.__dict__.get('mdeim_g_prime_windows', self.__dict__.get('_IP_Ux_inv_PxU_windows', None))
+
+    @mdeim_g_prime_windows.setter
+    def mdeim_g_prime_windows(self, val):
+        self.__dict__['mdeim_g_prime_windows'] = val
+        self.__dict__['_IP_Ux_inv_PxU_windows'] = val
+
+    @property
+    def _IP_Ux_inv_PxU_windows(self):
+        return self.__dict__.get('mdeim_g_prime_windows', self.__dict__.get('_IP_Ux_inv_PxU_windows', None))
+
+    @_IP_Ux_inv_PxU_windows.setter
+    def _IP_Ux_inv_PxU_windows(self, val):
+        self.__dict__['mdeim_g_prime_windows'] = val
+        self.__dict__['_IP_Ux_inv_PxU_windows'] = val
+
+    @property
+    def mdeim_g_var_windows(self):
+        return self.__dict__.get('mdeim_g_var_windows', self.__dict__.get('IP_g_prime_x_lambda_y_windows', None))
+
+    @mdeim_g_var_windows.setter
+    def mdeim_g_var_windows(self, val):
+        self.__dict__['mdeim_g_var_windows'] = val
+        self.__dict__['IP_g_prime_x_lambda_y_windows'] = val
+
+    @property
+    def IP_g_prime_x_lambda_y_windows(self):
+        return self.__dict__.get('mdeim_g_var_windows', self.__dict__.get('IP_g_prime_x_lambda_y_windows', None))
+
+    @IP_g_prime_x_lambda_y_windows.setter
+    def IP_g_prime_x_lambda_y_windows(self, val):
+        self.__dict__['mdeim_g_var_windows'] = val
+        self.__dict__['IP_g_prime_x_lambda_y_windows'] = val
 
     def _apply_sparsification(self):
         """Redefines constraint methods to ensure the system is underconstrained."""
-        sample_g = self.g__(self.y_init)
+        sample_g = self.g_vec(self.y_init)
         m_h = sample_g.size // 2
         print(f"m_h = {m_h}, nosc_r = {self.nosc_r}")
         
@@ -376,11 +487,11 @@ class MechSystem(SysConfig):
             print(f"Sparsifying constraints: {2*m_h} -> {2*m_target} ({(1 - m_target/m_h):.1%} reduction) to satisfy LBB.")
             full_idx = np.concatenate([idx_h, idx_h + m_h])
             
-            _orig_g = self.g__
-            self.g__ = lambda y: _orig_g(y)[full_idx]
+            _orig_g = self.g_vec
+            self.g_vec = lambda y: _orig_g(y)[full_idx]
             
-            _orig_gp = self.g_prime__
-            self.g_prime__ = lambda y: _orig_gp(y)[full_idx, :]
+            _orig_gp = self.g_prime
+            self.g_prime = lambda y: _orig_gp(y)[full_idx, :]
             
             if hasattr(self, 'g_prime_x_lambda_y'):
                 _orig_gpxy = self.g_prime_x_lambda_y
@@ -389,59 +500,21 @@ class MechSystem(SysConfig):
                     inflated[full_idx] = lm
                     return _orig_gpxy(y, inflated)
                 self.g_prime_x_lambda_y = wrapped_gpxy
-            
-    def ham_z_hyperreduced(self, y, beta=0):
-        return self.RBxUx_inv_PxU @ self.ham_z_deim(y @ self.RB.T, self.Omega2, beta)
 
-    def ham_zz_hyperreduced(self, y, beta=0):
-        return self.RBxUx_inv_PxU @ self.ham_zz_deim(y @ self.RB.T, self.Omega2, beta) @ self.RB
+    def __init__(self, kwds=None, **kwargs):        
+        if kwds is None:
+            kwds = {}
+        if kwargs:
+            kwds = {**kwds, **kwargs}
 
-    def ham_zz_mdeim_hyperreduced(self, y, beta=0):
-        return self.RB.T @ np.reshape(
-            self.IP_Ux_inv_PxU @ self.ham_zz_mdeim(y @ self.RB.T, self.Omega2, beta),
-            (2*self.nosc, 2*self.nosc)
-        ) @ self.RB
-
-    def lag_dg_hyperreduced(self, y):
-        return self.RBxUx_inv_PxU @ self.lag_dg_deim(*(y @ self.RB.T), self.Omega2)
-
-    def lag_dg_z_hyperreduced(self, y):
-        return self.RBxUx_inv_PxU @ self.lag_dg_z_deim(*(y @ self.RB.T), self.Omega2) @ self.RB
-
-    def lag_dg_z_mdeim_hyperreduced(self, y):
-        return self.RB.T @ np.reshape(
-            self.IP_Ux_inv_PxU @ self.lag_dg_z_mdeim(*(y @ self.RB.T), self.Omega2),
-            (2*self.nosc, 2*self.nosc)
-        ) @ self.RB
-
-    def g_hyperreduced(self, y):
-        return (self._Ux_inv_PxU @ self.g_deim(y @ self.RB.T))
-
-    def g_prime_hyperreduced(self, y):
-        return np.reshape(
-            self._IP_Ux_inv_PxU @ self.g_prime_mdeim(y @ self.RB.T),
-            self.g_prime_shape
-        ) @ self.RB
-
-    def g_prime_x_lambda_y_hyperreduced(self, y, lag_mult):
-        """Compute g_prime_x_lambda_y for hyperreduced system"""
-        return (
-            self.RB.T
-            @ np.reshape(
-                self.IP_g_prime_x_lambda_y
-                @ self.g_prime_x_lambda_y_mdeim(y @ self.RB.T, lag_mult),
-                self.g_prime_x_lambda_y_shape,
-            )
-            @ self.RB
-        )
-
-    def __init__(self, kwds):        
         if 'pool' in kwds:
             self.__dict__.update(kwds['pool'])
         if 'nosc' in kwds:
             self.nosc = kwds['nosc']
+        for k, v in kwds.items():
+            if k not in ('pool',):
+                setattr(self, k, v)
 
-        self.ham = self.ham_lambda
         self.beta = (max(1e-2, 0 * rng.random() / 10)) * 0 # Damping coefficient, obsolete
         self.time_lapsed = []
 
@@ -454,91 +527,202 @@ class MechSystem(SysConfig):
         if hasattr(self, 'RB'):
             self.y_init = self.RB.T @ self.y_init
 
+
 @load_symbolic_expressions
 class HamiltonianMechSystem(MechSystem):
     """System with Hamiltonian structure."""
-    def __init__(self, kwds):
-        super().__init__(kwds)
-        # Map lambda methods to standard names
-        self.ham_z = self.ham_z_lambda
-        self.ham_zz = self.ham_zz_lambda
-        self.g__ = self.g__lambda
-        self.g_prime__ = self.g_prime__lambda
+
+    def ham_z(self, y, beta=0):
+        return self.ham_z_(y, self.Omega2, beta)
+
+    def ham_zz(self, y, beta=0):
+        return self.ham_zz_(y, self.Omega2, beta)
+
+    def __init__(self, kwds=None, **kwargs):
+        super().__init__(kwds, **kwargs)
+
 
 @load_symbolic_expressions
 class LagrangianMechSystem(MechSystem):
     """System with Lagrangian structure."""
-    def __init__(self, kwds):
-        super().__init__(kwds)
-        # Map lambda methods to standard names
-        self.lag_dg = self.lag_dg_lambda
-        self.lag_dg_z = self.lag_dg_z_lambda
-        self.g__ = self.g__lambda
-        self.g_prime__ = self.g_prime__lambda
-        self.g_prime_x_lambda_y = self.g_prime_x_lambda_y__
+
+    def lag_dg(self, y):
+        return self.lag_dg_(*y, self.Omega2)
+
+    def lag_dg_z(self, y):
+        return self.lag_dg_z_(*y, self.Omega2)
+
+    def g_prime_x_lambda_y(self, y, lag_mult):
+        """Compute g_prime_x_lambda_y for full order system"""
+        return self.g_prime_x_lambda_y_(y, lag_mult)
+
+    def __init__(self, kwds=None, **kwargs):
+        super().__init__(kwds, **kwargs)
+
 
 class ReducedHamiltonianMechSystem(HamiltonianMechSystem):
     """Reduced order Hamiltonian system."""
-    def __init__(self, kwds):
+
+    def ham_z(self, y, beta=0):
+        return self.RB.T @ self.ham_z_(y @ self.RB.T, self.Omega2, beta)
+
+    def ham_zz(self, y, beta=0):
+        return self.RB.T @ self.ham_zz_(y @ self.RB.T, self.Omega2, beta) @ self.RB
+
+    def g_vec(self, y):
+        return self.g_(y @ self.RB.T)
+
+    def g_prime(self, y):
+        return self.g_prime_(y @ self.RB.T) @ self.RB
+
+    def __init__(self, kwds=None, **kwargs):
         # Load solver specific data
-        if 'solver_data' in kwds and self.__class__.__name__ in kwds['solver_data']:
-            for k, v in kwds['solver_data'][self.__class__.__name__].items():
-                setattr(self, k, v)
-        super().__init__(kwds)
+        if kwds and 'solver_data' in kwds:
+            for cls in self.__class__.mro():
+                if cls.__name__ in kwds['solver_data']:
+                    for k, v in kwds['solver_data'][cls.__name__].items():
+                        setattr(self, k, v)
+                    break
+        super().__init__(kwds, **kwargs)
         self.tol = self.tol_reduced
-        
-        # Override with reduced methods
-        self.ham_z = self.ham_z_reduced
-        self.ham_zz = self.ham_zz_reduced
-        self.g__ = self.g_reduced
-        self.g_prime__ = self.g_prime_reduced
-        # self._apply_sparsification()
+
 
 class ReducedLagrangianMechSystem(LagrangianMechSystem):
     """Reduced order Lagrangian system."""
-    def __init__(self, kwds):
+
+    def lag_dg(self, y):
+        return self.RB.T @ self.lag_dg_(*(y @ self.RB.T), self.Omega2)
+
+    def lag_dg_z(self, y):
+        return self.RB.T @ self.lag_dg_z_(*(y @ self.RB.T), self.Omega2) @ self.RB
+
+    def g_vec(self, y):
+        return self.g_(y @ self.RB.T)
+
+    def g_prime(self, y):
+        return self.g_prime_(y @ self.RB.T) @ self.RB
+
+    def g_prime_x_lambda_y(self, y, lag_mult):
+        """Compute g_prime_x_lambda_y for reduced order system"""
+        return self.RB.T @ self.g_prime_x_lambda_y_(y @ self.RB.T, lag_mult) @ self.RB
+
+    def __init__(self, kwds=None, **kwargs):
         # Load solver specific data
-        if 'solver_data' in kwds and self.__class__.__name__ in kwds['solver_data']:
-            for k, v in kwds['solver_data'][self.__class__.__name__].items():
-                setattr(self, k, v)
-        super().__init__(kwds)
+        if kwds and 'solver_data' in kwds:
+            for cls in self.__class__.mro():
+                if cls.__name__ in kwds['solver_data']:
+                    for k, v in kwds['solver_data'][cls.__name__].items():
+                        setattr(self, k, v)
+                    break
+        super().__init__(kwds, **kwargs)
         self.tol = self.tol_reduced
-        
-        # Override with reduced methods
-        self.lag_dg = self.lag_dg_reduced
-        self.lag_dg_z = self.lag_dg_z_reduced
-        self.g__ = self.g_reduced
-        self.g_prime__ = self.g_prime_reduced
-        self.g_prime_x_lambda_y = self.g_prime_x_lambda_y_reduced
-        # self._apply_sparsification()
+
 
 class HyperReducedHamiltonianMechSystem(ReducedHamiltonianMechSystem):
     """Hyper-reduced Hamiltonian system."""
-    def __init__(self, kwds):
-        super().__init__(kwds)
-        
-        self.ham_z = self.ham_z_hyperreduced
-        self.ham_zz = self.ham_zz_hyperreduced
-        
+
+    def ham_z(self, y, beta=0):
+        return self.deim_field @ self.ham_z_deim(y @ self.RB.T, self.Omega2, beta)
+
+    def ham_zz(self, y, beta=0):
         if self.hyperreducer == 'MDEIM':
-            self.ham_zz = self.ham_zz_mdeim_hyperreduced
-            
-        if self.constraints_reduce:
-            self.g_prime__ = self.g_prime_hyperreduced
-            # self._apply_sparsification()
+            return self.RB.T @ np.reshape(
+                self.mdeim_Hessian @ self.ham_zz_mdeim(y @ self.RB.T, self.Omega2, beta),
+                (2*self.nosc, 2*self.nosc)
+            ) @ self.RB
+        return self.deim_field @ self.ham_zz_deim(y @ self.RB.T, self.Omega2, beta) @ self.RB
+
+    def g_vec(self, y):
+        return super().g_vec(y)
+
+    def g_prime(self, y):
+        if self.constraints_reduce and hasattr(self, 'mdeim_g_prime') and hasattr(self, 'g_prime_mdeim'):
+            shape = getattr(self, 'g_prime_shape', None)
+            if shape is not None:
+                return np.reshape(
+                    self.mdeim_g_prime @ self.g_prime_mdeim(y @ self.RB.T),
+                    shape
+                ) @ self.RB
+        return super().g_prime(y)
+
+    def __init__(self, kwds=None, **kwargs):
+        super().__init__(kwds, **kwargs)
+
 
 class HyperReducedLagrangianMechSystem(ReducedLagrangianMechSystem):
     """Hyper-reduced Lagrangian system."""
-    def __init__(self, kwds):
-        super().__init__(kwds)
-        
-        self.lag_dg = self.lag_dg_hyperreduced
-        self.lag_dg_z = self.lag_dg_z_hyperreduced
-        
+
+    def lag_dg(self, y):
+        return self.deim_field @ self.lag_dg_deim(*(y @ self.RB.T), self.Omega2)
+
+    def lag_dg_z(self, y):
         if self.hyperreducer == 'MDEIM':
-            self.lag_dg_z = self.lag_dg_z_mdeim_hyperreduced
-            
-        if self.constraints_reduce:
-            self.g_prime_x_lambda_y = self.g_prime_x_lambda_y_hyperreduced
-            self.g_prime__ = self.g_prime_hyperreduced
-            # self._apply_sparsification()
+            return self.RB.T @ np.reshape(
+                self.mdeim_Hessian @ self.lag_dg_z_mdeim(*(y @ self.RB.T), self.Omega2),
+                (2*self.nosc, 2*self.nosc)
+            ) @ self.RB
+        return self.deim_field @ self.lag_dg_z_deim(*(y @ self.RB.T), self.Omega2) @ self.RB
+
+    def g_vec(self, y):
+        return super().g_vec(y)
+
+    def g_prime(self, y):
+        if self.constraints_reduce and hasattr(self, 'mdeim_g_prime') and hasattr(self, 'g_prime_mdeim'):
+            shape = getattr(self, 'g_prime_shape', None)
+            if shape is not None:
+                return np.reshape(
+                    self.mdeim_g_prime @ self.g_prime_mdeim(y @ self.RB.T),
+                    shape
+                ) @ self.RB
+        return super().g_prime(y)
+
+    def g_prime_x_lambda_y(self, y, lag_mult):
+        """Compute g_prime_x_lambda_y for hyperreduced system"""
+        if self.constraints_reduce and hasattr(self, 'mdeim_g_var') and hasattr(self, 'g_prime_x_lambda_y_mdeim'):
+            shape = getattr(self, 'g_prime_x_lambda_y_shape', None)
+            if shape is not None:
+                return (
+                    self.RB.T
+                    @ np.reshape(
+                        self.mdeim_g_var
+                        @ self.g_prime_x_lambda_y_mdeim(y @ self.RB.T, lag_mult),
+                        shape,
+                    )
+                    @ self.RB
+                )
+        return super().g_prime_x_lambda_y(y, lag_mult)
+
+    def __init__(self, kwds=None, **kwargs):
+        super().__init__(kwds, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatibility aliases on MechSystem for unpickling legacy checkpoints
+# ---------------------------------------------------------------------------
+MechSystem.ham_lambda = MechSystem.ham
+MechSystem.ham_z_lambda = HamiltonianMechSystem.ham_z
+MechSystem.ham_zz_lambda = HamiltonianMechSystem.ham_zz
+MechSystem.lag_dg_lambda = LagrangianMechSystem.lag_dg
+MechSystem.lag_dg_z_lambda = LagrangianMechSystem.lag_dg_z
+MechSystem.g_prime_x_lambda_y__ = LagrangianMechSystem.g_prime_x_lambda_y
+MechSystem.ham_z_reduced = ReducedHamiltonianMechSystem.ham_z
+MechSystem.ham_zz_reduced = ReducedHamiltonianMechSystem.ham_zz
+MechSystem.g_reduced = ReducedHamiltonianMechSystem.g_vec
+MechSystem.g_prime_reduced = ReducedHamiltonianMechSystem.g_prime
+MechSystem.lag_dg_reduced = ReducedLagrangianMechSystem.lag_dg
+MechSystem.lag_dg_z_reduced = ReducedLagrangianMechSystem.lag_dg_z
+MechSystem.g_prime_x_lambda_y_reduced = ReducedLagrangianMechSystem.g_prime_x_lambda_y
+MechSystem.ham_z_hyperreduced = HyperReducedHamiltonianMechSystem.ham_z
+MechSystem.ham_zz_hyperreduced = HyperReducedHamiltonianMechSystem.ham_zz
+MechSystem.ham_zz_mdeim_hyperreduced = HyperReducedHamiltonianMechSystem.ham_zz
+MechSystem.lag_dg_hyperreduced = HyperReducedLagrangianMechSystem.lag_dg
+MechSystem.lag_dg_z_hyperreduced = HyperReducedLagrangianMechSystem.lag_dg_z
+MechSystem.lag_dg_z_mdeim_hyperreduced = HyperReducedLagrangianMechSystem.lag_dg_z
+MechSystem.g_hyperreduced = HyperReducedHamiltonianMechSystem.g_vec
+MechSystem.g_prime_hyperreduced = HyperReducedHamiltonianMechSystem.g_prime
+MechSystem.g_prime_x_lambda_y_hyperreduced = HyperReducedLagrangianMechSystem.g_prime_x_lambda_y
+MechSystem.g__lambda = lambda self, y: self.g_(y)
+MechSystem.g_prime__lambda = lambda self, y: self.g_prime_(y)
+MechSystem.g__ = MechSystem.g_vec
+MechSystem.g_prime__ = MechSystem.g_prime
+

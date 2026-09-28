@@ -239,8 +239,8 @@ class HamiltonianElasticaReducer(HamiltonianReducer, HamiltonianElasticaMechSyst
     pass
 
 
-def plot_elastica_beam(solvers_f, solvers_r=None, solvers_dr=None, data_folder=None,
-                       filename="elastica_beam_3d.pdf", solver_idx=0):
+def plot_elastica_beam(solvers_f, solvers_r=None, solvers_hr=None, data_folder=None,
+                       filename="elastica_beam_3d.pdf", solver_idx=0, **kwargs):
     """
     Dedicated visualization for the Discrete Euler Elastica / Flexible Beam.
 
@@ -248,12 +248,15 @@ def plot_elastica_beam(solvers_f, solvers_r=None, solvers_dr=None, data_folder=N
       1. High-resolution publication PDF figure:
          - Panel (a): 3D perspective of dynamic beam centerline deformation over time
          - Panel (b): 2D elevation profiles z(x) across time snapshots
-         - Panel (c): Tip vertical deflection history z_tip(t) comparing FOM, ROM, and HRM
+         - Panel (c): Tip vertical deflection history z_tip(t) comparing FOM, ROM, and HROM
       2. Interactive 3D HTML visualization via Plotly (elastica_beam_3d.html)
     """
     import matplotlib.pyplot as plt
     import matplotlib.cm as mcm
     import matplotlib.colors as mcolors
+
+    if solvers_hr is None:
+        solvers_hr = kwargs.get('solvers_dr', None)
 
     if data_folder is None:
         data_folder = ElasticaMechSystem.data_folder
@@ -265,14 +268,14 @@ def plot_elastica_beam(solvers_f, solvers_r=None, solvers_dr=None, data_folder=N
         return
 
     sr = solvers_r[solver_idx] if solvers_r and len(solvers_r) > solver_idx else None
-    sdr = solvers_dr[solver_idx] if solvers_dr and len(solvers_dr) > solver_idx else None
+    shr = solvers_hr[solver_idx] if solvers_hr and len(solvers_hr) > solver_idx else None
 
     t_points = sf.t_points
     nosc = sf.nosc
     n_nodes = nosc // 3
     coords_f = sf.y[:, :nosc].reshape(-1, n_nodes, 3)
     coords_r = sr.y[:, :nosc].reshape(-1, n_nodes, 3) if sr is not None and getattr(sr, 'y', None) is not None else None
-    coords_dr = sdr.y[:, :nosc].reshape(-1, n_nodes, 3) if sdr is not None and getattr(sdr, 'y', None) is not None else None
+    coords_hr = shr.y[:, :nosc].reshape(-1, n_nodes, 3) if shr is not None and getattr(shr, 'y', None) is not None else None
 
     n_steps = coords_f.shape[0]
 
@@ -308,9 +311,9 @@ def plot_elastica_beam(solvers_f, solvers_r=None, solvers_dr=None, data_folder=N
     if coords_r is not None:
         ax1.plot(coords_r[-1, :, 0], coords_r[-1, :, 1], coords_r[-1, :, 2],
                  color='forestgreen', lw=2.2, ls='--', label='ROM ($t=T$)')
-    if coords_dr is not None:
-        ax1.plot(coords_dr[-1, :, 0], coords_dr[-1, :, 1], coords_dr[-1, :, 2],
-                 color='crimson', lw=2.2, ls=':', label='HRM ($t=T$)')
+    if coords_hr is not None:
+        ax1.plot(coords_hr[-1, :, 0], coords_hr[-1, :, 1], coords_hr[-1, :, 2],
+                 color='crimson', lw=2.2, ls=':', label='HROM ($t=T$)')
 
     ax1.set_xlabel('X (axial, m)', labelpad=8)
     ax1.set_ylabel('Y (lateral, m)', labelpad=8)
@@ -333,8 +336,8 @@ def plot_elastica_beam(solvers_f, solvers_r=None, solvers_dr=None, data_folder=N
         col = colors_snaps[idx_color % len(colors_snaps)]
         ax2.plot(coords_f[s_idx, :, 0], coords_f[s_idx, :, 2],
                  color=col, lw=2.0, label=f't = {t_val:.2f}s')
-        if coords_dr is not None:
-            ax2.plot(coords_dr[s_idx, :, 0], coords_dr[s_idx, :, 2],
+        if coords_hr is not None:
+            ax2.plot(coords_hr[s_idx, :, 0], coords_hr[s_idx, :, 2],
                      color=col, lw=1.5, ls='--')
 
     ax2.plot([0], [0], 'k^', markersize=10, label='Pinned base')
@@ -352,9 +355,9 @@ def plot_elastica_beam(solvers_f, solvers_r=None, solvers_dr=None, data_folder=N
     if coords_r is not None:
         z_tip_r = coords_r[:, -1, 2]
         ax3.plot(t_points, z_tip_r, color='forestgreen', lw=1.8, ls='--', label='ROM')
-    if coords_dr is not None:
-        z_tip_dr = coords_dr[:, -1, 2]
-        ax3.plot(t_points, z_tip_dr, color='crimson', lw=1.8, ls=':', label='HRM')
+    if coords_hr is not None:
+        z_tip_hr = coords_hr[:, -1, 2]
+        ax3.plot(t_points, z_tip_hr, color='crimson', lw=1.8, ls=':', label='HROM')
 
     ax3.set_xlabel('Time $t$ (s)', fontsize=11)
     ax3.set_ylabel('Tip vertical displacement $z_{\\mathrm{tip}}$ (m)', fontsize=11)
@@ -362,9 +365,9 @@ def plot_elastica_beam(solvers_f, solvers_r=None, solvers_dr=None, data_folder=N
     ax3.grid(True, linestyle='--', alpha=0.5)
     ax3.legend(loc='lower left', fontsize=9)
 
-    if coords_dr is not None:
-        err_tip_hrm = np.amax(np.abs(z_tip_f - coords_dr[:, -1, 2]))
-        ax3.text(0.95, 0.95, f'Max HRM Tip Error:\n{err_tip_hrm:.2e} m',
+    if coords_hr is not None:
+        err_tip_hrom = np.amax(np.abs(z_tip_f - coords_hr[:, -1, 2]))
+        ax3.text(0.95, 0.95, f'Max HROM Tip Error:\n{err_tip_hrom:.2e} m',
                  transform=ax3.transAxes, verticalalignment='top', horizontalalignment='right',
                  bbox=dict(boxstyle='round,pad=0.4', facecolor='white', alpha=0.8, edgecolor='gray'),
                  fontsize=8)
@@ -400,12 +403,12 @@ def plot_elastica_beam(solvers_f, solvers_r=None, solvers_dr=None, data_folder=N
             marker=dict(size=4, color='#3b528b'),
             name='Beam Centerline (FOM)'
         ))
-        if coords_dr is not None:
+        if coords_hr is not None:
             fig_ply.add_trace(go.Scatter3d(
-                x=coords_dr[0, :, 0], y=coords_dr[0, :, 1], z=coords_dr[0, :, 2],
+                x=coords_hr[0, :, 0], y=coords_hr[0, :, 1], z=coords_hr[0, :, 2],
                 mode='lines+markers', line=dict(color='#e7298a', width=4, dash='dot'),
                 marker=dict(size=3, color='#e7298a'),
-                name='Beam Centerline (HRM)'
+                name='Beam Centerline (HROM)'
             ))
 
         # Add time snapshot frames
@@ -426,9 +429,9 @@ def plot_elastica_beam(solvers_f, solvers_r=None, solvers_dr=None, data_folder=N
                     marker=dict(size=4, color='#3b528b')
                 ),
             ]
-            if coords_dr is not None:
+            if coords_hr is not None:
                 data_frame.append(go.Scatter3d(
-                    x=coords_dr[k, :, 0], y=coords_dr[k, :, 1], z=coords_dr[k, :, 2],
+                    x=coords_hr[k, :, 0], y=coords_hr[k, :, 1], z=coords_hr[k, :, 2],
                     mode='lines+markers', line=dict(color='#e7298a', width=4, dash='dot'),
                     marker=dict(size=3, color='#e7298a')
                 ))

@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 from System import (MechSystem, HamiltonianMechSystem, LagrangianMechSystem,
                    ReducedHamiltonianMechSystem, ReducedLagrangianMechSystem, HyperReducedHamiltonianMechSystem, HyperReducedLagrangianMechSystem,
                    fast_dump, fast_load, check_checkpoint_exists)
+from Reduction import Basis, IdentityBasis, SymplecticBasis, TravelingBasis, DEIMProjector, as_basis
 from ODESolver import (ConformalStormerVerlet, ConformalImplicitMidpoint, 
                       DiscreteGradient)
 from ReduceMechSystem import ReduceMechSystem, HamiltonianReducer, DiscreteGradientReducer
@@ -90,9 +91,26 @@ class ReducedSolverMixin:
     """Mixin providing polymorphic hooks for reduced-order and hyper-reduced solvers."""
     model_tier = 'rom'
 
+    @property
+    def basis(self):
+        b = getattr(self, '_basis', None)
+        if b is not None:
+            return b
+        rb = getattr(self, 'RB', None)
+        if rb is not None:
+            self._basis = Basis(rb)
+            return self._basis
+        return IdentityBasis(2 * getattr(self, 'nosc', 0))
+
+    @basis.setter
+    def basis(self, value):
+        self._basis = as_basis(value, default_dim=2 * getattr(self, 'nosc', 0))
+        if hasattr(self._basis, 'V'):
+            self.RB = self._basis.V
+
     def to_full_state(self, y):
-        """Reconstruct full-order state from reduced coordinates: y_full = y @ RB^T."""
-        return y @ self.RB.T
+        """Reconstruct full-order state from reduced coordinates: y_full = basis.reconstruct(y)."""
+        return self.basis.reconstruct(y)
 
     def init_trajectory_arrays(self):
         """Allocate state and Lagrange multiplier arrays for reduced models."""
@@ -120,7 +138,7 @@ class ReducedSolverMixin:
         if not getattr(self, '_traveling', False):
             self.y_red = self.y.copy()
         else:
-            self.y_red = self.y_full @ self.RB_windows[0] if hasattr(self, 'RB_windows') and self.RB_windows else None
+            self.y_red = self.basis.reduce(self.y_full) if hasattr(self, 'basis') else (self.y_full @ self.RB_windows[0] if hasattr(self, 'RB_windows') and self.RB_windows else None)
         self.y = self.y_full.copy()
         del self.y_full
         gc.collect()
@@ -138,9 +156,26 @@ class BaseSolverMixin:
     matches_solver_family = staticmethod(_matches_solver_family)
     model_tier = 'fom'
 
+    @property
+    def basis(self):
+        b = getattr(self, '_basis', None)
+        if b is not None:
+            return b
+        rb = getattr(self, 'RB', None)
+        if rb is not None:
+            self._basis = Basis(rb)
+            return self._basis
+        return IdentityBasis(2 * getattr(self, 'nosc', 0))
+
+    @basis.setter
+    def basis(self, value):
+        self._basis = as_basis(value, default_dim=2 * getattr(self, 'nosc', 0))
+        if hasattr(self._basis, 'V'):
+            self.RB = self._basis.V
+
     def to_full_state(self, y):
         """Reconstruct full-order state from coordinates. FOM identity mapping."""
-        return y
+        return self.basis.reconstruct(y)
 
     def init_trajectory_arrays(self):
         """Allocate state and Lagrange multiplier arrays for FOM."""
@@ -191,10 +226,6 @@ class BaseSolverMixin:
 
         y_full_ = self.to_full_state(y_)
         return y_, y_full_, Lambda
-
-    # Backward compatibility aliases
-    solve_step = step
-    solve_for_w = step
 
     @timing
     def solve_trajectory(self):
@@ -249,69 +280,60 @@ class BaseSolverMixin:
                     return min(int(k / _window_size), _n_windows - 1)
 
             # Helper: set the per-window hyper-reduction operators on self so that
-            # the methods in MechSystem (ham_z_hyperreduced, etc.) pick them up.
+            # the methods in HyperReducedMechSystem (ham_z, etc.) pick them up.
             def _activate_window(w, k=0):
                 self.RB = self.RB_windows[w]
                 self.nosc_r = self.nosc_r_windows[w]
+                self._basis = Basis(self.RB)
 
-                if hasattr(self, 'deim_field_windows') and self.deim_field_windows:
-                    rbu = self.deim_field_windows[w]
-                    if rbu is not None:
-                        self.deim_field = rbu
+                val = getattr(self, 'deim_field_windows', None)
+                if isinstance(val, (list, tuple)) and len(val) > w and val[w] is not None:
+                    self.deim_field = val[w]
 
-                if hasattr(self, 'mdeim_Hessian_windows') and self.mdeim_Hessian_windows:
-                    ipu = self.mdeim_Hessian_windows[w]
-                    if ipu is not None:
-                        self.mdeim_Hessian = ipu
+                val = getattr(self, 'mdeim_Hessian_windows', None)
+                if isinstance(val, (list, tuple)) and len(val) > w and val[w] is not None:
+                    self.mdeim_Hessian = val[w]
 
                 # Hamiltonian DEIM/MDEIM functions
-                if hasattr(self, 'ham_z_deim_windows') and self.ham_z_deim_windows:
-                    fn = self.ham_z_deim_windows[w]
-                    if fn is not None:
-                        self.ham_z_deim = fn
-                        self.__class__.ham_z_deim = staticmethod(fn)
+                val = getattr(self, 'ham_z_deim_windows', None)
+                if isinstance(val, (list, tuple)) and len(val) > w and val[w] is not None:
+                    self.ham_z_deim = val[w]
+                    self.__class__.ham_z_deim = staticmethod(val[w])
 
-                if hasattr(self, 'ham_zz_mdeim_windows') and self.ham_zz_mdeim_windows:
-                    fn = self.ham_zz_mdeim_windows[w]
-                    if fn is not None:
-                        self.ham_zz_mdeim = fn
-                        self.__class__.ham_zz_mdeim = staticmethod(fn)
+                val = getattr(self, 'ham_zz_mdeim_windows', None)
+                if isinstance(val, (list, tuple)) and len(val) > w and val[w] is not None:
+                    self.ham_zz_mdeim = val[w]
+                    self.__class__.ham_zz_mdeim = staticmethod(val[w])
 
                 # Lagrangian DEIM/MDEIM functions
-                if hasattr(self, 'lag_dg_deim_windows') and self.lag_dg_deim_windows:
-                    fn = self.lag_dg_deim_windows[w]
-                    if fn is not None:
-                        self.lag_dg_deim = fn
-                        self.__class__.lag_dg_deim = staticmethod(fn)
+                val = getattr(self, 'lag_dg_deim_windows', None)
+                if isinstance(val, (list, tuple)) and len(val) > w and val[w] is not None:
+                    self.lag_dg_deim = val[w]
+                    self.__class__.lag_dg_deim = staticmethod(val[w])
 
-                if hasattr(self, 'lag_dg_z_mdeim_windows') and self.lag_dg_z_mdeim_windows:
-                    fn = self.lag_dg_z_mdeim_windows[w]
-                    if fn is not None:
-                        self.lag_dg_z_mdeim = fn
-                        self.__class__.lag_dg_z_mdeim = staticmethod(fn)
+                val = getattr(self, 'lag_dg_z_mdeim_windows', None)
+                if isinstance(val, (list, tuple)) and len(val) > w and val[w] is not None:
+                    self.lag_dg_z_mdeim = val[w]
+                    self.__class__.lag_dg_z_mdeim = staticmethod(val[w])
 
                 # ── Constraint MDEIM operators ─────────────────────────────────────
-                if hasattr(self, 'mdeim_g_prime_windows') and self.mdeim_g_prime_windows:
-                    ip = self.mdeim_g_prime_windows[w]
-                    if ip is not None:
-                        self.mdeim_g_prime = ip
+                val = getattr(self, 'mdeim_g_prime_windows', None)
+                if isinstance(val, (list, tuple)) and len(val) > w and val[w] is not None:
+                    self.mdeim_g_prime = val[w]
 
-                if hasattr(self, 'g_prime_mdeim_windows') and self.g_prime_mdeim_windows:
-                    fn = self.g_prime_mdeim_windows[w]
-                    if fn is not None:
-                        self.g_prime_mdeim = fn
-                        self.__class__.g_prime_mdeim = staticmethod(fn)
+                val = getattr(self, 'g_prime_mdeim_windows', None)
+                if isinstance(val, (list, tuple)) and len(val) > w and val[w] is not None:
+                    self.g_prime_mdeim = val[w]
+                    self.__class__.g_prime_mdeim = staticmethod(val[w])
 
-                if hasattr(self, 'mdeim_g_var_windows') and self.mdeim_g_var_windows:
-                    ip = self.mdeim_g_var_windows[w]
-                    if ip is not None:
-                        self.mdeim_g_var = ip
+                val = getattr(self, 'mdeim_g_var_windows', None)
+                if isinstance(val, (list, tuple)) and len(val) > w and val[w] is not None:
+                    self.mdeim_g_var = val[w]
 
-                if hasattr(self, 'g_prime_x_lambda_y_mdeim_windows') and self.g_prime_x_lambda_y_mdeim_windows:
-                    fn = self.g_prime_x_lambda_y_mdeim_windows[w]
-                    if fn is not None:
-                        self.g_prime_x_lambda_y_mdeim = fn
-                        self.__class__.g_prime_x_lambda_y_mdeim = staticmethod(fn)
+                val = getattr(self, 'g_prime_x_lambda_y_mdeim_windows', None)
+                if isinstance(val, (list, tuple)) and len(val) > w and val[w] is not None:
+                    self.g_prime_x_lambda_y_mdeim = val[w]
+                    self.__class__.g_prime_x_lambda_y_mdeim = staticmethod(val[w])
 
                 # Re-initialise JJ to match the potentially new nosc_r
                 from System import MechSystem as _MS
@@ -329,6 +351,13 @@ class BaseSolverMixin:
         # Calculate update frequency (10% of iterations)
         update_freq = max(1, self.n // 10)  
 
+        # Initialize initial state representation for step 0
+        if _traveling:
+            y_k = self.basis.reduce(self.y_full[0])
+            y_ = np.array([y_k, y_k])
+        else:
+            y_ = np.array([self.y[0], self.y[0]])
+
         # Create progress bar that updates less frequently
         with tqdm(total=self.n, desc='Solving trajectory', 
                 miniters=update_freq,  # Minimum iterations between updates
@@ -338,15 +367,17 @@ class BaseSolverMixin:
 
             for k in range(self.n):
 
-                # ── Traveling-basis: swap at window boundary ─────────────────────
+                # ── Traveling-basis: swap only when crossing a window boundary ───
                 if _traveling:
                     new_window = _window_for_step(k)
                     if new_window != _current_window:
                         _current_window = new_window
                         _activate_window(_current_window, k=k)
-                    y_k = self.RB.T @ self.y_full[k]
-                    y_ = np.array([y_k, y_k])
-                else:
+                        y_k = self.basis.reduce(self.y_full[k])
+                        y_ = np.array([y_k, y_k])
+                    elif k > 0:
+                        y_ = np.array([y_[1], y_[1]])
+                elif k > 0:
                     y_ = np.array([self.y[k], self.y[k]])
                 # ── End swap ─────────────────────────────────────────────────────
 
@@ -387,18 +418,31 @@ class BaseSolverMixin:
                     elif self.RB is not None:
                         y = self.y @ self.RB
                         self.y_red = y
-                if hasattr(self, 'RB_windows') and self.RB_windows:
-                    self.RB = self.RB_windows[0]
-                    self.nosc_r = self.nosc_r_windows[0]
-                    if hasattr(self, 'ham_z_deim_windows') and self.ham_z_deim_windows and self.ham_z_deim_windows[0] is not None:
-                        self.ham_z_deim = self.ham_z_deim_windows[0]
-                    if hasattr(self, 'ham_zz_mdeim_windows') and self.ham_zz_mdeim_windows and self.ham_zz_mdeim_windows[0] is not None:
-                        self.ham_zz_mdeim = self.ham_zz_mdeim_windows[0]
-                    if hasattr(self, 'deim_field_windows') and self.deim_field_windows and self.deim_field_windows[0] is not None:
-                        self.deim_field = self.deim_field_windows[0]
-                    if hasattr(self, 'mdeim_Hessian_windows') and self.mdeim_Hessian_windows and self.mdeim_Hessian_windows[0] is not None:
-                        self.mdeim_Hessian = self.mdeim_Hessian_windows[0]
-                    from System import MechSystem as _MS
+                val_rb = getattr(self, 'RB_windows', None)
+                if isinstance(val_rb, (list, tuple)) and len(val_rb) > 0 and val_rb[0] is not None:
+                    self.RB = val_rb[0]
+                    val_nr = getattr(self, 'nosc_r_windows', None)
+                    if isinstance(val_nr, (list, tuple)) and len(val_nr) > 0 and val_nr[0] is not None:
+                        self.nosc_r = val_nr[0]
+                    val = getattr(self, 'ham_z_deim_windows', None)
+                    if isinstance(val, (list, tuple)) and len(val) > 0 and val[0] is not None:
+                        self.ham_z_deim = val[0]
+                    val = getattr(self, 'ham_zz_mdeim_windows', None)
+                    if isinstance(val, (list, tuple)) and len(val) > 0 and val[0] is not None:
+                        self.ham_zz_mdeim = val[0]
+                    val = getattr(self, 'deim_field_windows', None)
+                    if isinstance(val, (list, tuple)) and len(val) > 0 and val[0] is not None:
+                        self.deim_field = val[0]
+                    val = getattr(self, 'mdeim_Hessian_windows', None)
+                    if isinstance(val, (list, tuple)) and len(val) > 0 and val[0] is not None:
+                        self.mdeim_Hessian = val[0]
+                    val = getattr(self, 'lag_dg_deim_windows', None)
+                    if isinstance(val, (list, tuple)) and len(val) > 0 and val[0] is not None:
+                        self.lag_dg_deim = val[0]
+                from System import MechSystem as _MS
+                if getattr(self, 'nosc_r', None) is None and getattr(self, 'RB', None) is not None:
+                    self.nosc_r = self.RB.shape[1] // 2
+                if getattr(self, 'nosc_r', None) is not None:
                     self.JJ = _MS.compute_J(self.nosc_r)
                     self.JJ_r = self.JJ
             else:
@@ -416,8 +460,8 @@ class BaseSolverMixin:
 
     def compute_constraint_error(self):
         """Compute time-series constraint norm (g_norm) and max constraint error (phase_error)."""
-        g_fn = getattr(self, 'g_', None) or getattr(self, 'g__', None)
-        if g_fn is not None:
+        g_fn = getattr(self, 'g_full', None) or getattr(self, 'g_', None) or getattr(self, 'g_vec', None)
+        if g_fn is not None and hasattr(self, 'y') and self.y is not None:
             self.g_norm = [LA.norm(g_fn(y)) for y in self.y]
             self.phase_error = np.amax(self.g_norm)
         else:
@@ -577,7 +621,9 @@ class BaseSolverMixin:
             data = {}
             for attr in ReduceMechSystem._REDUCTION_ATTRS:
                 if hasattr(cls, attr):
-                    data[attr] = getattr(cls, attr)
+                    val = getattr(cls, attr)
+                    if not isinstance(val, property):
+                        data[attr] = val
             kwds['solver_data'][cls.__name__] = data
 
         return kwds
@@ -593,31 +639,35 @@ class BaseSolverMixin:
         if not solver_data:
             return
 
-        # Find the RB and nosc_r from the saved data. It should be consistent
+        # Find the RB, nosc_r, and V_state from the saved data. It should be consistent
         # across all solvers of a given type (Hamiltonian/DG).
-        rb_ham, nosc_r_ham = None, None
-        rb_dg, nosc_r_dg = None, None
+        rb_ham, nosc_r_ham, v_state_ham = None, None, None
+        rb_dg, nosc_r_dg, v_state_dg = None, None, None
 
-        # The registered_solver_classes in the loaded kwds are the reduced ones.
-        for cls in kwds.get('registered_solver_classes', []):
-            cls_name = cls.__name__
-            if cls_name in solver_data:
-                data = solver_data[cls_name]
-                if 'RB' in data and 'nosc_r' in data:
-                    if issubclass(cls, ReducedHamiltonianMechSystem):
-                        if rb_ham is None: # Store first one found
-                            rb_ham, nosc_r_ham = data['RB'], data['nosc_r']
-                    elif issubclass(cls, ReducedLagrangianMechSystem):
-                        if rb_dg is None: # Store first one found
-                            rb_dg, nosc_r_dg = data['RB'], data['nosc_r']
+        for cls_name, data in solver_data.items():
+            if not isinstance(data, dict):
+                continue
+            if 'RB' in data and 'nosc_r' in data:
+                if any(tag in cls_name for tag in ('StormerVerlet', 'ImplicitMidpoint', 'Hamiltonian')):
+                    if rb_ham is None:
+                        rb_ham, nosc_r_ham = data['RB'], data['nosc_r']
+                        v_state_ham = data.get('V_state', None)
+                elif any(tag in cls_name for tag in ('DiscreteGradient', 'Lagrangian')):
+                    if rb_dg is None:
+                        rb_dg, nosc_r_dg = data['RB'], data['nosc_r']
+                        v_state_dg = data.get('V_state', None)
 
         # Now set the attributes on the Reducer classes
         if rb_ham is not None:
             setattr(HamiltonianReducer, 'RB', rb_ham)
             setattr(HamiltonianReducer, 'nosc_r', nosc_r_ham)
+        if v_state_ham is not None:
+            setattr(HamiltonianReducer, 'V_state', v_state_ham)
         if rb_dg is not None:
             setattr(DiscreteGradientReducer, 'RB', rb_dg)
             setattr(DiscreteGradientReducer, 'nosc_r', nosc_r_dg)
+        if v_state_dg is not None:
+            setattr(DiscreteGradientReducer, 'V_state', v_state_dg)
 
     @staticmethod
     def setup_and_solve_reduced_system(kwds, solvers, client=None):
@@ -687,23 +737,32 @@ class BaseSolverMixin:
         pod_tol = kwds.get('pod_tol', MechSystem.pod_tol_sweep[-1])
 
         # Solve hyper-reduced system
-        solvers_dr = []
+        solvers_hr = []
 
         # Try to load from checkpoint
         checkpoint_path = MechSystem.data_folder
         tol_suffix = f"tol_{pod_tol:.1e}"
-        kwds_file = os.path.join(checkpoint_path, f'kwds_dr_{tol_suffix}.joblib')
-        solvers_file = os.path.join(checkpoint_path, f'solvers_dr_{tol_suffix}.joblib')
+        kwds_file = os.path.join(checkpoint_path, f'kwds_hr_{tol_suffix}.joblib')
+        solvers_file = os.path.join(checkpoint_path, f'solvers_hr_{tol_suffix}.joblib')
+        if not os.path.exists(kwds_file):
+            legacy_kwds = os.path.join(checkpoint_path, f'kwds_dr_{tol_suffix}.joblib')
+            legacy_solvers = os.path.join(checkpoint_path, f'solvers_dr_{tol_suffix}.joblib')
+            if os.path.exists(legacy_kwds) and os.path.exists(legacy_solvers):
+                kwds_file = legacy_kwds
+                solvers_file = legacy_solvers
 
         if check_checkpoint_exists(checkpoint_path, kwds_file, solvers_file):
             try:
                 print("Loading from checkpoint...")
                 kwds = fast_load(kwds_file)
-                solvers_dr = fast_load(solvers_file)
+                solvers_hr = fast_load(solvers_file)
                 print("Checkpoint loaded successfully")
             except Exception as e:
                 raise Exception(f"Error loading checkpoint: {str(e)}")
         else:
+            # Ensure reduction attributes (RB, nosc_r, V_state) are restored on Reducer classes
+            BaseSolverMixin._restore_reduction_attrs(kwds)
+
             # Setup hyperreduction using classmethod
             ham_solvers = [s for s in solvers if not isinstance(s, DiscreteGradient)]
             dg_solvers = [s for s in solvers if isinstance(s, DiscreteGradient)]
@@ -716,7 +775,7 @@ class BaseSolverMixin:
             if dg_classes:
                 DiscreteGradientReducer.setup_hyperreduction(dg_solvers, dg_classes, tol=pod_tol)
 
-            if ReduceMechSystem.hyperreducer == 'MDEIM':
+            if ReduceMechSystem.hyperreducer == 'MDEIM' and getattr(ReduceMechSystem, 'use_mdeim_hessian', False):
                 if ham_solvers:
                     HamiltonianReducer.update_mdeim_hyperreduction(ham_solvers, ham_classes, tol=pod_tol)
                 if dg_solvers:
@@ -729,14 +788,14 @@ class BaseSolverMixin:
                 if dg_solvers:
                     DiscreteGradientReducer.hyperreduce_constraints(dg_solvers, dg_classes, tol=pod_tol)
 
-            # ── Traveling / Adaptive Reduced Basis ───────────────────────────────
-            # When N_WINDOWS > 1, build per-window local bases and hyper-reduction
+            # When N_WINDOWS is None or > 1, build per-window local bases and hyper-reduction
             # operators.  These are appended to the class/target attributes as lists
             # and serialised to workers via _transfer_reduction_attrs, enabling the
             # online solver to swap bases at each window boundary.
-            if ReduceMechSystem.N_WINDOWS > 1:
+            if ReduceMechSystem.N_WINDOWS is None or ReduceMechSystem.N_WINDOWS > 1:
+                n_win_str = f"{ReduceMechSystem.N_WINDOWS}-window" if ReduceMechSystem.N_WINDOWS is not None else "adaptive (unbounded)"
                 print(f'\n[setup_and_solve_hyperreduced_system] '
-                      f'Building {ReduceMechSystem.N_WINDOWS}-window traveling bases...')
+                      f'Building {n_win_str} traveling bases...')
                 if ham_solvers and ham_classes:
                     HamiltonianReducer.setup_traveling_basis(ham_solvers, ham_classes, tol=pod_tol)
                     HamiltonianReducer.setup_traveling_hyperreduction(ham_solvers, ham_classes, tol=pod_tol)
@@ -759,19 +818,21 @@ class BaseSolverMixin:
             kwds = BaseSolverMixin._transfer_reduction_attrs(kwds)
 
             # Execute parallel solve
-            BaseSolverMixin.parallel_solve_mech_system(kwds, solvers_dr, client=client)
+            BaseSolverMixin.parallel_solve_mech_system(kwds, solvers_hr, client=client)
 
             # Create checkpoint directory and save initial state
             os.makedirs(checkpoint_path, exist_ok=True)
             print("Creating new checkpoint...")
+            kwds_file = os.path.join(checkpoint_path, f'kwds_hr_{tol_suffix}.joblib')
+            solvers_file = os.path.join(checkpoint_path, f'solvers_hr_{tol_suffix}.joblib')
             fast_dump(kwds, kwds_file)
-            fast_dump(solvers_dr, solvers_file)
+            fast_dump(solvers_hr, solvers_file)
 
 
-        BaseSolverMixin.compute_convergence_rates(kwds, solvers_dr)
-        BaseSolverMixin.plot_solvers(kwds, solvers_dr)
+        BaseSolverMixin.compute_convergence_rates(kwds, solvers_hr)
+        BaseSolverMixin.plot_solvers(kwds, solvers_hr)
 
-        return solvers_dr
+        return solvers_hr
 
     @staticmethod
     def compute_convergence_rates(kwds, solvers):
@@ -1013,10 +1074,6 @@ class DiscreteGradientFixedPointMixin:
 
         raise RuntimeError("Nonlinear solver did not converge")
 
-    def _g_prime_with_JJ(self, y):
-        """Backward compatibility stub for unpickling legacy checkpoints."""
-        return self.g_prime(y) @ self.JJ.T
-
 class ConformalStormerVerletFixedPointMixin:
     def __init__(self, kwds):
         super().__init__(kwds)
@@ -1052,8 +1109,8 @@ class ConformalStormerVerletFixedPointMixin:
             # p_{n+1/2}
             p_half1 = p_half_unconstrained - 0.5 * dt * G_q0.T @ Lambda_1 # Lambda_1 is 1D
             
-            # q_{n+1}
-            q_next = q0 + dt * f(np.concatenate([q0, p_half1]), None)[:neq]
+            # q_{n+1}: Exact kinetic relation dq/dt = p for Hamiltonian systems
+            q_next = q0 + dt * p_half1
             x[1, :neq] = q_next
             
             # Check position constraints
@@ -1081,12 +1138,15 @@ class ConformalStormerVerletFixedPointMixin:
                  raise RuntimeError(f"Nonlinear solver (position) did not converge. m: {m} -- Error: {LA.norm(g_pos)}")
 
         # 2. Velocity Constraints Loop (Solve for Lambda_2)
+        # q_{n+1} and p_half1 are fixed, so G(q_{n+1}) and force_next are constant wrt Lambda_2
+        G_qnext = self.g_prime_diag(x[1])[:i0, :i1]
+        force_next = f(np.concatenate([x[1, :neq], p_half1]), None)[neq:]
+        p_base = p_half1 + 0.5 * dt * force_next
+
         m = 0
         while m < self.M:
             # p_{n+1}
-            G_qnext = self.g_prime_diag(x[1])[:i0, :i1]
-            force_next = f(np.concatenate([x[1, :neq], p_half1]), None)[neq:]
-            p_next = p_half1 + 0.5 * dt * force_next - 0.5 * dt * G_qnext.T @ Lambda_2
+            p_next = p_base - 0.5 * dt * G_qnext.T @ Lambda_2
             x[1, neq:] = p_next
             
             # Check velocity constraints

@@ -91,14 +91,14 @@ flowchart TD
 
 The codebase uses canonical, domain-specific names for all interpolation and projection operators:
 
-| Canonical Name | Legacy Alias | Description |
-|---|---|---|
-| `deim_field` | `RBxUx_inv_PxU` | DEIM projection-interpolation matrix for the vector field: $V_r^T U_f (P^T U_f)^{-1}$ |
-| `mdeim_Hessian` | `IP_Ux_inv_PxU` | Sparse MDEIM projection matrix for system Hessians: $U_j (P_j^T U_j)^{-1}$ |
-| `mdeim_g_prime` | `_IP_Ux_inv_PxU` | Sparse MDEIM projection matrix for the constraint Jacobian $\nabla g$ |
-| `mdeim_g_var` | `IP_g_prime_x_lambda_y` | Sparse MDEIM projection for constraint variation $g' \cdot \lambda \cdot y$ (DG) |
+| Operator Name | Description |
+|---|---|
+| `deim_field` | DEIM projection-interpolation matrix for the vector field: $V_r^T U_f (P^T U_f)^{-1}$ |
+| `mdeim_Hessian` | Sparse MDEIM projection matrix for system Hessians: $U_j (P_j^T U_j)^{-1}$ |
+| `mdeim_g_prime` | Sparse MDEIM projection matrix for the constraint Jacobian $\nabla g$ |
+| `mdeim_g_var` | Sparse MDEIM projection for constraint variation $g' \cdot \lambda \cdot y$ (DG) |
 
-All operators support windowed variants (`*_windows`) for traveling basis simulations, and bidirectional properties ensure full backward compatibility with legacy checkpoints.
+All operators support windowed variants (`*_windows`) for adaptive traveling basis simulations.
 
 ## Installation
 

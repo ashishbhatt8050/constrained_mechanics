@@ -234,9 +234,247 @@ def plot_omega_distribution(train_set, test_set, filename=None):
         all_omega = np.concatenate([all_omega, test_set.flatten()])
     adjust_axis_limits(ax, all_omega, axis='x', is_log_scale=False)
 
+def plot_structured_rb_components(components_dict, filename=None, title=None):
+    """
+    Approach 1: Plot multi-block singular values and principal spectra of the structured RB assembly:
+    [v0, V_dyn, V_nablaH, V_enrich(G)].
+
+    Parameters
+    ----------
+    components_dict : dict
+        Dictionary containing:
+        - 'sv_dyn': 1D array of kinematic POD singular values
+        - 'sv_hamz': 1D array of force residual POD singular values (optional)
+        - 'sv_enrich': 1D array of constraint normal principal sines sin(theta_k) = sigma_k(R_G)
+        - 'sv_Gr': 1D array of singular values of reduced constraint Jacobian G_0 V
+        - 'tol_dyn': float, tolerance used for kinematic truncation (optional)
+        - 'tol_hamz': float, tolerance used for force truncation (optional)
+        - 'tau_tol': float, rank-filtering cutoff for enrichment (default: 1e-8)
+        - 'cond_Gr': float, condition number of G_0 V (optional)
+    filename : str, optional
+        File path to save the figure.
+    title : str, optional
+        Overall figure title.
+
+    Returns
+    -------
+    fig, axes : tuple
+        Matplotlib Figure and array of Axes.
+    """
+    sv_dyn = components_dict.get('sv_dyn', None)
+    sv_hamz = components_dict.get('sv_hamz', None)
+    sv_enrich = components_dict.get('sv_enrich', None)
+    sv_Gr = components_dict.get('sv_Gr', None)
+    tau_tol = components_dict.get('tau_tol', 1e-8)
+    cond_Gr = components_dict.get('cond_Gr', None)
+
+    has_hamz = sv_hamz is not None and len(sv_hamz) > 0
+
+    if has_hamz:
+        fig, axes_grid = plt.subplots(2, 2, figsize=(15, 11))
+        axes = axes_grid.flatten()
+    else:
+        fig, axes = plt.subplots(1, 3, figsize=(20, 5.5))
+        axes = np.array(axes).flatten()
+    
+    panel_idx = 0
+
+    # Panel 1: Kinematic POD Spectrum
+    if sv_dyn is not None and len(sv_dyn) > 0:
+        ax = axes[panel_idx]
+        configure_axis(ax)
+        idx_dyn = np.arange(1, len(sv_dyn) + 1)
+        ax.semilogy(idx_dyn, sv_dyn, 'o-', color=OKABE_ITO_PALETTE[4], linewidth=2, markersize=5,
+                    label=r'$\sigma_i(S_{\mathrm{kin}})$')
+        ax.set_xlabel('Kinematic Mode Index $i$')
+        ax.set_ylabel('Singular Value Magnitude')
+        ax.set_title(r'(a) Kinematic POD Modes ($V_{\mathrm{dyn}}$)')
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.grid(True, linestyle=':', alpha=0.6)
+        adjust_axis_limits(ax, idx_dyn, axis='x', is_log_scale=False, max_steps=1)
+        adjust_axis_limits(ax, sv_dyn[sv_dyn > 0], axis='y', is_log_scale=True, max_steps=1)
+        panel_idx += 1
+
+    # Panel 2 (if present): Hamiltonian Force Residual POD
+    if has_hamz:
+        ax = axes[panel_idx]
+        configure_axis(ax)
+        idx_hamz = np.arange(1, len(sv_hamz) + 1)
+        ax.semilogy(idx_hamz, sv_hamz, 'd-', color=OKABE_ITO_PALETTE[2], linewidth=2, markersize=5,
+                    label=r'$\sigma_i(R_{\nabla H})$')
+        ax.set_xlabel('Force Mode Index $i$')
+        ax.set_ylabel('Residual Singular Value')
+        ax.set_title(r'(b) Force Residual ($V_{\nabla H}$)')
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.grid(True, linestyle=':', alpha=0.6)
+        adjust_axis_limits(ax, idx_hamz, axis='x', is_log_scale=False, max_steps=1)
+        adjust_axis_limits(ax, sv_hamz[sv_hamz > 0], axis='y', is_log_scale=True, max_steps=1)
+        panel_idx += 1
+
+    # Panel 3: Constraint Normal Principal Sines
+    if sv_enrich is not None and len(sv_enrich) > 0:
+        ax = axes[panel_idx]
+        configure_axis(ax)
+        idx_enrich = np.arange(1, len(sv_enrich) + 1)
+        panel_letter = chr(ord('a') + panel_idx)
+        ax.semilogy(idx_enrich, sv_enrich, 's-', color=OKABE_ITO_PALETTE[5], linewidth=2, markersize=5,
+                    label=r'$\sin\theta_k(R_G)$')
+        ax.set_xlabel('Constraint Normal Index $k$')
+        ax.set_ylabel(r'Principal Sine $\sigma_k(R_G) = \sin\theta_k$')
+        ax.set_title(f'({panel_letter}) Constraint Normals ($V_{{\\mathrm{{enrich}}}}$)')
+        min_enrich = np.min(sv_enrich[sv_enrich > 0])
+        if min_enrich < 1e-2:
+            y_pts_enrich = np.concatenate([sv_enrich[sv_enrich > 0], [tau_tol]])
+        else:
+            y_pts_enrich = sv_enrich[sv_enrich > 0]
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.grid(True, linestyle=':', alpha=0.6)
+        adjust_axis_limits(ax, idx_enrich, axis='x', is_log_scale=False, max_steps=1)
+        adjust_axis_limits(ax, y_pts_enrich, axis='y', is_log_scale=True, max_steps=1)
+        if tau_tol >= ax.get_ylim()[0]:
+            ax.axhline(tau_tol, color='dimgray', linestyle='--', linewidth=1.5,
+                       label=rf'Threshold $\tau = 10^{{{int(np.round(np.log10(tau_tol)))}}}$')
+        else:
+            ax.plot([], [], color='dimgray', linestyle='--', linewidth=1.5,
+                    label=rf'Threshold $\tau = 10^{{{int(np.round(np.log10(tau_tol)))}}}$ ($<{min_enrich:.2f}$)')
+        ax.legend(loc='lower left', framealpha=0.9, fontsize=13)
+        panel_idx += 1
+
+    # Panel 4: Reduced Constraint Jacobian Spectrum
+    if sv_Gr is not None and len(sv_Gr) > 0:
+        ax = axes[panel_idx]
+        configure_axis(ax)
+        idx_Gr = np.arange(1, len(sv_Gr) + 1)
+        panel_letter = chr(ord('a') + panel_idx)
+        ax.plot(idx_Gr, sv_Gr, '^-', color=OKABE_ITO_PALETTE[1], linewidth=2, markersize=5)
+        ax.set_xlabel('Constraint Index $k$')
+        ax.set_ylabel(r'Singular Value $\sigma_k(G_0 V)$')
+        if cond_Gr is None:
+            cond_Gr = sv_Gr.max() / max(1e-15, sv_Gr.min())
+        ax.set_title(f'({panel_letter}) Reduced Jacobian $G_0 V$ (cond={cond_Gr:.2f})')
+        min_g, max_g = sv_Gr.min(), sv_Gr.max()
+        if abs(max_g - min_g) < 1e-6:
+            ax.set_ylim([0.0, max_g * 1.5])
+        else:
+            ax.set_ylim([0.0, max_g * 1.2])
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.grid(True, linestyle=':', alpha=0.6)
+        adjust_axis_limits(ax, idx_Gr, axis='x', is_log_scale=False, max_steps=1)
+        y_pts_Gr = np.concatenate([[0.0], sv_Gr])
+        adjust_axis_limits(ax, y_pts_Gr, axis='y', is_log_scale=False, max_steps=1)
+
+    if title:
+        fig.suptitle(title, fontsize=18, y=1.02)
+
+    fig.tight_layout()
+    if has_hamz:
+        fig.subplots_adjust(wspace=0.38, hspace=0.38)
+    else:
+        fig.subplots_adjust(wspace=0.38)
+
     if filename:
-        save_figure(fig, filename)
-    return fig
+        save_figure(fig, filename, fig_data=components_dict)
+
+    return fig, axes
+
+
+def plot_structured_rb_modal_energy(modal_energies, block_slices, s_projected=None, filename=None, title=None):
+    """
+    Approach 2: Plot modal snapshot projection energy waterfall across structured blocks:
+    [v0, V_dyn, V_nablaH, V_enrich(G)], and subspace-restricted singular values.
+
+    Parameters
+    ----------
+    modal_energies : 1D array
+        Modal projection energy E_j = ||V_{:, j}^T S||_2 for each basis mode j.
+    block_slices : dict
+        Dict mapping block label to (start_idx, end_idx) 0-indexed half-open slice.
+        e.g., {'Anchor (v0)': (0, 1), 'Kinematics': (1, 23), ...}
+    s_projected : 1D array, optional
+        Singular values of the projected snapshot data sigma_k(V^T S).
+    filename : str, optional
+        File path to save the figure.
+    title : str, optional
+        Overall figure title.
+
+    Returns
+    -------
+    fig, axes : tuple
+        Matplotlib Figure and Axes.
+    """
+    has_proj = s_projected is not None and len(s_projected) > 0
+    if has_proj:
+        fig, (ax_l, ax_r) = plt.subplots(1, 2, figsize=(18, 5.5), gridspec_kw={'width_ratios': [1.8, 1.2]})
+        axes = [ax_l, ax_r]
+    else:
+        fig, ax_l = plt.subplots(1, 1, figsize=(12, 5.5))
+        axes = [ax_l]
+
+    configure_axis(ax_l)
+    r_total = len(modal_energies)
+    modes = np.arange(1, r_total + 1)
+    safe_energies = np.maximum(modal_energies, 1e-15)
+
+    # Semilogy plot of modal energies
+    ax_l.semilogy(modes, safe_energies, '.-', color='black', linewidth=1.2, markersize=5, zorder=4)
+
+    # Shaded colored background regions for each block
+    palette_colors = [OKABE_ITO_PALETTE[0], OKABE_ITO_PALETTE[4], OKABE_ITO_PALETTE[2], OKABE_ITO_PALETTE[5], OKABE_ITO_PALETTE[6]]
+    legend_elements = []
+
+    for idx, (label, (start, end)) in enumerate(block_slices.items()):
+        color = palette_colors[idx % len(palette_colors)]
+        x_start = start + 0.5
+        x_end = end + 0.5
+        ax_l.axvspan(x_start, x_end, color=color, alpha=0.3, zorder=1)
+        if end < r_total:
+            ax_l.axvline(x_end, color='gray', linestyle=':', linewidth=1.2, zorder=2)
+        n_modes = end - start
+        legend_elements.append(Patch(facecolor=color, edgecolor='none', alpha=0.5, label=f'{label} ({n_modes})'))
+
+    ax_l.set_xlabel('Reduced Basis Mode Index $j$')
+    ax_l.set_ylabel(r'Modal Projection Energy $\|V_{:, j}^T S\|_2$')
+    ax_l.set_title(r'(a) Snapshot Energy Across Structured Basis Blocks')
+    ax_l.legend(handles=legend_elements, loc='upper right', framealpha=0.95, fontsize=13)
+    ax_l.grid(True, linestyle=':', alpha=0.6)
+    adjust_axis_limits(ax_l, modes, axis='x', is_log_scale=False, max_steps=1)
+    adjust_axis_limits(ax_l, safe_energies[safe_energies > 0], axis='y', is_log_scale=True, max_steps=1)
+
+    # Right panel: Subspace SVD
+    if has_proj:
+        configure_axis(ax_r)
+        safe_s_proj = np.maximum(s_projected, 1e-15)
+        idx_s = np.arange(1, len(safe_s_proj) + 1)
+        ax_r.semilogy(idx_s, safe_s_proj, 'o-', color=OKABE_ITO_PALETTE[1], linewidth=2, markersize=4)
+
+        # Highlight kinematic state rank if provided
+        for label, (start, end) in block_slices.items():
+            if 'Constraint' in label or 'enrich' in label:
+                ax_r.axvline(start, color=OKABE_ITO_PALETTE[5], linestyle='--', linewidth=1.5,
+                             label=f'Kinematic rank $r_{{\\mathrm{{state}}}}={start}$')
+                break
+
+        ax_r.set_xlabel('Projected Mode Index $k$')
+        ax_r.set_ylabel(r'Singular Value $\sigma_k(V^T S)$')
+        ax_r.set_title(r'(b) Subspace SVD $\sigma(V^T S)$')
+        ax_r.legend(loc='upper right', framealpha=0.95, fontsize=13)
+        ax_r.grid(True, linestyle=':', alpha=0.6)
+        adjust_axis_limits(ax_r, idx_s, axis='x', is_log_scale=False, max_steps=1)
+        adjust_axis_limits(ax_r, safe_s_proj[safe_s_proj > 0], axis='y', is_log_scale=True, max_steps=1)
+
+    if title:
+        fig.suptitle(title, fontsize=18, y=1.02)
+
+    fig.tight_layout()
+    if has_proj:
+        fig.subplots_adjust(wspace=0.28)
+
+    if filename:
+        fig_data = {'modal_energies': modal_energies, 'block_slices': block_slices, 's_projected': s_projected}
+        save_figure(fig, filename, fig_data=fig_data)
+
+    return fig, axes
+
 
 def save_figure(fig, filename, fig_data=None):
     """
@@ -677,19 +915,21 @@ def plot_3dsurface(fig, ax, xx, yy, zz):
     adjust_axis_limits(ax, yy.flatten(), axis='y', is_log_scale=False)
     adjust_axis_limits(ax, zz.flatten(), axis='z', is_log_scale=False, max_steps=2)
 
-def plot_pareto(time_lapsed, errors_r, errors_dr, solver_names, dt_space, data_folder):
+def plot_pareto(time_lapsed, errors_r, errors_hr, solver_names, dt_space, data_folder, **kwargs):
     """
     Generate Pareto plots (Error vs Time) for reduced and hyper-reduced models.
     
     Parameters:
     time_lapsed (list): List containing [full_time, reduced_percent, hyper_percent] arrays.
     errors_r (numpy array): Reduced model errors.
-    errors_dr (numpy array): Hyper-reduced model errors.
+    errors_hr (numpy array): Hyper-reduced model errors.
     solver_names (list): List of solver names.
     dt_space (numpy array): Array of time step sizes.
     data_folder (str): Path to save the plot.
     """
-    
+    if errors_hr is None:
+        errors_hr = kwargs.get('errors_dr', None)
+
     # Reconstruct raw times (seconds)
     # time_lapsed[0] is raw full time
     # time_lapsed[1] is reduced % of full
@@ -712,8 +952,8 @@ def plot_pareto(time_lapsed, errors_r, errors_dr, solver_names, dt_space, data_f
     mean_err_red = np.nanmean(errors_r, axis=2)
     std_err_red = np.nanstd(errors_r, axis=2)
     
-    mean_err_hyper = np.nanmean(errors_dr, axis=2)
-    std_err_hyper = np.nanstd(errors_dr, axis=2)
+    mean_err_hyper = np.nanmean(errors_hr, axis=2)
+    std_err_hyper = np.nanstd(errors_hr, axis=2)
     
     n_solvers = len(solver_names)
     fig, axes = plt.subplots(1, n_solvers, figsize=(6 * n_solvers, 6), constrained_layout=False)
@@ -805,7 +1045,7 @@ def plot_pareto(time_lapsed, errors_r, errors_dr, solver_names, dt_space, data_f
 def adjust_axis_limits(ax, data_points, axis='y', is_log_scale=False, max_steps=1):
     """
     Adjust axis limits based on data range and current tick intervals.
-    Extends limits by tick steps if data overflows.
+    Stops expanding ticks as soon as they span the entire data range.
     """
     if data_points is None:
         return
@@ -841,60 +1081,97 @@ def adjust_axis_limits(ax, data_points, axis='y', is_log_scale=False, max_steps=
         
         log_step = log_ticks[-1] - log_ticks[-2]
         if log_step <= 1e-12: return 
-        new_min, new_max = log_ticks[0], log_ticks[-1]
         
-        steps = 0
-        while new_max < np.log10(data_max) and steps < max_steps:
-            new_max += log_step
-            steps += 1
+        log_data_max = np.log10(data_max)
+        log_data_min = np.log10(data_min) if data_min > 0 else log_ticks[0]
         
-        if data_min > 0:
+        # Stop expanding ticks as soon as they span the data range
+        ticks_above = log_ticks[log_ticks >= log_data_max]
+        if len(ticks_above) > 0:
+            new_max = ticks_above[0]
+        else:
+            new_max = log_ticks[-1]
             steps = 0
-            while new_min > np.log10(data_min) and steps < max_steps:
+            while new_max < log_data_max and steps < max_steps:
+                new_max += log_step
+                steps += 1
+        
+        ticks_below = log_ticks[log_ticks <= log_data_min]
+        if len(ticks_below) > 0:
+            new_min = ticks_below[-1]
+        else:
+            new_min = log_ticks[0]
+            steps = 0
+            while new_min > log_data_min and steps < max_steps:
                 new_min -= log_step
                 steps += 1
         
+        if new_min >= new_max:
+            new_min -= log_step
+            new_max += log_step
+        
         set_lim([10**new_min, 10**new_max])
+        if axis == 'y':
+            ax.yaxis.set_major_locator(LogLocator(base=10.0, numticks=15))
+        elif axis == 'x':
+            ax.xaxis.set_major_locator(LogLocator(base=10.0, numticks=15))
     else:
         step = tick_values[1] - tick_values[0]
         if step <= 1e-12: return
-        new_min, new_max = tick_values[0], tick_values[-1]
         
-        steps = 0
-        while new_max < data_max and steps < max_steps:
-            new_max += step
-            steps += 1
+        # Stop expanding ticks as soon as they span the data range
+        ticks_above = tick_values[tick_values >= data_max]
+        if len(ticks_above) > 0:
+            new_max = ticks_above[0]
+        else:
+            new_max = tick_values[-1]
+            steps = 0
+            while new_max < data_max and steps < max_steps:
+                new_max += step
+                steps += 1
             
-        steps = 0
-        while new_min > data_min and steps < max_steps:
-            new_min -= step
-            steps += 1
+        ticks_below = tick_values[tick_values <= data_min]
+        if len(ticks_below) > 0:
+            new_min = ticks_below[-1]
+        else:
+            new_min = tick_values[0]
+            steps = 0
+            while new_min > data_min and steps < max_steps:
+                new_min -= step
+                steps += 1
         
-        if axis == 'x' and 'dimension' in ax.get_xlabel().lower():
+        if new_min >= new_max:
+            new_min = max(0, new_min - step)
+            new_max += step
+        
+        if axis == 'x' and any(keyword in ax.get_xlabel().lower() for keyword in ['dimension', 'index', 'mode', 'size']):
             new_min = max(0, new_min)
             
         set_lim([new_min, new_max])
 
 
-def plot_error_vs_basis_size(basis_sizes, hr_basis_sizes, errors_r, errors_dr, solver_names, pod_tols, data_folder, **kwargs):
+def plot_error_vs_basis_size(basis_sizes, hr_basis_sizes, errors_r, errors_hr, solver_names, pod_tols, data_folder, **kwargs):
     """
     Plot ROM and HROM errors as a function of the reduced basis size.
     Also plots speedup factors and convergence orders as box plots against dt.
     Markers correspond to pod_tol values.
     """
+    if errors_hr is None:
+        errors_hr = kwargs.get('errors_dr', None)
+
     # Extract study data from kwargs
     dt_space = kwargs.get('dt_space', [])
     full_times_raw = kwargs.get('full_times_raw', {})
     full_errs_raw = kwargs.get('full_errs_raw', {})    
     times_r_raw = kwargs.get('times_r_raw', [])
-    times_dr_raw = kwargs.get('times_dr_raw', [])
+    times_hr_raw = kwargs.get('times_hr_raw', kwargs.get('times_dr_raw', []))
 
     fig, axes_grid = plt.subplots(2, 2, figsize=(22, 18.6))
-    ax_err_r, ax_err_dr = axes_grid[0]
-    ax_speed_r, ax_speed_dr = axes_grid[1]
-    # ax_conv_r, ax_conv_dr = axes_grid[2]
+    ax_err_r, ax_err_hr = axes_grid[0]
+    ax_speed_r, ax_speed_hr = axes_grid[1]
+    # ax_conv_r, ax_conv_hr = axes_grid[2]
     
-    col_axes = [ax_err_r, ax_err_dr]
+    col_axes = [ax_err_r, ax_err_hr]
 
     # Define markers for pod_tols
     tol_markers = ['o', 's', '^', 'D', 'v', '<', '>', 'p', 'h', '*']
@@ -920,7 +1197,7 @@ def plot_error_vs_basis_size(basis_sizes, hr_basis_sizes, errors_r, errors_dr, s
         for i, name in enumerate(solver_names):
             color = solver_colors[i % len(solver_colors)]
             x_sizes_raw = basis_sizes[i] if ax_idx == 0 else hr_basis_sizes[i]
-            err_mats = errors_r[i] if ax_idx == 0 else errors_dr[i]
+            err_mats = errors_r[i] if ax_idx == 0 else errors_hr[i]
 
             for j, tol in enumerate(pod_tols):
                 e_data = err_mats[j]
@@ -953,7 +1230,7 @@ def plot_error_vs_basis_size(basis_sizes, hr_basis_sizes, errors_r, errors_dr, s
         adjust_axis_limits(ax, all_y_col, axis='y', is_log_scale=True, max_steps=5)
 
     # --- Row 2: Speedup Factor (Box plots vs dt) ---
-    for ax_idx, (ax, data_type) in enumerate(zip([ax_speed_r, ax_speed_dr], ['times_r_raw', 'times_dr_raw'])):
+    for ax_idx, (ax, data_type) in enumerate(zip([ax_speed_r, ax_speed_hr], ['times_r_raw', 'times_hr_raw'])):
         configure_axis(ax)
         ax.tick_params(axis='both', labelsize=24)
         ax.set_ylabel('Mean speedup factor' if ax_idx == 0 else '')
@@ -963,7 +1240,7 @@ def plot_error_vs_basis_size(basis_sizes, hr_basis_sizes, errors_r, errors_dr, s
         ax.title.set_fontsize(26)
         ax.axhline(y=1.0, color='black', linestyle='--', alpha=0.5, linewidth=1)
         
-        times_raw_list = kwargs.get(data_type, [])
+        times_raw_list = kwargs.get(data_type, kwargs.get('times_dr_raw', []))
         positions = np.arange(len(dt_space))
         n_solvers = len(solver_names)
         n_tols = len(pod_tols)
@@ -1069,12 +1346,13 @@ def _plot_speedup_panel(ax, times_raw, i, j, marker, color, avg_full, all_y_valu
 
 
 def plot_prediction_results(solver_names, pod_tols, dt_space, data_folder,
-                             full_times_raw, times_r_raw, times_dr_raw,
-                             sym_error_f=None, sym_error_r=None, sym_error_dr=None,
-                             energy_error_f=None, energy_error_r=None, energy_error_dr=None,
-                             phase_error_f=None, phase_error_r=None, phase_error_dr=None,
-                             lin_mom_error_f=None, lin_mom_error_r=None, lin_mom_error_dr=None,
-                             ang_mom_error_f=None, ang_mom_error_r=None, ang_mom_error_dr=None):
+                             full_times_raw, times_r_raw, times_hr_raw=None,
+                             sym_error_f=None, sym_error_r=None, sym_error_hr=None,
+                             energy_error_f=None, energy_error_r=None, energy_error_hr=None,
+                             phase_error_f=None, phase_error_r=None, phase_error_hr=None,
+                             lin_mom_error_f=None, lin_mom_error_r=None, lin_mom_error_hr=None,
+                             ang_mom_error_f=None, ang_mom_error_r=None, ang_mom_error_hr=None,
+                             **kwargs):
     """
     Plot prediction-mode metrics for reduced and hyper-reduced models.
 
@@ -1092,14 +1370,27 @@ def plot_prediction_results(solver_names, pod_tols, dt_space, data_folder,
         Mapping solver name → full-order timing array of shape (n_dt, n_train_params).
     times_r_raw : list of list of numpy arrays
         Reduced timing arrays per solver and tolerance.
-    times_dr_raw : list of list of numpy arrays
+    times_hr_raw : list of list of numpy arrays
         Hyper-reduced timing arrays per solver and tolerance.
-    sym_error_f, sym_error_r, sym_error_dr : list of list of numpy arrays, optional
-    energy_error_f, energy_error_r, energy_error_dr : list of list of numpy arrays, optional
-    phase_error_f, phase_error_r, phase_error_dr : list of list of numpy arrays, optional
-    lin_mom_error_f, lin_mom_error_r, lin_mom_error_dr : list of list of numpy arrays, optional
-    ang_mom_error_f, ang_mom_error_r, ang_mom_error_dr : list of list of numpy arrays, optional
+    sym_error_f, sym_error_r, sym_error_hr : list of list of numpy arrays, optional
+    energy_error_f, energy_error_r, energy_error_hr : list of list of numpy arrays, optional
+    phase_error_f, phase_error_r, phase_error_hr : list of list of numpy arrays, optional
+    lin_mom_error_f, lin_mom_error_r, lin_mom_error_hr : list of list of numpy arrays, optional
+    ang_mom_error_f, ang_mom_error_r, ang_mom_error_hr : list of list of numpy arrays, optional
     """
+    if times_hr_raw is None:
+        times_hr_raw = kwargs.get('times_dr_raw', [])
+    if sym_error_hr is None:
+        sym_error_hr = kwargs.get('sym_error_dr')
+    if energy_error_hr is None:
+        energy_error_hr = kwargs.get('energy_error_dr')
+    if phase_error_hr is None:
+        phase_error_hr = kwargs.get('phase_error_dr')
+    if lin_mom_error_hr is None:
+        lin_mom_error_hr = kwargs.get('lin_mom_error_dr')
+    if ang_mom_error_hr is None:
+        ang_mom_error_hr = kwargs.get('ang_mom_error_dr')
+
     # --- Reorder solvers so Model 1 (StormerVerlet) is on the left (x=0) ---
     # The input order may have Model 2 first; we want a consistent left-to-right
     # ordering: Model 1 (StormerVerlet) at x=0, Model 2 (DiscreteGradient) at x=1.
@@ -1120,39 +1411,39 @@ def plot_prediction_results(solver_names, pod_tols, dt_space, data_folder,
         return [data_list[i] for i in order]
 
     times_r_raw = _reorder(times_r_raw)
-    times_dr_raw = _reorder(times_dr_raw)
+    times_hr_raw = _reorder(times_hr_raw)
 
     # Group all error metrics by model level for data-driven plotting
     _error_groups = {
         'f':  {'ax': None, 'data': {}, 'y_vals': []},
         'r':  {'ax': None, 'data': {}, 'y_vals': []},
-        'dr': {'ax': None, 'data': {}, 'y_vals': []},
+        'hr': {'ax': None, 'data': {}, 'y_vals': []},
     }
     # Map keyword suffixes to the actual data passed in (reordered)
     _metric_data = {
-        'sym':     {'f': _reorder(sym_error_f),     'r': _reorder(sym_error_r),     'dr': _reorder(sym_error_dr)},
-        'energy':  {'f': _reorder(energy_error_f),  'r': _reorder(energy_error_r),  'dr': _reorder(energy_error_dr)},
-        'phase':   {'f': _reorder(phase_error_f),   'r': _reorder(phase_error_r),   'dr': _reorder(phase_error_dr)},
-        'lin_mom': {'f': _reorder(lin_mom_error_f), 'r': _reorder(lin_mom_error_r), 'dr': _reorder(lin_mom_error_dr)},
-        'ang_mom': {'f': _reorder(ang_mom_error_f), 'r': _reorder(ang_mom_error_r), 'dr': _reorder(ang_mom_error_dr)},
+        'sym':     {'f': _reorder(sym_error_f),     'r': _reorder(sym_error_r),     'hr': _reorder(sym_error_hr)},
+        'energy':  {'f': _reorder(energy_error_f),  'r': _reorder(energy_error_r),  'hr': _reorder(energy_error_hr)},
+        'phase':   {'f': _reorder(phase_error_f),   'r': _reorder(phase_error_r),   'hr': _reorder(phase_error_hr)},
+        'lin_mom': {'f': _reorder(lin_mom_error_f), 'r': _reorder(lin_mom_error_r), 'hr': _reorder(lin_mom_error_hr)},
+        'ang_mom': {'f': _reorder(ang_mom_error_f), 'r': _reorder(ang_mom_error_r), 'hr': _reorder(ang_mom_error_hr)},
     }
 
     fig, axes = plt.subplots(2, 3, figsize=(28, 18.6))
     ax_fom = axes[0, 0]
     ax_sym_r = axes[0, 1]
-    ax_sym_dr = axes[0, 2]
+    ax_sym_hr = axes[0, 2]
     ax_speed_r = axes[1, 1]
-    ax_speed_dr = axes[1, 2]
+    ax_speed_hr = axes[1, 2]
     axes[1, 0].axis('off')
 
     # Assign axes to groups
     _error_groups['f']['ax'] = ax_fom
     _error_groups['r']['ax'] = ax_sym_r
-    _error_groups['dr']['ax'] = ax_sym_dr
+    _error_groups['hr']['ax'] = ax_sym_hr
 
     # Populate data dicts
     for suffix, levels in _metric_data.items():
-        for level in ('f', 'r', 'dr'):
+        for level in ('f', 'r', 'hr'):
             _error_groups[level]['data'][suffix] = levels[level]
 
     marker_map = {tol: m for tol, m in zip(pod_tols, ['o', 's', '^', 'D', 'v', '<', '>', 'p', 'h', '*'])}
@@ -1160,7 +1451,7 @@ def plot_prediction_results(solver_names, pod_tols, dt_space, data_folder,
     solver_colors = OKABE_ITO_PALETTE
 
     all_y_values_speed_r = []
-    all_y_values_speed_dr = []
+    all_y_values_speed_hr = []
 
     for i, name in enumerate(solver_names):
         color = solver_colors[i % len(solver_colors)]
@@ -1170,7 +1461,7 @@ def plot_prediction_results(solver_names, pod_tols, dt_space, data_folder,
         for j, tol in enumerate(pod_tols):
             marker = marker_map[tol]
 
-            # --- Error panels (FOM, ROM, HRM) ---
+            # --- Error panels (FOM, ROM, HROM) ---
             for level, group in _error_groups.items():
                 for suffix, (mkr, ms) in metric_marker_map.items():
                     _plot_metric_panel(group['ax'], group['data'].get(suffix),
@@ -1179,8 +1470,8 @@ def plot_prediction_results(solver_names, pod_tols, dt_space, data_folder,
             # --- Speedup panels ---
             _plot_speedup_panel(ax_speed_r, times_r_raw, i, j, marker, color,
                                 avg_full, all_y_values_speed_r)
-            _plot_speedup_panel(ax_speed_dr, times_dr_raw, i, j, marker, color,
-                                avg_full, all_y_values_speed_dr)
+            _plot_speedup_panel(ax_speed_hr, times_hr_raw, i, j, marker, color,
+                                avg_full, all_y_values_speed_hr)
 
     # Legend handles for the five error metrics
     error_legend_handles = [
@@ -1189,7 +1480,7 @@ def plot_prediction_results(solver_names, pod_tols, dt_space, data_folder,
         for _, m, label, ms in _PLOT_METRICS
     ]
 
-    for ax in [ax_fom, ax_sym_r, ax_sym_dr, ax_speed_r, ax_speed_dr]:
+    for ax in [ax_fom, ax_sym_r, ax_sym_hr, ax_speed_r, ax_speed_hr]:
         configure_axis(ax)
         ax.tick_params(axis='both', labelsize=22)
         n_solvers = len(solver_names)
@@ -1209,18 +1500,18 @@ def plot_prediction_results(solver_names, pod_tols, dt_space, data_folder,
 
     ax_fom.set_title('FOM error metrics')
     ax_sym_r.set_title('ROM error metrics')
-    ax_sym_dr.set_title('HRM error metrics')
+    ax_sym_hr.set_title('HROM error metrics')
     ax_fom.set_ylabel('Mean error magnitude')
     ax_sym_r.set_ylabel('Mean error magnitude')
     ax_speed_r.set_ylabel('Mean speedup factor')
     ax_speed_r.axhline(1.0, color='black', linestyle='--', alpha=0.5)
-    ax_speed_dr.axhline(1.0, color='black', linestyle='--', alpha=0.5)
+    ax_speed_hr.axhline(1.0, color='black', linestyle='--', alpha=0.5)
 
     adjust_axis_limits(ax_fom, _error_groups['f']['y_vals'], axis='y', is_log_scale=True, max_steps=10)
     adjust_axis_limits(ax_sym_r, _error_groups['r']['y_vals'], axis='y', is_log_scale=True, max_steps=10)
-    adjust_axis_limits(ax_sym_dr, _error_groups['dr']['y_vals'], axis='y', is_log_scale=True, max_steps=10)
+    adjust_axis_limits(ax_sym_hr, _error_groups['hr']['y_vals'], axis='y', is_log_scale=True, max_steps=10)
     adjust_axis_limits(ax_speed_r, all_y_values_speed_r, axis='y', is_log_scale=False, max_steps=10)
-    adjust_axis_limits(ax_speed_dr, all_y_values_speed_dr, axis='y', is_log_scale=False, max_steps=10)
+    adjust_axis_limits(ax_speed_hr, all_y_values_speed_hr, axis='y', is_log_scale=False, max_steps=10)
 
     fig.legend(handles=error_legend_handles, title='Error', loc='upper left',
                bbox_to_anchor=(0.95, 0.90), bbox_transform=fig.transFigure,

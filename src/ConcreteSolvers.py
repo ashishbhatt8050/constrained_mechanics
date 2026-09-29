@@ -4,7 +4,6 @@ import hashlib
 import warnings
 import numpy as np
 from numpy import linalg as LA
-from pylab import log, r_, c_, sqrt, roll, figure, linspace
 import cloudpickle as pickle
 from tqdm.auto import tqdm
 import concurrent.futures
@@ -199,7 +198,7 @@ class BaseSolverMixin:
         """
         w_values = getattr(self, 'w_values', [1])
         for w_val in w_values:
-            self.set_initial_condition(y_[1])
+            self.set_initial_condition(y_[1], check=False)
             
             # Temporarily update dt for the substep
             original_dt = self.dt
@@ -207,9 +206,9 @@ class BaseSolverMixin:
             try:
                 if isinstance(self, DiscreteGradient) and self.constraint_type:
                     # Heun's method predictor
-                    f_val = self.f(c_[y_[0], y_[0]].T, None)
+                    f_val = self.f(np.array([y_[0], y_[0]]), None)
                     y_euler = y_[0] + self.dt * f_val
-                    f_val_next = self.f(c_[y_euler, y_euler].T, None)
+                    f_val_next = self.f(np.array([y_euler, y_euler]), None)
                     y_[1] = y_[0] + 0.5 * self.dt * (f_val + f_val_next)
                 else:
                     y_, _, _ = super().solve(w_val * self.t_points[k:k+2])
@@ -401,7 +400,7 @@ class BaseSolverMixin:
         """Compute time-series energy error (eng_error) and scalar RMS energy error (en_error)."""
         if hasattr(self, 'ham') and hasattr(self, 'y') and self.y is not None and not getattr(self, 'beta', False):
             self.eng_error = np.array([self.ham(y) for y in self.y]) - self.ham(self.y[0])
-            self.en_error = sqrt(self.dt) * LA.norm(self.eng_error)
+            self.en_error = np.sqrt(self.dt) * LA.norm(self.eng_error)
         else:
             self.eng_error = None
             self.en_error = None
@@ -472,7 +471,7 @@ class BaseSolverMixin:
         """Compute time-series linear momentum error array and max error."""
         if hasattr(self, 'y') and self.y is not None:
             lin_mom = np.sum(self.y[:, self.nosc:].reshape(-1, self.nosc // 3, 3), axis=1)
-            self.lin_momentum_err = r_[0, LA.norm(lin_mom[1:] - lin_mom[0], axis=1)]
+            self.lin_momentum_err = np.concatenate(([0], LA.norm(lin_mom[1:] - lin_mom[0], axis=1)))
             self.lin_mom_error = np.amax(self.lin_momentum_err)
         else:
             self.lin_momentum_err = None
@@ -484,7 +483,7 @@ class BaseSolverMixin:
             q = self.y[:, :self.nosc].reshape(-1, self.nosc // 3, 3)
             p = self.y[:, self.nosc:].reshape(-1, self.nosc // 3, 3)
             ang_mom = np.sum(np.cross(q, p), axis=1)
-            self.angular_momentum_err = r_[0, LA.norm(ang_mom[1:] - ang_mom[0], axis=1)]
+            self.angular_momentum_err = np.concatenate(([0], LA.norm(ang_mom[1:] - ang_mom[0], axis=1)))
             self.ang_mom_error = np.amax(self.angular_momentum_err)
         else:
             self.angular_momentum_err = None
@@ -512,14 +511,15 @@ class BaseSolverMixin:
         Returns:
             solver: An instance of the solver class with the solved trajectory.
         """
+        T_final = kwds.get('T_final', MechSystem.T_final)
         kwds['pool'] = {
             'solver_class': solver_class, 
             'dt': dt, 
             'Omega2': Omega2,
-            'n': int(round(MechSystem.T_final/dt))
+            'n': int(round(T_final/dt))
         }
         kwds['pool'].update({
-            't_points': linspace(0, MechSystem.T_final, kwds['pool']['n']+1)
+            't_points': np.linspace(0, T_final, kwds['pool']['n']+1)
         })
 
         try:
@@ -909,7 +909,7 @@ class BaseSolverMixin:
         # For the purpose of this diff, I will include the full method in the actual file creation if needed,
         # but here I will just copy it from the context provided.
         
-        fig = figure(figsize=(12, 12), constrained_layout=True)  # Make figure taller
+        fig = plt.figure(figsize=(12, 12), constrained_layout=True)  # Make figure taller
         fig.set_constrained_layout_pads(w_pad=0.1, h_pad=0.1, hspace=0.1, wspace=0.1)
         # fig.tight_layout(pad=0)
         omega2_hash = hashlib.md5(self.Omega2.tobytes()).hexdigest()[:8]
@@ -1032,12 +1032,24 @@ class DiscreteGradientFixedPointMixin:
         super().__init__(kwds)
 
     def residual(self, x, x1, Lambda):
-
         g_x1 = self.g_vec(x1)
-        resi = r_[x1 - x - self.dt * self.f(c_[x, x1].T, None) - self.dt * self.JJ @ self.g_prime(0.5 * (x + x1)).T @ Lambda,\
-                g_x1]
-        tang = r_[c_[np.eye(x1.shape[0]) - self.dt * self.dfdu(c_[x, x1].T, None) - 0.5 * self.dt * self.JJ @ self.g_prime_x_lambda_y(0.5 *(x + x1), Lambda), -self.dt * self.JJ @ self.g_prime(0.5 *(x + x1)).T],\
-                  c_[self.g_prime(x1), np.zeros((g_x1.shape[0],)*2)]]
+        x_pair = np.array([x, x1])
+        x_mid = 0.5 * (x + x1)
+        g_prime_mid = self.g_prime(x_mid)
+        dt_JJ_gp_T = self.dt * (self.JJ @ g_prime_mid.T)
+
+        n = x1.shape[0]
+        m_dim = g_x1.shape[0]
+
+        resi = np.empty(n + m_dim)
+        resi[:n] = x1 - x - self.dt * self.f(x_pair, None) - dt_JJ_gp_T @ Lambda
+        resi[n:] = g_x1
+
+        tang = np.empty((n + m_dim, n + m_dim))
+        tang[:n, :n] = np.eye(n) - self.dt * self.dfdu(x_pair, None) - 0.5 * self.dt * (self.JJ @ self.g_prime_x_lambda_y(x_mid, Lambda))
+        tang[:n, n:] = -dt_JJ_gp_T
+        tang[n:, :n] = self.g_prime(x1)
+        tang[n:, n:] = 0.0
 
         return resi, tang
 
@@ -1064,7 +1076,7 @@ class DiscreteGradientFixedPointMixin:
 
             # Update iteration counter and residual
             m += 1
-            residual = LA.norm(r_[resi, Delta_z], np.inf)
+            residual = max(LA.norm(resi, np.inf), LA.norm(Delta_z, np.inf))
             
             if np.isnan(residual):
                 raise RuntimeError("Nonlinear solver diverged: Residual is NaN")
@@ -1089,7 +1101,7 @@ class ConformalStormerVerletFixedPointMixin:
 
         # Setup constants
         f, neq, dt = self.f, self.neq//2, self.dt
-        q0, p0 = np.split(x[0], 2)
+        q0, p0 = x[0, :neq], x[0, neq:]
         
         # G(q0)
         g_prime_x0 = self.g_prime_diag(x[0])
@@ -1098,16 +1110,21 @@ class ConformalStormerVerletFixedPointMixin:
         G_q0 = g_prime_x0[:i0, :i1] # G(q0)
         
         # Split Lambda
-        Lambda_1, Lambda_2 = np.split(Lambda, 2)
+        Lambda_1 = Lambda[:i0].copy()
+        Lambda_2 = Lambda[i0:].copy()
         
         # p_half (unconstrained)
         p_half_unconstrained = p0 + 0.5 * dt * f(x[0], None)[neq:]
+
+        # Precompute position Jacobian factor: (-0.5 * dt^2) * G(q0)^T
+        half_dt2_G_q0_T = (-0.5 * dt**2) * G_q0.T
+        half_dt_G_q0_T = 0.5 * dt * G_q0.T
         
         # 1. Position Constraints Loop (Solve for Lambda_1)
         m = 0
         while m < self.M:
             # p_{n+1/2}
-            p_half1 = p_half_unconstrained - 0.5 * dt * G_q0.T @ Lambda_1 # Lambda_1 is 1D
+            p_half1 = p_half_unconstrained - half_dt_G_q0_T @ Lambda_1 # Lambda_1 is 1D
             
             # q_{n+1}: Exact kinetic relation dq/dt = p for Hamiltonian systems
             q_next = q0 + dt * p_half1
@@ -1125,7 +1142,7 @@ class ConformalStormerVerletFixedPointMixin:
                 
             # Jacobian R11 = G(q_{n+1}) @ (-0.5 * dt^2 * G(q0)^T)
             G_qnext = self.g_prime_diag(x[1])[:i0, :i1]
-            R11 = -0.5 * dt**2 * G_qnext @ G_q0.T
+            R11 = G_qnext @ half_dt2_G_q0_T
             
             Delta_Lambda_1 = LA.lstsq(R11, g_pos, rcond=None)[0]
             Lambda_1 -= Delta_Lambda_1
@@ -1140,13 +1157,18 @@ class ConformalStormerVerletFixedPointMixin:
         # 2. Velocity Constraints Loop (Solve for Lambda_2)
         # q_{n+1} and p_half1 are fixed, so G(q_{n+1}) and force_next are constant wrt Lambda_2
         G_qnext = self.g_prime_diag(x[1])[:i0, :i1]
-        force_next = f(np.concatenate([x[1, :neq], p_half1]), None)[neq:]
+        x[1, neq:] = p_half1
+        force_next = f(x[1], None)[neq:]
         p_base = p_half1 + 0.5 * dt * force_next
+
+        # Precompute velocity Jacobian factor: -0.5 * dt * G(q_{n+1})^T
+        neg_half_dt_G_qnext_T = (-0.5 * dt) * G_qnext.T
+        half_dt_G_qnext_T = 0.5 * dt * G_qnext.T
 
         m = 0
         while m < self.M:
             # p_{n+1}
-            p_next = p_base - 0.5 * dt * G_qnext.T @ Lambda_2
+            p_next = p_base - half_dt_G_qnext_T @ Lambda_2
             x[1, neq:] = p_next
             
             # Check velocity constraints
@@ -1161,7 +1183,7 @@ class ConformalStormerVerletFixedPointMixin:
                 
             # Jacobian R22 = -0.5 * dt * G(p_{n+1}) @ G(q_{n+1})^T
             G_pnext = self.g_prime(x[1])[i0:, i1:]
-            R22 = -0.5 * dt * G_pnext @ G_qnext.T
+            R22 = G_pnext @ neg_half_dt_G_qnext_T
             
             Delta_Lambda_2 = LA.lstsq(R22, g_vel, rcond=None)[0]
             Lambda_2 -= Delta_Lambda_2

@@ -1,5 +1,4 @@
 import numpy as np
-from pylab import r_, c_
 from numpy import linalg as LA
 import os
 
@@ -31,7 +30,7 @@ class ODESolver:
         """Advance solution one time step."""
         raise NotImplementedError
 
-    def set_initial_condition(self, U0):
+    def set_initial_condition(self, U0, check=True):
         if isinstance(U0, (float,int)):  # scalar ODE
             self.neq = 1
             U0 = float(U0)
@@ -42,17 +41,19 @@ class ODESolver:
 
         # Check that f returns correct length:
         # TODO: get rid of this check
-        try:
-            # Determine function based on the solver class
-            if isinstance(self, DiscreteGradient):
-                f0 = self.f(c_[self.U0, self.U0].T, 0)
-            else:
-                f0 = self.f(self.U0, 0, self.U0)
-                
-        except IndexError:
-            raise IndexError('Index of u out of bounds in f(u,t) func. Legal indices are %s' % (str(list(range(self.neq)))))
-        if f0.size != self.neq:
-            raise ValueError('f(u,t) returns %d components, while u has %d components' % (f0.size, self.neq))
+        if check and not getattr(self, '_f_sanity_checked', False):
+            try:
+                # Determine function based on the solver class
+                if isinstance(self, DiscreteGradient):
+                    f0 = self.f(np.array([self.U0, self.U0]), 0)
+                else:
+                    f0 = self.f(self.U0, 0, self.U0)
+                    
+            except IndexError:
+                raise IndexError('Index of u out of bounds in f(u,t) func. Legal indices are %s' % (str(list(range(self.neq)))))
+            if f0.size != self.neq:
+                raise ValueError('f(u,t) returns %d components, while u has %d components' % (f0.size, self.neq))
+            self._f_sanity_checked = True
 
     def solve(self, time_points, terminate=None):
         """
@@ -233,48 +234,58 @@ class ConformalStormerVerlet(ODESolver):
 
     def advance(self):
         u, f, k, t, neq = self.u, self.f, self.k, self.t, self.neq
-        
         dt = self.dt
         Gamma_p, Gamma_m = self.Gamma_p(dt), self.Gamma_m(dt)
-        
-        # Split u into two parts for easier manipulation
-        u_upper = u[k, :neq // 2]
-        u_lower = u[k, neq // 2:]
+        half = neq // 2
 
         # Calculate intermediate values
         Ecoeff_dt = self.Ecoeff(-dt)
-        f_lower = f(u[k], t[k])[neq // 2:]
-        
-        u_new = np.zeros(neq)
-        u_new_lower = (Ecoeff_dt * u_lower + dt/2 * f_lower)/Gamma_p
-        u_new_upper = (Gamma_p * Ecoeff_dt * u_upper + dt * f(np.concatenate([u_upper, u_new_lower]), t[k])[:neq//2]) * Ecoeff_dt / Gamma_m
-        u_new_lower = Ecoeff_dt * (Gamma_m * u_new_lower + dt/2 * f(np.concatenate([u_new_upper, u_new_lower]), t[k])[neq//2:])
-        
-        # Combine u_new_lower and u_new_upper
-        u_new = np.concatenate((u_new_upper, u_new_lower))
-        
-        return u_new, u_new
+        f_lower = f(u[k], t[k])[half:]
+
+        u_buf = np.empty(neq)
+        u_buf[:half] = u[k, :half]
+        u_buf[half:] = (Ecoeff_dt * u[k, half:] + (dt / 2.0) * f_lower) / Gamma_p
+
+        f_eval_1 = f(u_buf, t[k])[:half]
+        u_buf[:half] = (Gamma_p * Ecoeff_dt * u[k, :half] + dt * f_eval_1) * (Ecoeff_dt / Gamma_m)
+
+        f_eval_2 = f(u_buf, t[k])[half:]
+        u_buf[half:] = Ecoeff_dt * (Gamma_m * u_buf[half:] + (dt / 2.0) * f_eval_2)
+
+        return u_buf, u_buf
 
     def var_advance(self):
         u, f, dfdu, k, t, Ecoeff, neq = self.u, self.f, self.dfdu, self.k, \
                                             self.t, self.Ecoeff, self.neq
         dt = self.dt
+        half = neq // 2
         Gamma_p, Gamma_m = self.Gamma_p(dt), self.Gamma_m(dt)
-                
-        u_new = (Ecoeff(-dt)*u[k,neq//2:] +dt/2*f(u[k], t[k])[neq//2:])/Gamma_p
-        dfdu_k = dfdu(np.concatenate([u[k,:neq//2], u_new]), t[k])
-        
-        H_qq_m = -dfdu_k[neq//2:,:neq//2]
-        H_qq_p = -dfdu(np.concatenate([u[k+1,:neq//2], u_new]), t[k])[neq//2:,:neq//2]
-        H_pp = dfdu_k[:neq//2, neq//2:]
-        
-        du_11 = (Gamma_p*np.eye(neq//2) -dt**2*H_pp @ H_qq_m/2/Gamma_p)/Gamma_m
+
+        u_new = (Ecoeff(-dt)*u[k,half:] + dt/2*f(u[k], t[k])[half:])/Gamma_p
+        u_cat1 = np.empty(neq)
+        u_cat1[:half] = u[k, :half]
+        u_cat1[half:] = u_new
+        dfdu_k = dfdu(u_cat1, t[k])
+
+        H_qq_m = -dfdu_k[half:,:half]
+        u_cat2 = np.empty(neq)
+        u_cat2[:half] = u[k+1, :half]
+        u_cat2[half:] = u_new
+        H_qq_p = -dfdu(u_cat2, t[k])[half:,:half]
+        H_pp = dfdu_k[:half, half:]
+
+        du_11 = (Gamma_p*np.eye(half) - dt**2*H_pp @ H_qq_m/2/Gamma_p)/Gamma_m
         du_12 = dt*H_pp/Gamma_p/Gamma_m
         du_21 = -Gamma_m/Gamma_p * dt/2 * H_qq_m - dt/2 * H_qq_p @ du_11
-        du_22 = Gamma_m/Gamma_p*np.eye(neq//2) - dt/2 * H_qq_p @ du_12
-        
-        du = r_[c_[du_11, du_12], c_[du_21, du_22]]*Ecoeff(-2*dt)
-        
+        du_22 = Gamma_m/Gamma_p*np.eye(half) - dt/2 * H_qq_p @ du_12
+
+        du = np.empty((neq, neq))
+        du[:half, :half] = du_11
+        du[:half, half:] = du_12
+        du[half:, :half] = du_21
+        du[half:, half:] = du_22
+        du *= Ecoeff(-2*dt)
+
         return du
     
     def Gamma_p(self, dt):
@@ -295,14 +306,19 @@ class ImplicitMidpoint(ODESolver):
     def advance(self, w_start=None):
         u, f, k, t = self.u, self.f, self.k, self.t
         dt = self.dt
+        uk = u[k]
+        t_mid = (t[k+1] + t[k]) * 0.5
+        half_dt = dt * 0.5
+        I_mat = np.eye(self.neq)
 
         def F(w):
-            return w - dt*f((w +u[k])/2, (t[k+1] +t[k])/2) - u[k]
+            return w - dt * f((w + uk) * 0.5, t_mid) - uk
 
         def dFdw(w):
-            return np.eye(self.neq) - self.dt/2*self.dfdu((w+u[k])/2, (t[k+1]+t[k])/2)
+            return I_mat - half_dt * self.dfdu((w + uk) * 0.5, t_mid)
 
-        if w_start is None: w_start = u[k] + dt*f(u[k], t[k])  # Forward Euler step
+        if w_start is None:
+            w_start = uk + dt * f(uk, t[k])  # Forward Euler step
         u_new, n, info = Newton(F, w_start, dFdw, self.tol, self.M, False)
         
         return u_new, info
@@ -328,28 +344,22 @@ class DiscreteGradient(ODESolver):
     def advance(self, w_start=None):
         u, f, k, t = self.u, self.f, self.k, self.t
         dt = self.dt
+        uk = u[k]
+        tk = t[k]
+        I_mat = np.eye(self.neq)
         
         def F(w):
-            return w - u[k] - dt*f(c_[u[k], w].T, t[k])
+            return w - uk - dt * f(np.array([uk, w]), tk)
 
         def dFdw(w):
-            return np.eye(self.neq) - dt * self.dfdu(c_[u[k], w].T, t[k]) # TODO: check 0.5 * dt
+            return I_mat - dt * self.dfdu(np.array([uk, w]), tk) # TODO: check 0.5 * dt
 
         if w_start is None:
-            # w_start = u[k] + dt*f(c_[u[k], u[k]].T, t[k])  # Forward Euler step
-
-            # uk1 = u[k] + 0.5 * dt * f(c_[u[k], u[k]].T, t[k])
-            # w_start = u[k] + dt * f(c_[uk1, uk1].T, t[k] + 0.5 * dt) # Heun's method
-
             # RK2 method
-            k1 = f(c_[u[k], u[k]].T, t[k])
-            k2 = f(c_[u[k] + dt * k1, u[k] + dt * k1].T, t[k] + dt)
-            w_start = u[k] + 0.5 * dt * (k1 + k2)
-
-            # w_start[self.neq//2:] = u[k, self.neq//2:] + dt*f(u[k], t[k], r_[w_start[:self.neq//2], u[k, self.neq//2:]])[self.neq//2:]
-            
-            # uk = u[k] if self.RB is None else u[k] @ self.RB.T
-            # w_start = u[k] + dt * self.JJ(self.neq//2) @ self.ham_z(*np.split(uk, 2))
+            k1 = f(np.array([uk, uk]), tk)
+            w_pred = uk + dt * k1
+            k2 = f(np.array([w_pred, w_pred]), tk + dt)
+            w_start = uk + 0.5 * dt * (k1 + k2)
         
         u_new, n, info = Newton(F, w_start, dFdw, self.tol, self.M, False)
 

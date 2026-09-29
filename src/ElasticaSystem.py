@@ -150,7 +150,7 @@ def make_elastica_initial_conditions(n_nodes, ds, boundary="pinned", transverse_
 
     # Axial velocity is zero, so q0 . p0 == 0 is also satisfied
     assert np.isclose(np.dot(q0, p0), 0.0, atol=1e-12), f"q0 . p0 must be 0, got {np.dot(q0, p0)}"
-    return np.r_[q0, p0]
+    return np.concatenate([q0, p0])
 
 
 class ElasticaMechSystem(ElasticaConfig, MechSystem):

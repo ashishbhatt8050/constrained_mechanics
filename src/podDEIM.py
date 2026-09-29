@@ -122,7 +122,7 @@ def PSD(F2, y_list, MechSystem, weights=None):
         weights = np.eye(nosc)
         
     # Pass the weights (Xh) to POD instead of hardcoded identity
-    rb, sv, nosc_r = POD(pl.c_[y_list[:nosc, :], y_list[nosc:, :], F2[:nosc, :], F2[nosc:, :]], weights, tol)
+    rb, sv, nosc_r = POD(np.hstack([y_list[:nosc, :], y_list[nosc:, :], F2[:nosc, :], F2[nosc:, :]]), weights, tol)
     RB = np.block([[rb[:, :nosc_r], np.zeros_like(rb[:, :nosc_r])], [np.zeros_like(rb[:, :nosc_r]), rb[:, :nosc_r]]])
     
     return RB, sv, nosc_r
@@ -160,8 +160,8 @@ def DEIM(Ub, plot_deim=False):
         c = np.linalg.solve(P.T @ U, P.T @ u_i)
         r = u_i - U @ c
         p = abs(r).argmax()
-        U = pl.c_[U, u_i]
-        P = pl.c_[P, np.zeros((Ub.shape[0], 1), dtype=np.int8)]
+        U = np.column_stack([U, u_i])
+        P = np.column_stack([P, np.zeros((Ub.shape[0], 1), dtype=np.int8)])
         P[p, i] = 1
         idx_list.append(p)
 
@@ -239,7 +239,7 @@ def pod_deim(N, x, f, F):
     fig = pl.figure()
     ax = fig.add_subplot(111)
     mu = 3.1
-    ax.plot(x, pl.c_[f(mu), f_h(P, U, mu)])
+    ax.plot(x, np.column_stack([f(mu), f_h(P, U, mu)]))
 
     error_deim_pod, error_pod = [], []
     for m in range(5, U.shape[1]):
@@ -249,7 +249,7 @@ def pod_deim(N, x, f, F):
 
         error_pod.append(np.linalg.norm((np.eye(N) - Um @ Um.T) @ f(mu)))
 
-    ax1.semilogy(range(5, U.shape[1]), pl.c_[error_deim_pod, error_pod])
+    ax1.semilogy(range(5, U.shape[1]), np.column_stack([error_deim_pod, error_pod]))
 
 # %%
 
@@ -367,11 +367,11 @@ def test_2D():
     fig = pl.figure()
     ax1 = fig.add_subplot(1, 3, 1)
     # ax1.set_prop_cycle(cycler('linestyle', ['-*', '-.o', ':', '-.']))
-    ax1.semilogy(pl.c_[deim_error, pod_error])
+    ax1.semilogy(np.column_stack([deim_error, pod_error]))
     # ax1.semilogy(pod_error,'-.o')
     ax2 = fig.add_subplot(1, 3, 2)
     # ax1.set_prop_cycle(cycler('linestyle', ['-*', '-.o', ':', '-.']))
-    ax2.semilogy(pl.c_[deim_time, pod_time])
+    ax2.semilogy(np.column_stack([deim_time, pod_time]))
 
 
 # %%

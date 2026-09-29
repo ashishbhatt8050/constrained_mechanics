@@ -517,7 +517,7 @@ def save_figure(fig, filename, fig_data=None):
                     if array is not None:
                         arr = np.asarray(array).ravel()
                         dat_filename = f"{dat_filename_base}_{label}.dat"
-                        np.savetxt(dat_filename, np.c_[np.arange(1, len(arr) + 1), arr], fmt='%f')
+                        np.savetxt(dat_filename, np.column_stack((np.arange(1, len(arr) + 1), arr)), fmt='%f')
             else:
                 if 't_points' in fig_data and fig_data['t_points'] is not None:
                     t_pts = np.asarray(fig_data['t_points']).ravel()

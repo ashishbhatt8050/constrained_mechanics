@@ -17,7 +17,6 @@ import json
 # Third-party imports
 import numpy as np
 import sympy as smp
-from pylab import r_, c_, zeros, eye, linspace
 
 # Local imports
 from PlotScript import timing
@@ -228,7 +227,7 @@ class SysConfig:
         # Time-stepping parameters
         dt_space_dim = 1
         dt_space = np.array([0.001])
-        T_final = dt_space[-1] * 3e1
+        T_final = dt_space[-1] * 3e3
 
         # Parameter space for Omega^2
         _Omega2_space_dim = nosc // 3 - 2
@@ -306,7 +305,7 @@ def make_lattice_initial_conditions(nosc):
     assert np.allclose(momenta[1::2], momenta[::2]), 'position and momenta are not orthogonal'
     momenta = momenta.flatten().reshape(-1, 1)
 
-    return r_[positions, momenta].flatten()
+    return np.concatenate([positions, momenta]).ravel()
 
 
 # @load_symbolic_expressions # Moved decorator to concrete subclasses or base if needed
@@ -322,8 +321,11 @@ class MechSystem(SysConfig):
 
     @staticmethod
     def compute_J(d):
-        return r_[c_[zeros((d, d)), eye(d)], 
-                    c_[-eye(d), zeros((d, d))]]
+        J = np.zeros((2 * d, 2 * d))
+        idx = np.arange(d)
+        J[idx, d + idx] = 1.0
+        J[d + idx, idx] = -1.0
+        return J
 
     y_init = make_lattice_initial_conditions(SysConfig.nosc)
 

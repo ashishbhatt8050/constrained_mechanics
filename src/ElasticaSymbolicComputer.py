@@ -3,10 +3,9 @@ import sympy as smp
 import concurrent.futures
 import cloudpickle
 from tqdm.auto import tqdm
-import os
 
 from PlotScript import timing
-from SymbolicComputer import compile_hybrid_function, ShapeWrapper, _run_method, CODE_VERSION
+from SymbolicComputer import compile_hybrid_function, ShapeWrapper, _run_method
 
 
 class ElasticaSymbolicComputer:

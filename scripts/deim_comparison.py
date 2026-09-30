@@ -107,7 +107,6 @@ E_f_qdeim_syms_func = sp.lambdify([mu_syms, x_syms], E_f_qdeim_syms, 'numpy')
 
 # Function to run a single DEIM method (A or B)
 def run_deim(name, U_deim, indices, mu_test, x_test, method='A'):
-    ell = U_deim.shape[1]
     EU = U_deim[indices, :]
     EU_inv = np.linalg.inv(EU)
     if method == 'A':
@@ -175,27 +174,6 @@ def print_results():
     print("Method A: Symbolic offline-online (SymPy substitution)")
     print("Method B: Chaturantabut2010/CSR (only required entries evaluated)")
 
-if __name__ == '__main__':
-    print_results()
-
-#%%
-'''
-# Plot sample function and DEIM approximation at mu = 1.17
-mu_plot = 1.17
-f_sample = f(mu_plot)
-# Greedy DEIM approximation
-EU_greedy = U_deim[greedy_indices, :]
-EU_greedy_inv = np.linalg.inv(EU_greedy)
-c_greedy = EU_greedy_inv @ f_sample[greedy_indices]
-f_deim_greedy = U_deim @ c_greedy
-
-# QDEIM DEIM approximation
-EU_qdeim = U_deim[qdeim_indices, :]
-EU_qdeim_inv = np.linalg.inv(EU_qdeim)
-c_qdeim = EU_qdeim_inv @ f_sample[qdeim_indices]
-f_deim_qdeim = U_deim @ c_qdeim
-'''
-#%% make this cell a function to call with appropriate parameters
 def plot_deim_approximations(x, f_sample, f_deim_greedy, f_deim_qdeim):
     plt.figure(figsize=(8, 5))
     plt.plot(x, f_sample, label=r'True $f(x, \mu)$')
@@ -211,24 +189,29 @@ def plot_deim_approximations(x, f_sample, f_deim_greedy, f_deim_qdeim):
     plt.legend()
     plt.grid()
     plt.show()
-# %% Plot sample function and DEIM approximation at mu = 1.17 using symbolic method
-mu_plot = 1.17
-f_sample = f(mu_plot)
-# Greedy DEIM approximation (symbolic)
-EU_greedy = U_deim[greedy_indices, :]
-EU_greedy_inv = np.linalg.inv(EU_greedy)
-E_f_greedy_syms_func = E_f_greedy_syms_func
-E_f_greedy_num = E_f_greedy_syms_func(mu_plot, x)
-c_greedy_sym = EU_greedy_inv @ E_f_greedy_num
-f_deim_greedy_sym = U_deim @ c_greedy_sym   
 
-# QDEIM DEIM approximation (symbolic)
-EU_qdeim = U_deim[qdeim_indices, :]
-EU_qdeim_inv = np.linalg.inv(EU_qdeim)
-E_f_qdeim_syms_func = E_f_qdeim_syms_func
-E_f_qdeim_num = E_f_qdeim_syms_func(mu_plot, x)
-c_qdeim_sym = EU_qdeim_inv @ E_f_qdeim_num
-f_deim_qdeim_sym = U_deim @ c_qdeim_sym
 
-plot_deim_approximations(x, f_sample, f_deim_greedy_sym, f_deim_qdeim_sym)
-# %%
+def demo_symbolic_approximation():
+    """Plot sample function and DEIM approximation at mu = 1.17 using symbolic method"""
+    mu_plot = 1.17
+    f_sample = f(mu_plot)
+    # Greedy DEIM approximation (symbolic)
+    EU_greedy = U_deim[greedy_indices, :]
+    EU_greedy_inv = np.linalg.inv(EU_greedy)
+    E_f_greedy_num = E_f_greedy_syms_func(mu_plot, x)
+    c_greedy_sym = EU_greedy_inv @ E_f_greedy_num
+    f_deim_greedy_sym = U_deim @ c_greedy_sym
+
+    # QDEIM DEIM approximation (symbolic)
+    EU_qdeim = U_deim[qdeim_indices, :]
+    EU_qdeim_inv = np.linalg.inv(EU_qdeim)
+    E_f_qdeim_num = E_f_qdeim_syms_func(mu_plot, x)
+    c_qdeim_sym = EU_qdeim_inv @ E_f_qdeim_num
+    f_deim_qdeim_sym = U_deim @ c_qdeim_sym
+
+    plot_deim_approximations(x, f_sample, f_deim_greedy_sym, f_deim_qdeim_sym)
+
+
+if __name__ == '__main__':
+    print_results()
+    demo_symbolic_approximation()

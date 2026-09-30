@@ -3,16 +3,12 @@ import gc
 import numpy as np
 import sympy as smp
 import psutil
-from scipy import sparse
 from itertools import chain
 from numpy import linalg as LA
-from scipy.linalg import sqrtm
-from functools import partial
 from tqdm.auto import tqdm
 from System import SysConfig, MechSystem, HamiltonianMechSystem, LagrangianMechSystem
-from Reduction import Basis, IdentityBasis, SymplecticBasis, TravelingBasis, DEIMProjector, as_basis
-from ODESolver import DiscreteGradient
-from podDEIM import POD, PSD, DEIM, rb_svd
+from Reduction import SymplecticBasis, TravelingBasis, SparseBasis
+from podDEIM import POD, DEIM
 from PlotScript import plot_structured_rb_components, plot_structured_rb_modal_energy
 from SymbolicComputer import IndexedBaseSymbolicComputer
 
@@ -319,19 +315,11 @@ class ReduceMechSystem(MechSystem):
     @staticmethod
     def _reconstruct_sparse_basis(B_hat, non_zero_indices, full_rows):
         """
-        Reconstructs a full sparse basis matrix from the DEIM reduced basis B_hat.
-        Places rows of B_hat into the specified non_zero_indices of the full matrix.
-        Using COO format for memory efficiency and speed.
+        Reconstructs a full sparse basis operator from the DEIM reduced basis B_hat.
+        Places rows of B_hat into the specified non_zero_indices of the full state space.
+        Uses pure-NumPy SparseBasis for minimal memory and fast BLAS evaluation.
         """
-        n_rows_sub, n_cols = B_hat.shape
-        
-        # Construct COO coordinates
-        # B_hat.flatten() is row-major: we repeat row indices and tile column indices
-        rows = np.repeat(non_zero_indices, n_cols)
-        cols = np.tile(np.arange(n_cols), n_rows_sub)
-        data = B_hat.flatten()
-        
-        return sparse.coo_matrix((data, (rows, cols)), shape=(full_rows, n_cols)).tocsr()
+        return SparseBasis(B_hat, non_zero_indices, full_rows)
 
     @classmethod
     def _create_indexed_deim_func(cls, expr, P, solver_type):
@@ -373,13 +361,15 @@ class ReduceMechSystem(MechSystem):
         return U_full[:, :N], S_full[:N], N
 
     @classmethod
-    def _build_structured_basis(cls, V_state, G_test, return_details=False):
+    def _build_structured_basis(cls, V_state, G_test, return_details=False, max_cols=None):
         """
         Build an orthonormal reduced basis V = [V_state | V_enrich] where:
         1. V_state captures state kinematics (rest shape + transient dynamics).
         2. V_enrich is the orthogonal complement of the constraint normal space Q_G
            with respect to V_state.
         Guarantees cond(G_test @ V) = O(1) and full row-rank without basis bloat.
+        If max_cols is specified and V.shape[1] > max_cols, truncates kinematic
+        modes from V_state while preserving the full constraint normal space Q_G.
         """
         V_state, _ = LA.qr(V_state, mode='reduced')
         Q_G, _ = LA.qr(G_test.T, mode='reduced')
@@ -388,6 +378,15 @@ class ReduceMechSystem(MechSystem):
         diag_R = np.abs(np.diag(R_enrich))
         keep_cols = diag_R > 1e-8
         V_enrich = Q_enrich[:, keep_cols]
+
+        if max_cols is not None and (V_state.shape[1] + V_enrich.shape[1]) > max_cols:
+            k_keep = max(1, max_cols - Q_G.shape[1])
+            V_state = V_state[:, :k_keep]
+            residual_G = Q_G - V_state @ (V_state.T @ Q_G)
+            Q_enrich, R_enrich = LA.qr(residual_G, mode='reduced')
+            diag_R = np.abs(np.diag(R_enrich))
+            V_enrich = Q_enrich[:, diag_R > 1e-8]
+
         if V_enrich.shape[1] > 0:
             V_final = np.hstack([V_state, V_enrich])
         else:
@@ -672,7 +671,7 @@ class ReduceMechSystem(MechSystem):
             flat_gp        = g_prime_expr.flat()
             sel_gp         = [flat_gp[i] for i in gp_nz_indices]
             col_gp_w       = Pj_gp.T @ smp.Matrix(sel_gp)
-            _gp_fn         = smp.lambdify((cls.y,), col_gp_w, modules=['numpy', 'scipy'])
+            _gp_fn         = smp.lambdify((cls.y,), col_gp_w, modules='numpy')
             gp_mdeim_w     = lambda *args, _fn=_gp_fn, col=col_gp_w: _fn(*args).flatten()
 
             _IP_windows.append(IP_gp_w)
@@ -704,7 +703,7 @@ class ReduceMechSystem(MechSystem):
                 flat_xy     = gplxy_expr.flat()
                 sel_xy      = [flat_xy[i] for i in gplxy_nz_indices]
                 col_xy_w    = Pj_xy.T @ smp.Matrix(sel_xy)
-                _gplxy_fn   = smp.lambdify((cls.y, cls.lag_mult), col_xy_w, modules=['numpy', 'scipy'])
+                _gplxy_fn   = smp.lambdify((cls.y, cls.lag_mult), col_xy_w, modules='numpy')
                 gplxy_mdeim_w = lambda *args, _fn=_gplxy_fn, col=col_xy_w: _fn(*args).flatten()
 
                 IP_gplxy_windows.append(IP_xy_w)
@@ -841,24 +840,6 @@ class ReduceMechSystem(MechSystem):
                 B_hat = Uj @ LA.inv(Pj.T @ Uj)
                 total_elements = np.prod(g_prime_shape)
 
-                '''
-                # --- Verification Test ---
-                # Compare the new `_reconstruct_sparse_basis` (COO-based) against a
-                # memory-safe equivalent of the original `IP.T @ B_hat` operation, which uses LIL format.
-                # 1. Generate basis using the LIL matrix approach
-                basis_lil = sparse.lil_matrix((total_elements, B_hat.shape[1]), dtype=np.float64)
-                basis_lil[non_zero_indices, :] = B_hat
-                
-                # 2. Generate basis using the new COO-based method
-                basis_coo = cls._reconstruct_sparse_basis(B_hat, non_zero_indices, total_elements)
-                
-                # 3. Compare the two sparse matrices. The difference should be negligible.
-                diff = abs(basis_lil.tocsr() - basis_coo)
-                assert diff.max() < 1e-14, "Verification failed: COO reconstruction does not match LIL reconstruction."
-                print(f"Verification for '{func_name}' successful: _reconstruct_sparse_basis matches the LIL-based method.")
-                # --- End Verification Test ---
-                '''
-
                 basis = cls._reconstruct_sparse_basis(B_hat, non_zero_indices, total_elements)
 
                 # Create lambdified function
@@ -874,13 +855,12 @@ class ReduceMechSystem(MechSystem):
             # Create and wrap lambdified function
             # Handle argument signature for g_prime_x_lambda_y
             if func_name == 'g_prime_x_lambda_y_':
-                _fn = smp.lambdify((cls.y, cls.lag_mult), col, modules=['numpy', 'scipy'])
+                _fn = smp.lambdify((cls.y, cls.lag_mult), col, modules='numpy')
                 mdeim_func = lambda *args, _f=_fn: _f(*args).flatten()
             elif func_name in ["g_"]:
-                # mdeim_func = smp.lambdify((cls.y,), col, modules=['scipy'])
                 mdeim_func = cls._create_indexed_deim_func(expr, Pj, solver_type)
             else:
-                _fn = smp.lambdify((cls.y,), col, modules=['numpy', 'scipy'])
+                _fn = smp.lambdify((cls.y,), col, modules='numpy')
                 mdeim_func = lambda *args, _f=_fn: _f(*args).flatten()
 
             if callable(mdeim_func) and not isinstance(mdeim_func, type):
@@ -1067,7 +1047,8 @@ class ReduceMechSystem(MechSystem):
             if np.allclose(Xh, np.eye(Xh.shape[0])):
                 Xh_half = np.eye(Xh.shape[0])
             else:
-                Xh_half = sqrtm(Xh)
+                vals, vecs = LA.eigh(Xh)
+                Xh_half = (vecs * np.sqrt(np.maximum(vals, 0.0))) @ vecs.T
         else:
             Xh_half = None
 
@@ -1348,7 +1329,7 @@ class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
         if cls.hyperreducer == 'DEIM':
             ham_zz_deim = smp.lambdify((cls.y, cls.omega2, cls.beta),
                                         P.T @ cls.ham_zz_expr,
-                                        modules=['numpy', 'scipy'])
+                                        modules='numpy')
 
         for target_class in target_classes:
             setattr(target_class, 'RB', RB)
@@ -1400,7 +1381,7 @@ class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
         flat_expr = cls.ham_zz_expr.flat()
         selected_expr_elements = [flat_expr[i] for i in non_zero_indices]
         mdeim_col = Pj.T @ smp.Matrix(selected_expr_elements) # This is a column vector
-        _mdeim_lambdified = smp.lambdify((cls.y, cls.omega2, cls.beta), mdeim_col, modules=['numpy', 'scipy'])
+        _mdeim_lambdified = smp.lambdify((cls.y, cls.omega2, cls.beta), mdeim_col, modules='numpy')
         mdeim_func = lambda *args, _f=_mdeim_lambdified, col=mdeim_col: _f(*args).flatten()
 
         for target_class in target_classes:
@@ -1548,6 +1529,9 @@ class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
                 if len(s_res) > 0 and s_res[0] > 1e-12:
                     cum_e = np.cumsum(s_res**2) / np.sum(s_res**2)
                     k_enrich = np.searchsorted(cum_e, 1.0 - tol) + 1
+                    max_enrich = getattr(cls, 'max_traveling_enrichment', 4)
+                    if max_enrich is not None:
+                        k_enrich = min(k_enrich, max_enrich)
                     Q_enrich = U_res[:, :k_enrich]
                 else:
                     Q_enrich = np.empty((cls.nosc, 0))
@@ -1561,14 +1545,16 @@ class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
                 rb_w = U_state_global.copy()
 
             # ── 2c. Ensure local constraint normal space is spanned and well-conditioned ─
-            rb_w = cls._build_structured_basis(rb_w, G_test_w)
+            max_nr = getattr(cls, 'max_nosc_r', 150)
+            rb_w = cls._build_structured_basis(rb_w, G_test_w, max_cols=max_nr)
 
             # ── 2d. Safety cap ────────────────────────────────────────────────
             nosc_r_w = rb_w.shape[1]
-            if nosc_r_w > cls.nosc:
-                print(f'    [Warning] Window {w+1} rank ({nosc_r_w}) > DOFs '
-                      f'({cls.nosc}). Capping to global basis.')
-                rb_w     = cls._build_structured_basis(U_state_global, G_test_w)
+            if nosc_r_w > cls.nosc or (max_nr is not None and nosc_r_w > max_nr):
+                cap_target = min(cls.nosc, max_nr if max_nr is not None else cls.nosc)
+                print(f'    [Warning] Window {w+1} rank ({nosc_r_w}) > ceiling '
+                      f'({cap_target}). Truncating to global basis.')
+                rb_w     = cls._build_structured_basis(U_state_global, G_test_w, max_cols=max_nr)
                 nosc_r_w = rb_w.shape[1]
 
             RB_w = np.block([[rb_w,                np.zeros_like(rb_w)],
@@ -1665,7 +1651,7 @@ class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
                 mdeim_col_w = Pj_w.T @ smp.Matrix(selected_elems)
                 _mdeim_w_lambdified = smp.lambdify(
                     (cls.y, cls.omega2, cls.beta), mdeim_col_w,
-                    modules=['numpy', 'scipy'])
+                    modules='numpy')
                 mdeim_func_w = lambda *args, _f=_mdeim_w_lambdified, col=mdeim_col_w: _f(*args).flatten()
 
             deim_field_windows.append(deim_field_w)
@@ -1916,7 +1902,7 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
         if cls.hyperreducer == 'DEIM':
              lag_dg_z_deim = smp.lambdify((cls.y, cls.y1, cls.omega2),
                                         P.T @ cls.lag_dg_z_expr,
-                                        modules=['numpy', 'scipy'])
+                                        modules='numpy')
 
         for target_class in target_classes:
             setattr(target_class, 'RB', cls.RB)
@@ -1970,7 +1956,7 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
         flat_expr = cls.lag_dg_z_expr.flat()
         selected_expr_elements = [flat_expr[i] for i in non_zero_indices]
         mdeim_col = Pj.T @ smp.Matrix(selected_expr_elements) # This is a column vector
-        _mdeim_lambdified = smp.lambdify((cls.y, cls.y1, cls.omega2), mdeim_col, modules=['numpy', 'scipy'])
+        _mdeim_lambdified = smp.lambdify((cls.y, cls.y1, cls.omega2), mdeim_col, modules='numpy')
         mdeim_func = lambda *args, _f=_mdeim_lambdified, col=mdeim_col: _f(*args).flatten()
 
         for target_class in target_classes:
@@ -2085,6 +2071,9 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
                 if len(s_res) > 0 and s_res[0] > 1e-12:
                     cum_e = np.cumsum(s_res**2) / np.sum(s_res**2)
                     k_enrich = np.searchsorted(cum_e, 1.0 - tol) + 1
+                    max_enrich = getattr(cls, 'max_traveling_enrichment', 4)
+                    if max_enrich is not None:
+                        k_enrich = min(k_enrich, max_enrich)
                     Q_enrich = U_res[:, :k_enrich]
                 else:
                     Q_enrich = np.empty((cls.nosc, 0))
@@ -2097,14 +2086,16 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
                 rb_w = U_state_global.copy()
 
             # ── 2c. Ensure local constraint normal space is spanned and well-conditioned ─
-            rb_w = cls._build_structured_basis(rb_w, G_test_w)
+            max_nr = getattr(cls, 'max_nosc_r', 150)
+            rb_w = cls._build_structured_basis(rb_w, G_test_w, max_cols=max_nr)
 
             # ── 2d. Safety cap ────────────────────────────────────────────────
             nosc_r_w = rb_w.shape[1]
-            if nosc_r_w > cls.nosc:
-                print(f'    [Warning] Window {w+1} rank ({nosc_r_w}) > DOFs '
-                      f'({cls.nosc}). Capping to global basis.')
-                rb_w     = cls._build_structured_basis(U_state_global, G_test_w)
+            if nosc_r_w > cls.nosc or (max_nr is not None and nosc_r_w > max_nr):
+                cap_target = min(cls.nosc, max_nr if max_nr is not None else cls.nosc)
+                print(f'    [Warning] Window {w+1} rank ({nosc_r_w}) > ceiling '
+                      f'({cap_target}). Truncating to global basis.')
+                rb_w     = cls._build_structured_basis(U_state_global, G_test_w, max_cols=max_nr)
                 nosc_r_w = rb_w.shape[1]
 
             RB_w = np.block([[rb_w,                np.zeros_like(rb_w)],
@@ -2218,7 +2209,7 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
                 mdeim_col_w = Pj_w.T @ smp.Matrix(selected_elems)
                 _mdeim_w_lambdified = smp.lambdify(
                     (cls.y, cls.y1, cls.omega2), mdeim_col_w,
-                    modules=['numpy', 'scipy'])
+                    modules='numpy')
                 mdeim_func_w = lambda *args, _f=_mdeim_w_lambdified, col=mdeim_col_w: _f(*args).flatten()
 
             deim_field_windows.append(deim_field_w)

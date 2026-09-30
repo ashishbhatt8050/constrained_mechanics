@@ -436,7 +436,3 @@ class Derivative:
     def __call__(self, x, discrete=True):
         f, h = self.f, self.h      # make short forms
         return (f(x + h) - f(x - h)) / (2 * h)
-
-#%% Testing
-if __name__ == '__main__':
-    pass

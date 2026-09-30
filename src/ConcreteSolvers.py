@@ -4,15 +4,13 @@ import hashlib
 import warnings
 import numpy as np
 from numpy import linalg as LA
-import cloudpickle as pickle
 from tqdm.auto import tqdm
-import concurrent.futures
 import matplotlib.pyplot as plt
 
 from System import (MechSystem, HamiltonianMechSystem, LagrangianMechSystem,
                    ReducedHamiltonianMechSystem, ReducedLagrangianMechSystem, HyperReducedHamiltonianMechSystem, HyperReducedLagrangianMechSystem,
                    fast_dump, fast_load, check_checkpoint_exists)
-from Reduction import Basis, IdentityBasis, SymplecticBasis, TravelingBasis, DEIMProjector, as_basis
+from Reduction import Basis, IdentityBasis, as_basis
 from ODESolver import (ConformalStormerVerlet, ConformalImplicitMidpoint, 
                       DiscreteGradient)
 from ReduceMechSystem import ReduceMechSystem, HamiltonianReducer, DiscreteGradientReducer
@@ -111,6 +109,71 @@ class ReducedSolverMixin:
         """Reconstruct full-order state from reduced coordinates: y_full = basis.reconstruct(y)."""
         return self.basis.reconstruct(y)
 
+    def reproject_to_manifold(self, y_red):
+        """
+        Reproject reduced state y_red = [q_r, p_r] onto the constraint manifold.
+        Eliminates position and velocity constraint jumps at traveling window
+        transitions caused by changing the projection basis subspace.
+        """
+        if not getattr(self, 'constraint_type', None):
+            return y_red
+
+        g_fn = getattr(self, 'g_full', None) or getattr(self, 'g_', None) or getattr(self, 'g_vec', None)
+        g_prime_fn = getattr(self, 'g_prime_', None)
+        if g_fn is None or g_prime_fn is None:
+            return y_red
+
+        nosc_r = getattr(self, 'nosc_r', y_red.size // 2)
+        nosc = getattr(self, 'nosc', None)
+        if nosc is None:
+            return y_red
+
+        if hasattr(self, 'RB') and self.RB is not None:
+            V = self.RB[:nosc, :nosc_r]
+        elif hasattr(self, 'basis') and hasattr(self.basis, 'V'):
+            V = self.basis.V[:nosc, :nosc_r]
+        else:
+            return y_red
+
+        q_r = y_red[:nosc_r].copy()
+        p_r = y_red[nosc_r:].copy()
+
+        # 1. Position Gauss-Newton reprojection: g(V q_r) = 0
+        for _ in range(5):
+            q_full = V @ q_r
+            y_eval = np.concatenate([q_full, np.zeros(nosc)])
+            g_all = g_fn(y_eval)
+            m = g_all.shape[0] // 2
+            g_q = g_all[:m]
+            if LA.norm(g_q) < 1e-12:
+                break
+            G_q = g_prime_fn(y_eval)[:m, :nosc]
+            G_r = G_q @ V
+            try:
+                delta_lambda = LA.solve(G_r @ G_r.T, g_q)
+            except LA.LinAlgError:
+                delta_lambda = LA.lstsq(G_r @ G_r.T, g_q, rcond=None)[0]
+            q_r -= G_r.T @ delta_lambda
+
+        # 2. Velocity linear projection: G_r (p_r + delta_p_r) = 0
+        q_full = V @ q_r
+        y_eval = np.concatenate([q_full, np.zeros(nosc)])
+        m = g_fn(y_eval).shape[0] // 2
+        G_q = g_prime_fn(y_eval)[:m, :nosc]
+        G_r = G_q @ V
+        Gp = G_r @ p_r
+        if LA.norm(Gp) > 1e-12:
+            try:
+                delta_lambda_p = LA.solve(G_r @ G_r.T, Gp)
+            except LA.LinAlgError:
+                delta_lambda_p = LA.lstsq(G_r @ G_r.T, Gp, rcond=None)[0]
+            p_r -= G_r.T @ delta_lambda_p
+
+        y_proj = np.empty_like(y_red)
+        y_proj[:nosc_r] = q_r
+        y_proj[nosc_r:] = p_r
+        return y_proj
+
     def init_trajectory_arrays(self):
         """Allocate state and Lagrange multiplier arrays for reduced models."""
         from System import MechSystem
@@ -175,6 +238,10 @@ class BaseSolverMixin:
     def to_full_state(self, y):
         """Reconstruct full-order state from coordinates. FOM identity mapping."""
         return self.basis.reconstruct(y)
+
+    def reproject_to_manifold(self, y):
+        """No-op on BaseSolverMixin; overridden on ReducedSolverMixin."""
+        return y
 
     def init_trajectory_arrays(self):
         """Allocate state and Lagrange multiplier arrays for FOM."""
@@ -353,6 +420,8 @@ class BaseSolverMixin:
         # Initialize initial state representation for step 0
         if _traveling:
             y_k = self.basis.reduce(self.y_full[0])
+            y_k = self.reproject_to_manifold(y_k)
+            self.y_full[0] = self.to_full_state(y_k)
             y_ = np.array([y_k, y_k])
         else:
             y_ = np.array([self.y[0], self.y[0]])
@@ -373,6 +442,8 @@ class BaseSolverMixin:
                         _current_window = new_window
                         _activate_window(_current_window, k=k)
                         y_k = self.basis.reduce(self.y_full[k])
+                        y_k = self.reproject_to_manifold(y_k)
+                        self.y_full[k] = self.to_full_state(y_k)
                         y_ = np.array([y_k, y_k])
                     elif k > 0:
                         y_ = np.array([y_[1], y_[1]])
@@ -408,52 +479,104 @@ class BaseSolverMixin:
     def compute_sym_error(self):
         """Compute time-series symplectic error."""
         if getattr(self, 'var', False):
-            if hasattr(self, 'RB'):
-                y = getattr(self, 'y_red', None)
-                if y is None and hasattr(self, 'y') and self.y is not None:
-                    if hasattr(self, 'RB_windows') and self.RB_windows:
-                        y = self.y @ self.RB_windows[0]
-                        self.y_red = y
-                    elif self.RB is not None:
-                        y = self.y @ self.RB
-                        self.y_red = y
-                val_rb = getattr(self, 'RB_windows', None)
-                if isinstance(val_rb, (list, tuple)) and len(val_rb) > 0 and val_rb[0] is not None:
-                    self.RB = val_rb[0]
-                    val_nr = getattr(self, 'nosc_r_windows', None)
-                    if isinstance(val_nr, (list, tuple)) and len(val_nr) > 0 and val_nr[0] is not None:
-                        self.nosc_r = val_nr[0]
-                    val = getattr(self, 'ham_z_deim_windows', None)
-                    if isinstance(val, (list, tuple)) and len(val) > 0 and val[0] is not None:
-                        self.ham_z_deim = val[0]
-                    val = getattr(self, 'ham_zz_mdeim_windows', None)
-                    if isinstance(val, (list, tuple)) and len(val) > 0 and val[0] is not None:
-                        self.ham_zz_mdeim = val[0]
-                    val = getattr(self, 'deim_field_windows', None)
-                    if isinstance(val, (list, tuple)) and len(val) > 0 and val[0] is not None:
-                        self.deim_field = val[0]
-                    val = getattr(self, 'mdeim_Hessian_windows', None)
-                    if isinstance(val, (list, tuple)) and len(val) > 0 and val[0] is not None:
-                        self.mdeim_Hessian = val[0]
-                    val = getattr(self, 'lag_dg_deim_windows', None)
-                    if isinstance(val, (list, tuple)) and len(val) > 0 and val[0] is not None:
-                        self.lag_dg_deim = val[0]
-                from System import MechSystem as _MS
-                if getattr(self, 'nosc_r', None) is None and getattr(self, 'RB', None) is not None:
-                    self.nosc_r = self.RB.shape[1] // 2
-                if getattr(self, 'nosc_r', None) is not None:
+            from System import MechSystem as _MS
+            _traveling = (
+                hasattr(self, 'RB_windows') and
+                self.RB_windows is not None and
+                len(self.RB_windows) >= 1
+            )
+            if _traveling and hasattr(self, 'y') and self.y is not None:
+                try:
+                    n_windows = len(self.RB_windows)
+                    boundary_fracs = getattr(self, '_boundary_fracs', None)
+                    if boundary_fracs is None or len(boundary_fracs) != n_windows + 1:
+                        boundary_fracs = np.linspace(0.0, 1.0, n_windows + 1)
+                    n_steps = len(self.y) - 1
+                    step_boundaries = [int(round(f * n_steps)) for f in boundary_fracs]
+                    step_boundaries[0] = 0
+                    step_boundaries[-1] = n_steps
+
+                    window_sym_errors = []
+                    for w in range(min(n_windows, len(step_boundaries) - 1)):
+                        k_start = step_boundaries[w]
+                        k_end = step_boundaries[w + 1]
+                        if k_end <= k_start:
+                            continue
+
+                        # Activate window basis and hyperreduction operators
+                        self.basis = self.RB_windows[w]
+                        self.nosc_r = self.nosc_r_windows[w] if hasattr(self, 'nosc_r_windows') else self.RB_windows[w].shape[1] // 2
+                        self.neq = 2 * self.nosc_r
+                        self.JJ = _MS.compute_J(self.nosc_r)
+                        self.JJ_r = self.JJ
+                        self.J_mat = self.JJ
+                        self.I_mat = np.eye(self.neq)
+                        self.I_mat_norm = LA.norm(self.I_mat)
+                        self.Ecoeff_dt_inv = self.Ecoeff(self.dt)**4
+
+                        for attr in ('deim_field', 'ham_z_deim', 'ham_zz_mdeim', 'mdeim_Hessian', 'lag_dg_deim', 'lag_dg_z_mdeim'):
+                            w_list = getattr(self, attr + '_windows', None)
+                            if isinstance(w_list, (list, tuple)) and len(w_list) > w and w_list[w] is not None:
+                                setattr(self, attr, w_list[w])
+
+                        u_w = self.basis.reduce(self.y[k_start:k_end + 1])
+                        orig_t_points = getattr(self, 't_points', None)
+                        self.t_points = np.arange(len(u_w)) * self.dt
+                        try:
+                            errs_w = self.var_solve(u_w)
+                        finally:
+                            if orig_t_points is not None:
+                                self.t_points = orig_t_points
+
+                        if w == 0:
+                            window_sym_errors.append(errs_w)
+                        else:
+                            window_sym_errors.append(errs_w[1:])
+
+                    self.sym_error = np.concatenate(window_sym_errors) if window_sym_errors else None
+
+                    # Restore window 0 as default state
+                    self.basis = self.RB_windows[0]
+                    self.nosc_r = self.nosc_r_windows[0] if hasattr(self, 'nosc_r_windows') else self.RB_windows[0].shape[1] // 2
+                    self.neq = 2 * self.nosc_r
                     self.JJ = _MS.compute_J(self.nosc_r)
                     self.JJ_r = self.JJ
-            else:
-                y = getattr(self, 'y', None)
-
-            if y is not None:
-                try:
-                    self.sym_error = self.var_solve(y)
+                    self.J_mat = self.JJ
+                    self.I_mat = np.eye(self.neq)
+                    self.I_mat_norm = LA.norm(self.I_mat)
+                    for attr in ('deim_field', 'ham_z_deim', 'ham_zz_mdeim', 'mdeim_Hessian', 'lag_dg_deim', 'lag_dg_z_mdeim'):
+                        w_list = getattr(self, attr + '_windows', None)
+                        if isinstance(w_list, (list, tuple)) and len(w_list) > 0 and w_list[0] is not None:
+                            setattr(self, attr, w_list[0])
                 except Exception:
                     self.sym_error = None
             else:
-                self.sym_error = None
+                if hasattr(self, 'RB') and self.RB is not None:
+                    self.basis = self.RB
+                    if getattr(self, 'nosc_r', None) is None:
+                        self.nosc_r = self.RB.shape[1] // 2
+                    self.neq = 2 * self.nosc_r
+                    self.JJ = _MS.compute_J(self.nosc_r)
+                    self.JJ_r = self.JJ
+                    self.J_mat = self.JJ
+                    self.I_mat = np.eye(self.neq)
+                    self.I_mat_norm = LA.norm(self.I_mat)
+                    self.Ecoeff_dt_inv = self.Ecoeff(self.dt)**4
+
+                    y = getattr(self, 'y_red', None)
+                    if y is None and hasattr(self, 'y') and self.y is not None:
+                        y = self.basis.reduce(self.y)
+                        self.y_red = y
+                else:
+                    y = getattr(self, 'y', None)
+
+                if y is not None:
+                    try:
+                        self.sym_error = self.var_solve(y)
+                    except Exception:
+                        self.sym_error = None
+                else:
+                    self.sym_error = None
         else:
             self.sym_error = None
 

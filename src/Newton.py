@@ -116,21 +116,3 @@ def fixed_point(g, x, dgdx, tol, M, Lambda):
         m += 1
         
     raise RuntimeError("Nonlinear solver did not converge")
-
-#%% Testing
-if __name__ == "__main__":
-    
-    # Test Newton's method
-    f = lambda x: x**2 - 2
-    dfdx = lambda x: 2*x
-    x, n, info = Newton(f, 1, dfdx, store=True)
-    print("Root of x^2 - 2: ", x)
-    print("Number of iterations: ", n)
-    print("Iteration history: ", info)
-    
-    # Test fixed point iteration
-    g = lambda x: x**2 - 2
-    dgdx = lambda x: 2*x
-    x = [1, 1]
-    fixed_point(g, x, dgdx, 1.0E-7, 100, store=True)
-    print("Fixed point of x^2 - 2: ", x)

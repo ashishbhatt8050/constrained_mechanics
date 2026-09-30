@@ -21,7 +21,6 @@ Adapted from https://github.com/jbmouret/matplotlib_for_papers
 """
 
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from matplotlib.ticker import MaxNLocator, LogLocator
@@ -875,9 +874,8 @@ def edit_figure_later(filename=None):
 # Convenience aliases
 edit_figure = edit_figure_later
 edit_saved_figure = edit_figure_later
-    # figx.savefig("data/2025-12-20_12-43_/osc_ConformalStormerVerletSolver_full_2.eps")
 
-# %%
+
 def tex_table(solver_name, array2print):
     """
     Print a table in LaTeX format.
@@ -1320,29 +1318,35 @@ _PLOT_METRICS = [
 ]
 
 
-def _plot_metric_panel(ax, metric_data, i, j, marker, color, ms, all_y_values):
+def _plot_metric_panel(ax, metric_data, i, j, marker, color, ms, all_y_values, x_pos=None):
     """Plot a single metric marker on *ax* if *metric_data* is valid."""
+    if x_pos is None:
+        x_pos = i
     if metric_data is not None and len(metric_data) > i and len(metric_data[i]) > j:
         arr = metric_data[i][j]
         if isinstance(arr, np.ndarray) and arr.size > 0:
             val = np.nanmean(np.nanmean(arr, axis=1))
             val_plot = max(abs(val), 1e-16) if np.isfinite(val) else val
-            ax.semilogy([i], [val_plot], marker=marker, color=color,
+            ax.semilogy([x_pos], [val_plot], marker=marker, color=color,
                         linestyle='None', markersize=ms,
-                        markerfacecolor=color, markeredgecolor=color)
+                        markerfacecolor=color, markeredgecolor=color, zorder=3)
             all_y_values.append(val_plot)
 
 
-def _plot_speedup_panel(ax, times_raw, i, j, marker, color, avg_full, all_y_values):
+def _plot_speedup_panel(ax, times_raw, i, j, marker, color, avg_full, all_y_values, x_pos=None):
     """Plot a speedup marker on *ax* if timing data is valid."""
+    if x_pos is None:
+        x_pos = i
     if len(times_raw) > i and len(times_raw[i]) > j:
         t_arr = times_raw[i][j]
         if isinstance(t_arr, np.ndarray) and t_arr.size > 0 and avg_full is not None:
             speedup = np.nanmean(avg_full / np.nanmean(t_arr, axis=1))
-            ax.plot([i], [speedup], marker=marker, color=color,
+            ax.plot([x_pos], [speedup], marker=marker, color=color,
                     linestyle='None', markersize=9,
-                    markerfacecolor=color, markeredgecolor=color)
+                    markerfacecolor=color, markeredgecolor=color, zorder=3)
             all_y_values.append(speedup)
+            return speedup
+    return None
 
 
 def plot_prediction_results(solver_names, pod_tols, dt_space, data_folder,
@@ -1428,50 +1432,73 @@ def plot_prediction_results(solver_names, pod_tols, dt_space, data_folder,
         'ang_mom': {'f': _reorder(ang_mom_error_f), 'r': _reorder(ang_mom_error_r), 'hr': _reorder(ang_mom_error_hr)},
     }
 
-    fig, axes = plt.subplots(2, 3, figsize=(28, 18.6))
-    ax_fom = axes[0, 0]
-    ax_sym_r = axes[0, 1]
-    ax_sym_hr = axes[0, 2]
-    ax_speed_r = axes[1, 1]
-    ax_speed_hr = axes[1, 2]
-    axes[1, 0].axis('off')
+    fig, (ax_err, ax_spd) = plt.subplots(1, 2, figsize=(18, 7.5))
 
-    # Assign axes to groups
-    _error_groups['f']['ax'] = ax_fom
-    _error_groups['r']['ax'] = ax_sym_r
-    _error_groups['hr']['ax'] = ax_sym_hr
+    tier_keys = ['f', 'r', 'hr']
+    tier_labels = {'f': 'FOM', 'r': 'ROM', 'hr': 'HROM'}
+    tier_offsets = {'f': -0.22, 'r': 0.0, 'hr': 0.22}
 
-    # Populate data dicts
+    # Group all error metrics by model level for data-driven plotting
+    _error_groups = {
+        'f':  {'data': {}},
+        'r':  {'data': {}},
+        'hr': {'data': {}},
+    }
     for suffix, levels in _metric_data.items():
-        for level in ('f', 'r', 'hr'):
+        for level in tier_keys:
             _error_groups[level]['data'][suffix] = levels[level]
 
     marker_map = {tol: m for tol, m in zip(pod_tols, ['o', 's', '^', 'D', 'v', '<', '>', 'p', 'h', '*'])}
     metric_marker_map = {suffix: (m, ms) for suffix, m, _, ms in _PLOT_METRICS}
     solver_colors = OKABE_ITO_PALETTE
 
-    all_y_values_speed_r = []
-    all_y_values_speed_hr = []
+    all_y_values_err = []
+    all_y_values_spd = [1.0]
 
     for i, name in enumerate(solver_names):
         color = solver_colors[i % len(solver_colors)]
         full_time = full_times_raw.get(name)
         avg_full = np.nanmean(full_time, axis=1) if isinstance(full_time, np.ndarray) else None
 
+        # Draw vertical platform spines for all three tiers
+        for level in tier_keys:
+            x_pos = i + tier_offsets[level]
+            ax_err.axvline(x=x_pos, color='0.88', linestyle='-', linewidth=1.5, zorder=1)
+            ax_spd.axvline(x=x_pos, color='0.88', linestyle='-', linewidth=1.5, zorder=1)
+
         for j, tol in enumerate(pod_tols):
-            marker = marker_map[tol]
-
-            # --- Error panels (FOM, ROM, HROM) ---
-            for level, group in _error_groups.items():
+            # --- Error markers on vertical platforms ---
+            for level in tier_keys:
+                x_pos = i + tier_offsets[level]
                 for suffix, (mkr, ms) in metric_marker_map.items():
-                    _plot_metric_panel(group['ax'], group['data'].get(suffix),
-                                       i, j, mkr, color, ms, group['y_vals'])
+                    _plot_metric_panel(ax_err, _error_groups[level]['data'].get(suffix),
+                                       i, j, mkr, color, ms, all_y_values_err, x_pos=x_pos)
 
-            # --- Speedup panels ---
-            _plot_speedup_panel(ax_speed_r, times_r_raw, i, j, marker, color,
-                                avg_full, all_y_values_speed_r)
-            _plot_speedup_panel(ax_speed_hr, times_hr_raw, i, j, marker, color,
-                                avg_full, all_y_values_speed_hr)
+            # --- Speedup markers on vertical platforms ---
+            x_fom = i + tier_offsets['f']
+            x_rom = i + tier_offsets['r']
+            x_hrom = i + tier_offsets['hr']
+
+            # FOM reference speedup is 1.0x
+            ax_spd.plot([x_fom], [1.0], marker='o', color=color, markersize=9, zorder=3)
+            all_y_values_spd.append(1.0)
+
+            sp_r = _plot_speedup_panel(ax_spd, times_r_raw, i, j, 'o', color,
+                                       avg_full, all_y_values_spd, x_pos=x_rom)
+            sp_hr = _plot_speedup_panel(ax_spd, times_hr_raw, i, j, 'o', color,
+                                        avg_full, all_y_values_spd, x_pos=x_hrom)
+
+            # Connect speedup points with dashed line
+            pts_x = [x_fom]
+            pts_y = [1.0]
+            if sp_r is not None and np.isfinite(sp_r):
+                pts_x.append(x_rom)
+                pts_y.append(sp_r)
+            if sp_hr is not None and np.isfinite(sp_hr):
+                pts_x.append(x_hrom)
+                pts_y.append(sp_hr)
+            if len(pts_x) > 1:
+                ax_spd.plot(pts_x, pts_y, color=color, linestyle='--', linewidth=1.5, alpha=0.7, zorder=2)
 
     # Legend handles for the five error metrics
     error_legend_handles = [
@@ -1480,50 +1507,50 @@ def plot_prediction_results(solver_names, pod_tols, dt_space, data_folder,
         for _, m, label, ms in _PLOT_METRICS
     ]
 
-    for ax in [ax_fom, ax_sym_r, ax_sym_hr, ax_speed_r, ax_speed_hr]:
+    n_solvers = len(solver_names)
+    for ax in [ax_err, ax_spd]:
         configure_axis(ax)
-        ax.tick_params(axis='both', labelsize=22)
-        n_solvers = len(solver_names)
-        ax.set_xlim(-0.5, max(0.5, n_solvers - 0.5))
-        ax.set_xticks(list(range(n_solvers)))
-        # Build tick labels from solver_names
-        tick_labels = []
-        for sn in solver_names:
+        ax.tick_params(axis='both', labelsize=12)
+        ax.set_xlim(-0.55, max(0.55, n_solvers - 0.45))
+
+        # Build sub-ticks for FOM, ROM, HROM
+        sub_ticks = []
+        sub_labels = []
+        for i_s in range(n_solvers):
+            for level in tier_keys:
+                sub_ticks.append(i_s + tier_offsets[level])
+                sub_labels.append(tier_labels[level])
+        ax.set_xticks(sub_ticks)
+        ax.set_xticklabels(sub_labels, fontsize=12)
+
+        # Place model labels centered beneath each group
+        for i_s, sn in enumerate(solver_names):
             if 'StormerVerlet' in sn:
-                tick_labels.append('Model 1' if n_solvers > 1 else 'Stormer-Verlet')
+                m_label = 'Model 1\n(Stormer-Verlet)' if n_solvers > 1 else 'Stormer-Verlet'
             elif 'DiscreteGradient' in sn:
-                tick_labels.append('Model 2' if n_solvers > 1 else 'Discrete Gradient')
+                m_label = 'Model 2\n(Discrete Gradient)' if n_solvers > 1 else 'Discrete Gradient'
             else:
-                tick_labels.append(sn)
-        ax.set_xticklabels(tick_labels)
-        ax.grid(True, which='both', ls='-', alpha=0.2)
+                m_label = sn
+            ax.text(i_s, -0.15, m_label, ha='center', va='top', fontsize=14, fontweight='bold',
+                    transform=ax.get_xaxis_transform())
 
-    ax_fom.set_title('FOM error metrics')
-    ax_sym_r.set_title('ROM error metrics')
-    ax_sym_hr.set_title('HROM error metrics')
-    ax_fom.set_ylabel('Mean error magnitude')
-    ax_sym_r.set_ylabel('Mean error magnitude')
-    ax_speed_r.set_ylabel('Mean speedup factor')
-    ax_speed_r.axhline(1.0, color='black', linestyle='--', alpha=0.5)
-    ax_speed_hr.axhline(1.0, color='black', linestyle='--', alpha=0.5)
+    ax_err.set_title('Mean Invariant Error Magnitude', fontsize=16, pad=12)
+    ax_err.set_ylabel('Mean error magnitude', fontsize=14)
 
-    adjust_axis_limits(ax_fom, _error_groups['f']['y_vals'], axis='y', is_log_scale=True, max_steps=10)
-    adjust_axis_limits(ax_sym_r, _error_groups['r']['y_vals'], axis='y', is_log_scale=True, max_steps=10)
-    adjust_axis_limits(ax_sym_hr, _error_groups['hr']['y_vals'], axis='y', is_log_scale=True, max_steps=10)
-    adjust_axis_limits(ax_speed_r, all_y_values_speed_r, axis='y', is_log_scale=False, max_steps=10)
-    adjust_axis_limits(ax_speed_hr, all_y_values_speed_hr, axis='y', is_log_scale=False, max_steps=10)
+    ax_spd.set_title('Mean Speedup Factor', fontsize=16, pad=12)
+    ax_spd.set_ylabel('Mean speedup factor', fontsize=14)
+    ax_spd.axhline(1.0, color='black', linestyle=':', linewidth=1.2, alpha=0.7, zorder=1)
 
-    fig.legend(handles=error_legend_handles, title='Error', loc='upper left',
-               bbox_to_anchor=(0.95, 0.90), bbox_transform=fig.transFigure,
-               fontsize=13, title_fontsize=15, frameon=True)
+    adjust_axis_limits(ax_err, all_y_values_err, axis='y', is_log_scale=True, max_steps=10)
+    adjust_axis_limits(ax_spd, all_y_values_spd, axis='y', is_log_scale=False, max_steps=10)
 
-    plt.subplots_adjust(right=0.78, hspace=0.35, wspace=0.25)
+    ax_err.legend(handles=error_legend_handles, title='Invariant Error', loc='upper left',
+                  fontsize=11, title_fontsize=12, frameon=True)
+
+    plt.tight_layout()
+    fig.subplots_adjust(bottom=0.20)
     filename = os.path.join(data_folder, 'prediction_results.pdf')
     save_figure(fig, filename)
     print(f"Saved Prediction Results plot to {filename}")
     plt.close(fig)
-
-
-if __name__ == '__main__':
-    edit_figure_later()
 

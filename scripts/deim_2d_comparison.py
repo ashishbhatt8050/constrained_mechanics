@@ -214,29 +214,6 @@ def print_results():
     # Context lines
     print(f"All times are averages over {len(mu_test_vals)} runs.")
 
-if __name__ == '__main__':
-    print_results()
-
-#%% Plot sample function and DEIM approximation
-mu_plot = np.random.uniform(-1, -0.01, size=(2,))
-f_sample = f(mu_plot)
-
-# Surface plot sample function
-fig = plt.figure(figsize=(8, 6))
-ax = fig.add_subplot(111, projection='3d')
-ax.plot_surface(xx, yy, f_sample.reshape((nx, ny)), cmap='viridis')
-ax.set_title(f'Sample Function (mu={mu_plot})')
-ax.set_xlabel('x')
-ax.set_ylabel('y')
-ax.set_zlabel('f(x, y)')
-plt.show()
-
-# Get approximations for plotting
-f_deim_greedy_num, _ = run_deim(U_deim, greedy_indices, mu_plot, method='numerical')
-f_deim_qdeim_num, _ = run_deim(U_deim, qdeim_indices_vals, mu_plot, method='numerical')
-f_deim_greedy_sym, _ = run_deim(U_deim, greedy_indices, mu_plot, method='symbolic', deim_func=greedy_deim_func)
-f_deim_qdeim_sym, _ = run_deim(U_deim, qdeim_indices_vals, mu_plot, method='symbolic', deim_func=qdeim_deim_func)
-
 def plot_comparison(f_true_flat, f_approx_flat, title):
     f_true = f_true_flat.reshape((nx, ny))
     f_approx = f_approx_flat.reshape((nx, ny))
@@ -279,9 +256,35 @@ def plot_comparison(f_true_flat, f_approx_flat, title):
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.show()
 
-plot_comparison(f_sample, f_deim_greedy_num, f'Greedy (Numerical) ($\mu$={mu_plot})')
-plot_comparison(f_sample, f_deim_qdeim_num, f'QDEIM (Numerical) ($\mu$={mu_plot})')
-plot_comparison(f_sample, f_deim_greedy_sym, f'Greedy ($\mu$={mu_plot})')
-plot_comparison(f_sample, f_deim_qdeim_sym, f'QDEIM ($\mu$={mu_plot})')
 
-# %%
+def demo_2d_approximations():
+    """Plot sample 2D function and DEIM approximations."""
+    mu_plot = np.random.uniform(-1, -0.01, size=(2,))
+    f_sample = f(mu_plot)
+
+    # Surface plot sample function
+    fig = plt.figure(figsize=(8, 6))
+    ax = fig.add_subplot(111, projection='3d')
+    ax.plot_surface(xx, yy, f_sample.reshape((nx, ny)), cmap='viridis')
+    ax.set_title(f'Sample Function (mu={mu_plot})')
+    ax.set_xlabel('x')
+    ax.set_ylabel('y')
+    ax.set_zlabel('f(x, y)')
+    plt.show()
+
+    # Get approximations for plotting
+    f_deim_greedy_num, _ = run_deim(U_deim, greedy_indices, mu_plot, method='numerical')
+    f_deim_qdeim_num, _ = run_deim(U_deim, qdeim_indices_vals, mu_plot, method='numerical')
+    f_deim_greedy_sym, _ = run_deim(U_deim, greedy_indices, mu_plot, method='symbolic', deim_func=greedy_deim_func)
+    f_deim_qdeim_sym, _ = run_deim(U_deim, qdeim_indices_vals, mu_plot, method='symbolic', deim_func=qdeim_deim_func)
+
+    plot_comparison(f_sample, f_deim_greedy_num, rf'Greedy (Numerical) ($\mu$={mu_plot})')
+    plot_comparison(f_sample, f_deim_qdeim_num, rf'QDEIM (Numerical) ($\mu$={mu_plot})')
+    plot_comparison(f_sample, f_deim_greedy_sym, rf'Greedy ($\mu$={mu_plot})')
+    plot_comparison(f_sample, f_deim_qdeim_sym, rf'QDEIM ($\mu$={mu_plot})')
+
+
+if __name__ == '__main__':
+    print_results()
+    demo_2d_approximations()
+

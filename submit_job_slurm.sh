@@ -106,6 +106,21 @@ ulimit -s unlimited
 export SLURM_CPU_BIND=none
 export MALLOC_TRIM_THRESHOLD_=65536
 
+# Compute workers configuration for Dask LocalCluster & task batching.
+# Default: 30 workers (reserves 2 cores on 32-core node for Dask scheduler/driver/OS to prevent latency).
+# Override externally via: COMPUTE_WORKERS=32 sbatch submit_job_slurm.sh
+export COMPUTE_WORKERS="${COMPUTE_WORKERS:-30}"
+export DASK_NUM_WORKERS="${COMPUTE_WORKERS}"
+
+# Parameter space batch waves (full worker passes, floats supported):
+# Setting 1 and 0.5 configures a fast pilot run:
+# With 30 workers:
+#   OMEGA2_TRAIN_WAVES=1   -> 1 * 30 = 30 training samples (split_idx)
+#   OMEGA2_TEST_WAVES=0.5  -> 0.5 * 30 = 15 test samples (2*15=30 tasks, exactly 1 worker wave!)
+# For full production run: OMEGA2_TRAIN_WAVES=4 OMEGA2_TEST_WAVES=2 sbatch submit_job_slurm.sh
+export OMEGA2_TRAIN_WAVES="${OMEGA2_TRAIN_WAVES:-4}"
+export OMEGA2_TEST_WAVES="${OMEGA2_TEST_WAVES:-2}"
+
 # Local scratch directory setup for fast compute node NVMe I/O
 LOCAL_SCRATCH="${SLURM_TMPDIR:-/tmp/constrained_mechanics_${SLURM_JOB_ID:-$$}}"
 mkdir -p "$LOCAL_SCRATCH"
@@ -184,7 +199,9 @@ try:
         real, user, sys_t = times['real'], times['user'], times['sys']
         total_cpu = user + sys_t
         eff = total_cpu / real if real > 0 else 0.0
-        util = (eff / 32.0) * 100.0
+        import os
+        total_cpus = float(os.environ.get('COMPUTE_WORKERS', os.environ.get('SLURM_CPUS_PER_TASK', 32)))
+        util = (eff / total_cpus) * 100.0
 
         summary = f"""
 ========== EXECUTION TIME SUMMARY ==========
@@ -194,7 +211,7 @@ System CPU time:            {fmt(sys_t)}
 Total CPU time:             {fmt(total_cpu)}
 ========== PARALLELIZATION EFFICIENCY ==========
 Parallelization efficiency: {eff:.2f}x
-Core utilization:           {util:.1f}% of 32 CPUs
+Core utilization:           {util:.1f}% of {int(total_cpus)} CPUs
 ============================================
 """
         print(summary)

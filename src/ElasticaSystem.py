@@ -2,14 +2,12 @@
 # -*- coding: utf-8 -*-
 
 import os
-import hashlib
-import json
 import numpy as np
 from datetime import datetime
 
 from System import (SysConfig, MechSystem, HamiltonianMechSystem,
                     ReducedHamiltonianMechSystem, HyperReducedHamiltonianMechSystem,
-                    get_data_dir, fast_load, fast_dump, check_checkpoint_exists)
+                    get_data_dir, fast_load)
 from ConcreteSolvers import (BaseSolverMixin, ReducedSolverMixin, HyperReducedSolverMixin,
                              ConformalStormerVerletFixedPointMixin,
                              ConformalStormerVerlet, REDUCED_SOLVER_MAPPING,

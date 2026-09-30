@@ -11,9 +11,8 @@ Pythonic trailing-axis convention:
 """
 
 from __future__ import annotations
-from typing import Sequence, Any, Union
+from typing import Sequence, Any
 import numpy as np
-from numpy import linalg as LA
 
 
 class Basis:
@@ -109,7 +108,7 @@ class Basis:
     def project_matrix(self, A: np.ndarray) -> np.ndarray:
         """
         Galerkin projection of an operator: A_r = V.T @ A @ V.
-        Supports dense arrays, scipy.sparse matrices, and linear operators.
+        Supports dense arrays, SparseBasis operators, scipy.sparse matrices, and linear operators.
         """
         if hasattr(A, 'dot') and not isinstance(A, np.ndarray):
             return self.VT @ A.dot(self.V)
@@ -430,6 +429,134 @@ class DEIMProjector:
         self.indices = np.asarray(state['indices']) if state.get('indices') is not None else None
         self.name = state.get('name', 'deim_projector')
         self.metadata = state.get('metadata', {})
+
+
+class SparseBasis:
+    """
+    Lightweight sparse basis operator for Matrix-DEIM (MDEIM).
+
+    Represents a sparse basis matrix B in R^{F x m} where only a subset
+    of rows (specified by non_zero_indices) are non-zero with values B_hat in R^{S x m}.
+
+    Computes matrix-vector and matrix-matrix products natively in NumPy via BLAS:
+        y = B @ v
+    evaluating (B_hat @ v) on the non-zero rows and embedding directly into R^F,
+    avoiding the memory and computational overhead of full COO/CSR matrix structures.
+
+    Attributes
+    ----------
+    B_hat : np.ndarray
+        Compact submatrix of non-zero rows, shape (S, m).
+    non_zero_indices : np.ndarray
+        1D array of row indices in the full matrix corresponding to rows of B_hat.
+    full_rows : int
+        Number of rows in the full flattened matrix F.
+    shape : tuple[int, int]
+        Virtual shape of the full sparse basis (full_rows, m).
+    """
+
+    __array_priority__ = 1000
+    __array_ufunc__ = None
+
+    def __init__(self, B_hat: np.ndarray, non_zero_indices: np.ndarray | Sequence[int],
+                 full_rows: int, name: str = "sparse_basis", metadata: dict | None = None):
+        self.B_hat = np.asarray(B_hat, dtype=np.float64)
+        self.non_zero_indices = np.asarray(non_zero_indices, dtype=np.int64)
+        if self.B_hat.ndim != 2:
+            raise ValueError(f"B_hat must be 2D, got shape {self.B_hat.shape}")
+        if self.non_zero_indices.ndim != 1:
+            raise ValueError(f"non_zero_indices must be 1D, got shape {self.non_zero_indices.shape}")
+        if len(self.non_zero_indices) != self.B_hat.shape[0]:
+            raise ValueError(
+                f"Length of non_zero_indices ({len(self.non_zero_indices)}) must match "
+                f"rows of B_hat ({self.B_hat.shape[0]})"
+            )
+        self.full_rows = int(full_rows)
+        self.shape = (self.full_rows, self.B_hat.shape[1])
+        self.name = name
+        self.metadata = metadata if metadata is not None else {}
+
+    @property
+    def ndim(self) -> int:
+        return 2
+
+    @property
+    def dtype(self):
+        return self.B_hat.dtype
+
+    def dot(self, other: np.ndarray) -> np.ndarray:
+        """Matrix-vector or matrix-matrix multiplication: B @ other."""
+        return self.__matmul__(other)
+
+    def __matmul__(self, other: np.ndarray) -> np.ndarray:
+        """
+        Evaluate B @ other.
+        Supports 1D vector (m,) -> (F,) and 2D matrix (m, k) -> (F, k).
+        """
+        other_arr = np.asarray(other)
+        sub_prod = self.B_hat @ other_arr
+        if sub_prod.ndim == 1:
+            out = np.zeros(self.full_rows, dtype=sub_prod.dtype)
+            out[self.non_zero_indices] = sub_prod
+            return out
+        elif sub_prod.ndim == 2:
+            out = np.zeros((self.full_rows, sub_prod.shape[1]), dtype=sub_prod.dtype)
+            out[self.non_zero_indices, :] = sub_prod
+            return out
+        else:
+            raise ValueError(f"Unsupported operand dimensions: {sub_prod.shape}")
+
+    def __rmatmul__(self, other: np.ndarray) -> np.ndarray:
+        """Evaluate other @ B where other has trailing dimension matching full_rows."""
+        other_arr = np.asarray(other)
+        return other_arr[..., self.non_zero_indices] @ self.B_hat
+
+    @property
+    def T(self) -> _TransposedSparseBasis:
+        """Transposed sparse basis operator."""
+        return _TransposedSparseBasis(self)
+
+    def __repr__(self) -> str:
+        return (f"SparseBasis(name='{self.name}', full_rows={self.full_rows}, "
+                f"reduced_cols={self.shape[1]}, non_zeros={len(self.non_zero_indices)})")
+
+    def __getstate__(self) -> dict:
+        return {
+            'B_hat': self.B_hat,
+            'non_zero_indices': self.non_zero_indices,
+            'full_rows': self.full_rows,
+            'name': self.name,
+            'metadata': self.metadata
+        }
+
+    def __setstate__(self, state: dict) -> None:
+        self.B_hat = np.asarray(state['B_hat'])
+        self.non_zero_indices = np.asarray(state['non_zero_indices'])
+        self.full_rows = state['full_rows']
+        self.shape = (self.full_rows, self.B_hat.shape[1])
+        self.name = state.get('name', 'sparse_basis')
+        self.metadata = state.get('metadata', {})
+
+
+class _TransposedSparseBasis:
+    """Helper for transposed SparseBasis operations."""
+    __array_priority__ = 1000
+    __array_ufunc__ = None
+
+    def __init__(self, parent: SparseBasis):
+        self.parent = parent
+        self.shape = (parent.shape[1], parent.shape[0])
+
+    def __matmul__(self, other: np.ndarray) -> np.ndarray:
+        other_arr = np.asarray(other)
+        return self.parent.B_hat.T @ other_arr[..., self.parent.non_zero_indices]
+
+    def dot(self, other: np.ndarray) -> np.ndarray:
+        return self.__matmul__(other)
+
+    @property
+    def T(self) -> SparseBasis:
+        return self.parent
 
 
 def as_basis(obj: Any, default_dim: int | None = None) -> Basis | IdentityBasis:

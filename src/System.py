@@ -5,22 +5,17 @@
 """
 
 import os
-import sys
 import cloudpickle as pickle
-import pickle as std_pickle
 import lz4.frame
-from functools import wraps
 from datetime import datetime
 import hashlib
 import json
 
 # Third-party imports
 import numpy as np
-import sympy as smp
 
 # Local imports
-from PlotScript import timing
-from Reduction import Basis, IdentityBasis, SymplecticBasis, TravelingBasis, DEIMProjector, as_basis
+from Reduction import Basis, IdentityBasis, as_basis
 
 # get numpy random seed value
 rng = np.random.default_rng(
@@ -129,7 +124,7 @@ def check_checkpoint_exists(checkpoint_path, *files):
 
     return False
 
-# %%
+
 def load_symbolic_expressions(cls, expressions_file=None):
     """Decorator or function to handle loading/saving of symbolic expressions"""
     try:
@@ -199,7 +194,7 @@ class SysConfig:
     hyperreducer = 'MDEIM'
     constraint_type = 'spherical'
     constraints_reduce = False # True = hyper-reduce constraints, False = reduce constraints
-    use_mdeim_hessian = False # False = compute Hessian directly from full Hessian projected onto RB
+    use_mdeim_hessian = True # False = compute Hessian directly from full Hessian projected onto RB
 
     # MDEIM snapshot sampling settings (subsamples Hessian/Jacobian snapshots across FOM solves)
     mdeim_max_snapshots_per_solver = int(1e2)  # Maximum snapshots sampled per solver trajectory for MDEIM
@@ -213,6 +208,8 @@ class SysConfig:
     n_windows = None                          # None = unbounded (physics-driven), 1 = disabled, >1 = window cap
     grassmann_cos_threshold = 0.8988          # cos(26°) — misalignment trigger angle
     rolling_frac = 0.05                       # Fraction of reference snapshots per rolling step
+    max_traveling_enrichment = 4              # Max local POD modes to add per window (caps basis bloat)
+    max_nosc_r = 150                          # Hard ceiling on reduced position coordinates per window
     
     # System parameters
     nosc = 54 * 10  # Number of oscillators
@@ -222,15 +219,25 @@ class SysConfig:
 
     if predict: # prediction parameters
         pod_tol_sweep = [1e-2]
-        train_ratio = 0.7
 
         # Time-stepping parameters
         dt_space_dim = 1
         dt_space = np.array([0.001])
         T_final = dt_space[-1] * 3e3
 
-        # Parameter space for Omega^2
-        _Omega2_space_dim = nosc // 3 - 2
+        # Parameter space for Omega^2:
+        # Dynamically align training split and test size to integer multiples of compute workers
+        # to ensure 100% core occupancy and eliminate idle tail stragglers during parallel solves.
+        _env_workers = os.environ.get('COMPUTE_WORKERS') or os.environ.get('DASK_NUM_WORKERS')
+        _worker_count = int(_env_workers) if _env_workers else int(os.environ.get('SLURM_CPUS_PER_TASK', 30))
+
+        omega2_train_waves = float(os.environ.get('OMEGA2_TRAIN_WAVES', 4))
+        omega2_test_waves = float(os.environ.get('OMEGA2_TEST_WAVES', 2))
+
+        split_idx = max(1, int(round(float(os.environ.get('OMEGA2_SPLIT_IDX', omega2_train_waves * _worker_count)))))
+        _test_dim = max(1, int(round(float(os.environ.get('OMEGA2_TEST_DIM', omega2_test_waves * _worker_count)))))
+        _Omega2_space_dim = split_idx + _test_dim
+        train_ratio = split_idx / _Omega2_space_dim
     else: # reproduction parameters
         pod_tol_sweep = [1e-4, 1e-6, 1e-8, 1e-10] # must be in descending order
 
@@ -241,6 +248,8 @@ class SysConfig:
 
         # Parameter space for Omega^2
         _Omega2_space_dim = 3
+        split_idx = 3
+        train_ratio = 1.0
 
     assert pod_tol_sweep == sorted(pod_tol_sweep, reverse=True), "pod_tol_sweep must be in descending order"
 
@@ -255,7 +264,7 @@ class SysConfig:
 
     # Train-test split
     if predict:
-        split_idx = int(_Omega2_space_dim * train_ratio)
+        split_idx = int(round(_Omega2_space_dim * train_ratio))
         Omega2_space, Omega2_space_test = _Omega2_space[:split_idx], _Omega2_space[split_idx:]
         
         if Omega2_space.shape[0] == 0 or Omega2_space_test.shape[0] == 0:
@@ -263,6 +272,8 @@ class SysConfig:
                              f"Total samples: {_Omega2_space_dim}, Split index: {split_idx}, Train ratio: {train_ratio}. "
                              "Adjust train_ratio or increase _Omega2_space_dim.")
     else:
+        split_idx = _Omega2_space_dim
+        train_ratio = 1.0
         Omega2_space = Omega2_space_test = _Omega2_space
 
 def make_lattice_initial_conditions(nosc):

@@ -7,8 +7,6 @@ import shutil
 import argparse
 import numpy as np
 from numpy import linalg as LA
-from pylab import linspace
-from tqdm.auto import tqdm
 from matplotlib import rc
 import matplotlib.pyplot as plt
 
@@ -25,9 +23,7 @@ from dask.distributed import Client, LocalCluster
 
 # Local application imports
 from ConcreteSolvers import (BaseSolverMixin, ConformalStormerVerletSolver,
-                            REDUCED_SOLVER_MAPPING, HYPERREDUCED_SOLVER_MAPPING,
                             _matches_solver_family)
-from ReduceMechSystem import ReduceMechSystem, HamiltonianReducer
 from System import (MechSystem, HamiltonianMechSystem, load_symbolic_expressions,
                     fast_dump, fast_load, get_data_dir, check_checkpoint_exists)
 from SymbolicComputer import manage_cache

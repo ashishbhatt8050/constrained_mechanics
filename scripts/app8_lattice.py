@@ -4,11 +4,7 @@
 import os
 import sys
 import shutil
-import subprocess
-import gc
 import argparse
-import concurrent.futures
-import multiprocessing
 
 # Set environment variables for thread control before importing numpy/scipy
 os.environ['OMP_NUM_THREADS'] = '1'
@@ -22,24 +18,17 @@ sys.setrecursionlimit(10000)
 
 # Third-party imports
 import numpy as np
-import sympy as smp
 from numpy import linalg as LA
-from scipy import linalg as scipyLA
-from pylab import log, r_, c_, sqrt, reshape, linspace, roll, figure
-import cloudpickle as pickle
-from tqdm.auto import tqdm
 from matplotlib import rc
 import matplotlib.pyplot as plt
 
 # Dask imports
-from dask.distributed import Client, wait, LocalCluster
+from dask.distributed import Client, LocalCluster
 
 # Local application imports
 from ConcreteSolvers import (BaseSolverMixin, DiscreteGradientSolver, 
-                            ConformalStormerVerletSolver, ConformalImplicitMidpointSolver,
-                            REDUCED_SOLVER_MAPPING, HYPERREDUCED_SOLVER_MAPPING,
+                            ConformalStormerVerletSolver,
                             _matches_solver_family)
-from ReduceMechSystem import ReduceMechSystem
 from System import MechSystem, HamiltonianMechSystem, LagrangianMechSystem, load_symbolic_expressions, fast_dump, fast_load, get_data_dir, get_symbolic_expressions_file, check_checkpoint_exists
 from SymbolicComputer import IndexedBaseSymbolicComputer, manage_cache
 from PlotScript import (plot_omega_distribution, plot_pareto, plot_error_vs_basis_size,
@@ -384,11 +373,19 @@ if __name__ == '__main__':
     n_workers = None
     threads_per_worker = 1
     
-    if 'SLURM_CPUS_PER_TASK' in os.environ:
+    env_workers = os.environ.get('COMPUTE_WORKERS') or os.environ.get('DASK_NUM_WORKERS')
+    if env_workers:
+        n_workers = int(env_workers)
+        allocated_cpus = int(os.environ.get('SLURM_CPUS_PER_TASK', n_workers))
+        print(f"LocalCluster: Using {n_workers} worker(s) from environment (COMPUTE_WORKERS/DASK_NUM_WORKERS; SLURM allocation={allocated_cpus}).", flush=True)
+    elif 'SLURM_CPUS_PER_TASK' in os.environ:
         allocated_cpus = int(os.environ['SLURM_CPUS_PER_TASK'])
         n_workers = allocated_cpus # Start with 1 worker per core
         print(f"LocalCluster: Detected SLURM allocation of {allocated_cpus} CPUs.", flush=True)
+    else:
+        allocated_cpus = os.cpu_count() or 1
         
+    if n_workers is not None:
         # Adjust workers based on memory to prevent OOM (aim for ~3GB/worker)
         min_mem_per_worker_mb = 3000
         total_mem_mb = None
@@ -647,14 +644,14 @@ if __name__ == '__main__':
                   MechSystem.dt_space_dim, 
                   len(MechSystem.Omega2_space_test))
 
-    time_lapsed = [reshape([x.time_lapsed[0] if x is not None else np.nan for x in solvers], array_shape_train)]
+    time_lapsed = [np.reshape([x.time_lapsed[0] if x is not None else np.nan for x in solvers], array_shape_train)]
 
     if not MechSystem.predict:
         # Calculate errors
-        errors_r = reshape([np.amax(abs(s1.y - s2.y)) if s1 is not None and s2 is not None else np.nan
+        errors_r = np.reshape([np.amax(abs(s1.y - s2.y)) if s1 is not None and s2 is not None else np.nan
             for s1, s2 in zip(solvers, solvers_r)], 
             array_shape_train)
-        errors_hr = reshape([np.amax(abs(s1.y - s2.y)) if s1 is not None and s2 is not None else np.nan
+        errors_hr = np.reshape([np.amax(abs(s1.y - s2.y)) if s1 is not None and s2 is not None else np.nan
             for s1, s2 in zip(solvers, solvers_hr)], 
             array_shape_train)
 
@@ -674,13 +671,13 @@ if __name__ == '__main__':
                     row_str += f"{val:<11.2e}"
                 print(row_str)
 
-        raw_times_r = reshape([x.time_lapsed[0] if x is not None else np.nan for x in solvers_r], array_shape_train)
-        raw_times_hr = reshape([x.time_lapsed[0] if x is not None else np.nan for x in solvers_hr], array_shape_train)
+        raw_times_r = np.reshape([x.time_lapsed[0] if x is not None else np.nan for x in solvers_r], array_shape_train)
+        raw_times_hr = np.reshape([x.time_lapsed[0] if x is not None else np.nan for x in solvers_hr], array_shape_train)
         time_lapsed.extend([raw_times_r / time_lapsed[0] * 100, raw_times_hr / time_lapsed[0] * 100])
 
     else:
-        raw_times_r = reshape([x.time_lapsed[0] if x is not None else np.nan for x in solvers_r], array_shape_test)
-        raw_times_hr = reshape([x.time_lapsed[0] if x is not None else np.nan for x in solvers_hr], array_shape_test)
+        raw_times_r = np.reshape([x.time_lapsed[0] if x is not None else np.nan for x in solvers_r], array_shape_test)
+        raw_times_hr = np.reshape([x.time_lapsed[0] if x is not None else np.nan for x in solvers_hr], array_shape_test)
         
         # Calculate average full order time over all training frequencies
         avg_full_time = np.nanmean(time_lapsed[0], axis=2, keepdims=True)

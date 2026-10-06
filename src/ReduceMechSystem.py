@@ -9,7 +9,7 @@ from tqdm.auto import tqdm
 from System import SysConfig, MechSystem, HamiltonianMechSystem, LagrangianMechSystem
 from Reduction import SymplecticBasis, TravelingBasis, SparseBasis
 from podDEIM import POD, DEIM
-from PlotScript import plot_structured_rb_components, plot_structured_rb_modal_energy
+from PlotScript import plot_structured_rb_diagnostics
 from SymbolicComputer import IndexedBaseSymbolicComputer
 
 class ReduceMechSystem(MechSystem):
@@ -62,8 +62,10 @@ class ReduceMechSystem(MechSystem):
         '_Full_rb_dyn', '_Full_sv_dyn',
         '_Full_rb_hamz', '_Full_sv_hamz',
         '_Full_U1', '_Full_S1', '_Full_U2', '_Full_S2',
-        '_Full_Uj', '_Full_Sj',
+        '_Full_Uj', '_Full_Sj', '_Full_u0',
         '_Full_Uj_g_prime_', '_Full_Sj_g_prime_',
+        '_Full_Uj_g_prime_pos_', '_Full_Sj_g_prime_pos_', '_Full_u0_g_prime_pos_',
+        '_Full_Uj_g_prime_vel_', '_Full_Sj_g_prime_vel_', '_Full_u0_g_prime_vel_',
         '_Full_Uj_g_prime_x_lambda_y_', '_Full_Sj_g_prime_x_lambda_y_',
         '_Full_Uj_g', '_Full_Sj_g',
         # Traveling-basis lists (one entry per window)
@@ -593,10 +595,28 @@ class ReduceMechSystem(MechSystem):
         - ``mdeim_g_var_windows``             — sparse MDEIM matrix for ``g'·λ·y`` (DG)
         - ``g_prime_x_lambda_y_mdeim_windows``— lambdified MDEIM function (DG)
         """
-        if not hasattr(cls, '_window_indices') or cls._window_indices is None:
-            raise RuntimeError(
-                'setup_traveling_constraint_hyperreduction requires '
-                '_window_indices to be set by setup_traveling_basis first.')
+        window_indices = getattr(cls, '_window_indices', None)
+        if window_indices is None:
+            boundary_fracs = getattr(cls, '_boundary_fracs', None)
+            if boundary_fracs is not None:
+                cls._ensure_indices_list(solvers)
+                filtered_indices = [idx for idx in cls.indices_list]
+                n_windows = len(boundary_fracs) - 1
+                window_indices = [[] for _ in range(n_windows)]
+                for indices in filtered_indices:
+                    indices = np.asarray(indices)
+                    n_s = len(indices)
+                    for w in range(n_windows):
+                        lo = int(boundary_fracs[w] * n_s)
+                        hi = int(boundary_fracs[w + 1] * n_s)
+                        hi = max(hi, lo + 1)
+                        hi = min(hi, n_s)
+                        window_indices[w].append(indices[lo:hi])
+                cls._window_indices = window_indices
+            else:
+                raise RuntimeError(
+                    'setup_traveling_constraint_hyperreduction requires '
+                    '_window_indices or _boundary_fracs to be set first.')
 
         solver_type    = 'Hamiltonian' if issubclass(cls, HamiltonianMechSystem) else 'DiscreteGradient'
         window_indices = cls._window_indices
@@ -650,34 +670,118 @@ class ReduceMechSystem(MechSystem):
 
             # ── g_prime MDEIM ─────────────────────────────────────────────────
             print(f'    Computing g_prime MDEIM...', flush=True)
-            results_gp = []
-            sampled_gp_pairs = cls.get_mdeim_solver_indices(solvers, win_indices)
-            for solver, indices in sampled_gp_pairs:
-                _gp_fn = solver.g_prime
-                gen = cls.compute_snapshots(
-                    solver, indices, _gp_fn,
-                    projection_indices=gp_nz_indices,
-                    yield_batches=True)
-                results_gp.append(gen)
+            if solver_type == 'Hamiltonian':
+                # Constraint Jacobian G(y) for holonomic systems has block structure:
+                # [ G_11(q)           0      ]
+                # [ G_21(q, p)     G_22(q)   ]
+                # where G_11(q) = \nabla_q g_pos(q) and G_22(q) = \nabla_p g_vel(q, p) \equiv G_11(q).
+                # Hamiltonian solvers (e.g. CSV) strictly access G_11 and G_22; G_21 is never accessed.
+                # Reconstructing G_11 and sharing its basis for G_22 avoids corrupting G_22 with momentum modes,
+                # halves the number of required DEIM interpolation points, and avoids rank starvation.
+                m_h = g_prime_shape[0] // 2
+                n_h = g_prime_shape[1] // 2
+                nz_rows = gp_nz_indices // g_prime_shape[1]
+                nz_cols = gp_nz_indices % g_prime_shape[1]
+                idx_pos = np.where((nz_rows < m_h) & (nz_cols < n_h))[0]
+                idx_vel_p = np.where((nz_rows >= m_h) & (nz_cols >= n_h))[0]
+                nz_pos = gp_nz_indices[idx_pos]
+                nz_vel_p = gp_nz_indices[idx_vel_p]
 
-            Uj_gp, sv_gp, _ = cls.incremental_POD(
-                chain.from_iterable(results_gp), tol=tol)
-            Uj_gp, _, _ = cls._truncate_basis(Uj_gp, sv_gp, tol)
-            Pj_gp, _   = DEIM(Uj_gp, plot_deim=False)
-            B_hat_gp   = Uj_gp @ LA.inv(Pj_gp.T @ Uj_gp)
-            IP_gp_w    = cls._reconstruct_sparse_basis(
-                B_hat_gp, gp_nz_indices, int(np.prod(g_prime_shape)))
+                max_constraint_modes = nz_pos.shape[0] // 2
 
-            flat_gp        = g_prime_expr.flat()
-            sel_gp         = [flat_gp[i] for i in gp_nz_indices]
-            col_gp_w       = Pj_gp.T @ smp.Matrix(sel_gp)
-            _gp_fn         = smp.lambdify((cls.y,), col_gp_w, modules='numpy')
-            gp_mdeim_w     = lambda *args, _fn=_gp_fn, col=col_gp_w: _fn(*args).flatten()
+                # ── Foundational global constraint basis ────────────────────────
+                # Reusing or computing the master global constraint SVD guarantees that every
+                # window's basis covers all bonds and coordinates across the entire lattice.
+                U_pos_global = getattr(cls, '_Full_Uj_g_prime_pos_', None)
+                if U_pos_global is None:
+                    print(f'    [{cls.__name__}] Master global constraint SVD not found. Computing from full dataset...', flush=True)
+                    cls._ensure_indices_list(solvers)
+                    sampled_global = cls.get_mdeim_solver_indices(solvers, cls.indices_list)
+                    def gen_pos_global():
+                        for s, idxs in sampled_global:
+                            for b in cls.compute_snapshots(s, idxs, s.g_prime, projection_indices=nz_pos, yield_batches=True):
+                                yield b
+                    U_pos_global, S_pos_global, _ = cls.incremental_POD(
+                        gen_pos_global(), max_basis_size=max_constraint_modes, tol=None
+                    )
+                    cls._Full_Uj_g_prime_pos_ = U_pos_global
+                    cls._Full_Sj_g_prime_pos_ = S_pos_global
 
-            _IP_windows.append(IP_gp_w)
-            gp_mdeim_windows.append(gp_mdeim_w)
-            del results_gp, Uj_gp, B_hat_gp
-            gc.collect()
+                sampled_gp_pairs = cls.get_mdeim_solver_indices(solvers, win_indices)
+                def gen_pos_w():
+                    for s, idxs in sampled_gp_pairs:
+                        for b in cls.compute_snapshots(s, idxs, s.g_prime, projection_indices=nz_pos, yield_batches=True):
+                            yield b
+
+                # Compute local window candidates
+                U_pos_w, S_pos_w, _ = cls.incremental_POD(
+                    gen_pos_w(), max_basis_size=max_constraint_modes, tol=None
+                )
+
+                # Hierarchical enrichment: project local window candidates onto orthogonal complement of U_pos_global
+                residual = U_pos_w - U_pos_global @ (U_pos_global.T @ U_pos_w)
+                res_norm = LA.norm(residual, 'fro')
+
+                if res_norm > 1e-6:
+                    U_res, s_res, _ = LA.svd(residual, full_matrices=False)
+                    keep_res = s_res > 1e-8
+                    Q_enrich = U_res[:, keep_res]
+                    if Q_enrich.shape[1] > 0 and (U_pos_global.shape[1] + Q_enrich.shape[1]) <= max_constraint_modes:
+                        Uk_pos_w = np.hstack([U_pos_global, Q_enrich])
+                        Uk_pos_w, _ = LA.qr(Uk_pos_w, mode='reduced')
+                    else:
+                        Uk_pos_w = U_pos_global
+                else:
+                    Uk_pos_w = U_pos_global
+
+                P_pos_w, _ = DEIM(Uk_pos_w, plot_deim=False)
+                B_pos_w = Uk_pos_w @ LA.inv(P_pos_w.T @ Uk_pos_w)
+
+                # Reconstruct onto both Block (1, 1) and Block (2, 2)
+                B_hat = np.vstack([B_pos_w, B_pos_w])
+                nz_combined = np.concatenate([nz_pos, nz_vel_p])
+                IP_gp_w = cls._reconstruct_sparse_basis(
+                    B_hat, nz_combined, int(np.prod(g_prime_shape)))
+
+                flat_gp = g_prime_expr.flat()
+                sel_gp = [flat_gp[i] for i in nz_pos]
+                col_gp_w = P_pos_w.T @ smp.Matrix(sel_gp)
+                _gp_fn = smp.lambdify((cls.y,), col_gp_w, modules='numpy')
+                gp_mdeim_w = lambda *args, _fn=_gp_fn, col=col_gp_w: _fn(*args).flatten()
+
+                _IP_windows.append(IP_gp_w)
+                gp_mdeim_windows.append(gp_mdeim_w)
+                del U_pos_w, S_pos_w, B_hat
+                gc.collect()
+            else:
+                results_gp = []
+                sampled_gp_pairs = cls.get_mdeim_solver_indices(solvers, win_indices)
+                for solver, indices in sampled_gp_pairs:
+                    _gp_fn = solver.g_prime
+                    gen = cls.compute_snapshots(
+                        solver, indices, _gp_fn,
+                        projection_indices=gp_nz_indices,
+                        yield_batches=True)
+                    results_gp.append(gen)
+
+                Uj_gp, sv_gp, _ = cls.incremental_POD(
+                    chain.from_iterable(results_gp), tol=tol)
+                Uj_gp, _, _ = cls._truncate_basis(Uj_gp, sv_gp, tol)
+                Pj_gp, _   = DEIM(Uj_gp, plot_deim=False)
+                B_hat_gp   = Uj_gp @ LA.inv(Pj_gp.T @ Uj_gp)
+                IP_gp_w    = cls._reconstruct_sparse_basis(
+                    B_hat_gp, gp_nz_indices, int(np.prod(g_prime_shape)))
+
+                flat_gp        = g_prime_expr.flat()
+                sel_gp         = [flat_gp[i] for i in gp_nz_indices]
+                col_gp_w       = Pj_gp.T @ smp.Matrix(sel_gp)
+                _gp_fn         = smp.lambdify((cls.y,), col_gp_w, modules='numpy')
+                gp_mdeim_w     = lambda *args, _fn=_gp_fn, col=col_gp_w: _fn(*args).flatten()
+
+                _IP_windows.append(IP_gp_w)
+                gp_mdeim_windows.append(gp_mdeim_w)
+                del results_gp, Uj_gp, B_hat_gp
+                gc.collect()
 
             # ── g_prime_x_lambda_y MDEIM (DG only) ───────────────────────────
             if solver_type == 'DiscreteGradient':
@@ -785,36 +889,106 @@ class ReduceMechSystem(MechSystem):
                 # Recalculate non-zero indices based on the (potentially sliced) expression
                 non_zero_indices = np.where(np.array(expr.tolist()).flatten() != 0)[0]
 
-                if not hasattr(cls, master_u_attr) or getattr(cls, master_u_attr) is None:
-                    print(f"  [{cls.__name__}] Master constraint SVD for {func_name} not found. Computing from snapshots...")
-                    # --- Create snapshot matrix for prime constraints ---
-                    sampled_pairs = cls.get_mdeim_solver_indices(solvers, filtered_indices)
-                    results_generators = []
-                    for solver, indices in tqdm(sampled_pairs, total=len(sampled_pairs), desc=f"Snapshots for {func_name}"):
-                        # Select the function to call based on func_name
-                        if func_name == 'g_prime_x_lambda_y_':
-                            snapshot_func = solver.g_prime_x_lambda_y_
-                            gen = cls.compute_snapshots(solver, indices, snapshot_func,
-                                                          is_mdeim_gprime=True,
-                                                          projection_indices=non_zero_indices,
-                                                          yield_batches=True)
-                        else:  # This handles 'g_prime_'
-                            snapshot_func = solver.g_prime
-                            gen = cls.compute_snapshots(solver, indices, snapshot_func,
-                                                          projection_indices=non_zero_indices,
-                                                          yield_batches=True)
-                        results_generators.append(gen)
-                    
-                    all_snapshot_blocks = chain.from_iterable(results_generators)
-                    Uj_full, Sj_full, _ = cls.incremental_POD(all_snapshot_blocks, tol=cls.pod_tol_sweep[-1])
-                    setattr(cls, master_u_attr, Uj_full)
-                    setattr(cls, master_s_attr, Sj_full)
-                    del results_generators, all_snapshot_blocks
-                    gc.collect()
-                else:
-                    print(f"  [{cls.__name__}] Reusing Master constraint SVD for {func_name} (Rank: {getattr(cls, master_u_attr).shape[1]})")
+                if solver_type == "Hamiltonian" and func_name == 'g_prime_':
+                    # ASSUMPTION: 2x2 Block Structure of Hamiltonian Constraint Jacobian:
+                    # G(y) = [ \nabla_q g_pos(q),   0 ]
+                    #        [ \nabla_q g_vel(q,p), \nabla_p g_vel(q) ]
+                    # where:
+                    # 1. Position constraints g_pos depend only on coordinates q (\nabla_p g_pos = 0).
+                    # 2. Velocity constraints have \nabla_p g_vel(q) \equiv \nabla_q g_pos(q) for separable kinetics.
+                    # 3. Position and velocity constraints have distinct dynamic energy scales;
+                    #    separating them into independent POD blocks prevents velocity fluctuations
+                    #    from starving the position constraint modes required by the solver.
+                    # Constraint Jacobian G(y) for holonomic systems has block structure:
+                    # [ G_11(q)           0      ]
+                    # [ G_21(q, p)     G_22(q)   ]
+                    # where G_11(q) = \nabla_q g_pos(q) and G_22(q) = \nabla_p g_vel(q, p) \equiv G_11(q).
+                    # Hamiltonian solvers (e.g. CSV) strictly access G_11 and G_22; G_21 is never accessed.
+                    # Reconstructing G_11 and sharing its basis for G_22 avoids corrupting G_22 with momentum modes,
+                    # halves the number of required DEIM interpolation points, and avoids rank starvation.
+                    m_half = g_prime_shape[0] // 2
+                    n_half = g_prime_shape[1] // 2
+                    nz_rows = non_zero_indices // g_prime_shape[1]
+                    nz_cols = non_zero_indices % g_prime_shape[1]
+                    idx_pos = np.where((nz_rows < m_half) & (nz_cols < n_half))[0]
+                    idx_vel_p = np.where((nz_rows >= m_half) & (nz_cols >= n_half))[0]
+                    nz_pos = non_zero_indices[idx_pos]
+                    nz_vel_p = non_zero_indices[idx_vel_p]
 
-                Uj, sv, _ = cls._truncate_basis(getattr(cls, master_u_attr), getattr(cls, master_s_attr), pod_tol)
+                    if not hasattr(cls, '_Full_Uj_g_prime_pos_') or getattr(cls, '_Full_Uj_g_prime_pos_') is None:
+                        print(f"  [{cls.__name__}] Master constraint SVD for g_prime_ not found. Computing Block 11 basis...")
+                        sampled_pairs = cls.get_mdeim_solver_indices(solvers, filtered_indices)
+
+                        def gen_pos_res():
+                            for solver, indices in sampled_pairs:
+                                for batch in cls.compute_snapshots(solver, indices, solver.g_prime, projection_indices=nz_pos, yield_batches=True):
+                                    yield batch
+
+                        max_constraint_modes = nz_pos.shape[0] // 2
+                        U_pos_full, S_pos_full, _ = cls.incremental_POD(
+                            gen_pos_res(), max_basis_size=max_constraint_modes, tol=None
+                        )
+                        cls._Full_Uj_g_prime_pos_ = U_pos_full
+                        cls._Full_Sj_g_prime_pos_ = S_pos_full
+                    else:
+                        print(f"  [{cls.__name__}] Reusing Master constraint SVD for g_prime_ (Rank: pos={cls._Full_Uj_g_prime_pos_.shape[1]})")
+
+                    active_modes = int(np.sum(cls._Full_Sj_g_prime_pos_ / cls._Full_Sj_g_prime_pos_[0] > 1e-10))
+                    if active_modes % 2 == 1:
+                        active_modes += 1
+                    active_modes = min(active_modes, cls._Full_Uj_g_prime_pos_.shape[1])
+                    Uk_pos = cls._Full_Uj_g_prime_pos_[:, :active_modes]
+
+                    P_pos, _ = DEIM(Uk_pos, plot_deim=False)
+                    B_pos = Uk_pos @ LA.inv(P_pos.T @ Uk_pos)
+
+                    B_hat = np.vstack([B_pos, B_pos])
+                    nz_combined = np.concatenate([nz_pos, nz_vel_p])
+                    total_elements = np.prod(g_prime_shape)
+                    basis = cls._reconstruct_sparse_basis(B_hat, nz_combined, total_elements)
+
+                    flat_expr = expr.flat()
+                    selected_expr_elements = [flat_expr[i] for i in nz_pos]
+                    col = P_pos.T @ smp.Matrix(selected_expr_elements)
+                    sv = cls._Full_Sj_g_prime_pos_
+                else:
+                    if not hasattr(cls, master_u_attr) or getattr(cls, master_u_attr) is None:
+                        print(f"  [{cls.__name__}] Master constraint SVD for {func_name} not found. Computing from snapshots...")
+                        # --- Create snapshot matrix for prime constraints ---
+                        sampled_pairs = cls.get_mdeim_solver_indices(solvers, filtered_indices)
+                        results_generators = []
+                        for solver, indices in tqdm(sampled_pairs, total=len(sampled_pairs), desc=f"Snapshots for {func_name}"):
+                            # Select the function to call based on func_name
+                            if func_name == 'g_prime_x_lambda_y_':
+                                snapshot_func = solver.g_prime_x_lambda_y_
+                                gen = cls.compute_snapshots(solver, indices, snapshot_func,
+                                                              is_mdeim_gprime=True,
+                                                              projection_indices=non_zero_indices,
+                                                              yield_batches=True)
+                            else:  # This handles 'g_prime_'
+                                snapshot_func = solver.g_prime
+                                gen = cls.compute_snapshots(solver, indices, snapshot_func,
+                                                              projection_indices=non_zero_indices,
+                                                              yield_batches=True)
+                            results_generators.append(gen)
+                        
+                        all_snapshot_blocks = chain.from_iterable(results_generators)
+                        Uj_full, Sj_full, _ = cls.incremental_POD(all_snapshot_blocks, tol=cls.pod_tol_sweep[-1])
+                        setattr(cls, master_u_attr, Uj_full)
+                        setattr(cls, master_s_attr, Sj_full)
+                        del results_generators, all_snapshot_blocks
+                        gc.collect()
+                    else:
+                        print(f"  [{cls.__name__}] Reusing Master constraint SVD for {func_name} (Rank: {getattr(cls, master_u_attr).shape[1]})")
+
+                    Uj, sv, _ = cls._truncate_basis(getattr(cls, master_u_attr), getattr(cls, master_s_attr), pod_tol)
+                    Pj, _ = DEIM(Uj, plot_deim=False)
+                    B_hat = Uj @ LA.inv(Pj.T @ Uj)
+                    total_elements = np.prod(g_prime_shape)
+                    basis = cls._reconstruct_sparse_basis(B_hat, non_zero_indices, total_elements)
+                    flat_expr = expr.flat()
+                    selected_expr_elements = [flat_expr[i] for i in non_zero_indices]
+                    col = Pj.T @ smp.Matrix(selected_expr_elements)
             else:
                 if not hasattr(cls, master_u_attr) or getattr(cls, master_u_attr) is None:
                     print(f"  [{cls.__name__}] Master constraint SVD for {func_name} not found. Computing from snapshots...")
@@ -831,22 +1005,7 @@ class ReduceMechSystem(MechSystem):
                     print(f"  [{cls.__name__}] Reusing Master constraint SVD for {func_name} (Rank: {getattr(cls, master_u_attr).shape[1]})")
 
                 Uj, sv, _ = cls._truncate_basis(getattr(cls, master_u_attr), getattr(cls, master_s_attr), pod_tol)
-
-            # Compute DEIM points and interpolation matrix
-            Pj, _ = DEIM(Uj, plot_deim=False)
-
-            if is_prime_type:
-                # Reconstruct the full sparse basis matrix from the DEIM results
-                B_hat = Uj @ LA.inv(Pj.T @ Uj)
-                total_elements = np.prod(g_prime_shape)
-
-                basis = cls._reconstruct_sparse_basis(B_hat, non_zero_indices, total_elements)
-
-                # Create lambdified function
-                flat_expr = expr.flat()
-                selected_expr_elements = [flat_expr[i] for i in non_zero_indices]
-                col = Pj.T @ smp.Matrix(selected_expr_elements)
-            else:
+                Pj, _ = DEIM(Uj, plot_deim=False)
                 basis = Uj @ LA.inv(Pj.T @ Uj)
                 col = Pj.T @ expr
 
@@ -1242,37 +1401,25 @@ class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
 
         print(f'Hamiltonian {RB.shape = }\n')
 
-        # Approach 1: Multi-Block Component Spectra Plot
-        r_dyn = rb_dyn.shape[1]
+        # Multi-Block Component Spectra & Modal Snapshot Projection Waterfall Plots
         has_hamz = hasattr(cls, '_Full_rb_hamz') and cls._Full_rb_hamz is not None and cls._Full_rb_hamz.shape[1] > 0
-        r_hamz = rb_hamz.shape[1] if has_hamz else 0
-        r_enrich = nosc_r - (1 + r_dyn + r_hamz)
-
-        components_dict = {
-            'sv_dyn': sv_dyn,
-            'sv_hamz': sv_hamz if has_hamz else None,
-            'sv_enrich': sv_enrich,
-            'sv_Gr': sv_Gr,
-            'tol_dyn': tol,
-            'tol_hamz': tol,
-            'cond_Gr': cond_val,
-        }
-        filename_comp = os.path.join(MechSystem.data_folder, "sv_structured_components_H.pdf")
-        plot_structured_rb_components(components_dict, filename=filename_comp, title="Structured Reduced Basis Component Spectra (Hamiltonian)")
-
-        # Approach 2: Modal Snapshot Projection Waterfall Plot
-        block_slices = {
-            r'Anchor ($v_0$)': (0, 1),
-            r'Kinematics ($V_{\mathrm{dyn}}$)': (1, 1 + r_dyn),
-        }
-        if r_hamz > 0:
-            block_slices[r'Force ($V_{\nabla H}$)'] = (1 + r_dyn, 1 + r_dyn + r_hamz)
-        if r_enrich > 0:
-            block_slices[r'Constraints ($V_{\mathrm{enrich}}$)'] = (1 + r_dyn + r_hamz, nosc_r)
-
-        filename_modal = os.path.join(MechSystem.data_folder, "sv_structured_modal_energy_H.pdf")
-        plot_structured_rb_modal_energy(modal_energies, block_slices, s_projected=sv_projected,
-                                        filename=filename_modal, title="Structured Reduced Basis Modal Energy Waterfall (Hamiltonian)")
+        plot_structured_rb_diagnostics(
+            rb_dyn=rb_dyn,
+            nosc_r=nosc_r,
+            sv_dyn=sv_dyn,
+            sv_enrich=sv_enrich,
+            sv_Gr=sv_Gr,
+            cond_val=cond_val,
+            tol=tol,
+            modal_energies=modal_energies,
+            sv_projected=sv_projected,
+            rb_hamz=rb_hamz,
+            sv_hamz=sv_hamz,
+            has_hamz=has_hamz,
+            data_folder=MechSystem.data_folder,
+            suffix="H",
+            system_label="Hamiltonian",
+        )
 
         # Set attributes on target classes
         basis = SymplecticBasis(RB, V_state=V_state)
@@ -1351,22 +1498,48 @@ class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
         
         non_zero_indices = cls.ham_zz_nonzero_indices
 
+        # ASSUMPTION: Separable Hamiltonian with constant kinetic Hessian:
+        # \nabla_p^2 H(q, p) = I (or constant M^{-1}), and \nabla_{qp}^2 H = 0.
+        # Consequently, all dynamic variations in \nabla_y^2 H reside entirely in the
+        # configuration potential block \nabla_q^2 V(q), while the kinetic block is
+        # constant across all snapshots. Subtracting the static reference H0 cancels the
+        # kinetic block identically (I - I = 0), allowing POD to focus 100% of modes on V_qq.
+        sample_y = solvers[0].y[0] if hasattr(solvers[0], 'y') else getattr(cls, 'y_init', None)
+        if sample_y is None:
+            sample_y = cls.y_init
+        H0_vec = solvers[0].ham_zz(sample_y).flatten()[non_zero_indices]
+        u0 = H0_vec / LA.norm(H0_vec)
+        cls._Full_u0 = u0
+
         if not hasattr(cls, '_Full_Uj') or cls._Full_Uj is None:
-            print(f"  [{cls.__name__}] Computing MDEIM basis from ham_zz snapshots...")
+            print(f"  [{cls.__name__}] Computing MDEIM basis from ham_zz residual snapshots (Approach 4)...")
             sampled_pairs = cls.get_mdeim_solver_indices(solvers, getattr(cls, 'indices_list', None))
-            # Compute snapshots of the ham_zz function
+            # Compute snapshots of the ham_zz residual function (subtracting static H0_vec)
             def get_ham_zz_snapshots():
                 for solver, indices in sampled_pairs:
-                    yield from cls.compute_snapshots(solver, indices, solver.ham_zz, projection_indices=non_zero_indices, yield_batches=True)
+                    for batch in cls.compute_snapshots(solver, indices, solver.ham_zz, projection_indices=non_zero_indices, yield_batches=True):
+                        yield batch - H0_vec[:, None]
 
-            # SVD of the snapshots
-            Uj, Sj, _ = cls.incremental_POD(get_ham_zz_snapshots(), tol=cls.pod_tol_sweep[-1])
-            cls._Full_Uj, cls._Full_Sj = Uj, Sj
+            # SVD of the residual snapshots: use relaxed tolerance to accumulate dynamic modes across solvers
+            master_tol = min(1e-4, cls.pod_tol_sweep[-1] * 0.1) if hasattr(cls, 'pod_tol_sweep') else 1e-4
+            Uj_res, Sj_res, _ = cls.incremental_POD(get_ham_zz_snapshots(), tol=master_tol)
+            cls._Full_Uj, cls._Full_Sj = Uj_res, Sj_res
         else:
             print(f"  [{cls.__name__}] Reusing Master MDEIM SVD (Rank: {cls._Full_Uj.shape[1]})")
 
-        # Truncate based on current tol
-        Uj, Sj, _ = cls._truncate_basis(cls._Full_Uj, cls._Full_Sj, tol)
+        # Truncate dynamic residual modes based on current tol
+        U_dyn, S_dyn, _ = cls._truncate_basis(cls._Full_Uj, cls._Full_Sj, tol)
+
+        # Orthonormal enrichment with static background mode u0
+        if U_dyn is not None and U_dyn.shape[1] > 0:
+            u0_ref = getattr(cls, '_Full_u0', u0)
+            U_dyn_orth = U_dyn - u0_ref[:, None] @ (u0_ref[None, :] @ U_dyn)
+            Q_orth, R_orth = LA.qr(U_dyn_orth, mode='reduced')
+            keep = np.abs(np.diag(R_orth)) > 1e-10
+            Uj = np.column_stack([u0_ref, Q_orth[:, keep]])
+        else:
+            Uj = u0.reshape(-1, 1)
+
         Pj, _ = DEIM(Uj, plot_deim=False)
 
         # Reconstruct the full sparse basis matrix from the DEIM results
@@ -1630,17 +1803,33 @@ class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
             mdeim_Hessian_w = None
             mdeim_func_w = None
             if cls.hyperreducer == 'MDEIM' and getattr(cls, 'use_mdeim_hessian', False):
-                # Build window-specific MDEIM basis
+                # Build window-specific MDEIM basis (Approach 4)
+                w_start_idx = win_indices[0][0] if (len(win_indices) > 0 and len(win_indices[0]) > 0) else 0
+                sample_y_w = solvers[0].y[w_start_idx] if hasattr(solvers[0], 'y') else cls.y_init
+                H0_w_vec = solvers[0].ham_zz(sample_y_w).flatten()[non_zero_indices]
+                u0_w = H0_w_vec / LA.norm(H0_w_vec)
+
                 sampled_mdeim_pairs = cls.get_mdeim_solver_indices(solvers, win_indices)
                 def gen_mdeim_w():
                     for solver, indices in sampled_mdeim_pairs:
-                        yield from cls.compute_snapshots(
+                        for batch in cls.compute_snapshots(
                             solver, indices, solver.ham_zz,
                             is_dg=False, projection_indices=non_zero_indices,
-                            yield_batches=True)
+                            yield_batches=True):
+                            yield batch - H0_w_vec[:, None]
 
-                Uj_w, Sj_w, _ = cls.incremental_POD(gen_mdeim_w(), tol=tol)
-                Uj_w, _, _ = cls._truncate_basis(Uj_w, Sj_w, tol)
+                master_tol = min(1e-4, tol * 0.1) if tol is not None else 1e-4
+                Uj_res_w, Sj_res_w, _ = cls.incremental_POD(gen_mdeim_w(), tol=master_tol)
+                U_dyn_w, _, _ = cls._truncate_basis(Uj_res_w, Sj_res_w, tol)
+
+                if U_dyn_w is not None and U_dyn_w.shape[1] > 0:
+                    U_dyn_orth = U_dyn_w - u0_w[:, None] @ (u0_w[None, :] @ U_dyn_w)
+                    Q_orth, R_orth = LA.qr(U_dyn_orth, mode='reduced')
+                    keep = np.abs(np.diag(R_orth)) > 1e-10
+                    Uj_w = np.column_stack([u0_w, Q_orth[:, keep]])
+                else:
+                    Uj_w = u0_w.reshape(-1, 1)
+
                 Pj_w, _ = DEIM(Uj_w, plot_deim=False)
                 B_hat_w = Uj_w @ LA.inv(Pj_w.T @ Uj_w)
                 mdeim_Hessian_w = cls._reconstruct_sparse_basis(
@@ -1757,31 +1946,21 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
 
         print(f'DiscreteGradient {RB.shape = }\n')
 
-        # Approach 1: Multi-Block Component Spectra Plot
-        r_dyn = rb_dyn.shape[1]
-        r_enrich = nosc_r - (1 + r_dyn)
-
-        components_dict = {
-            'sv_dyn': sv_dyn,
-            'sv_enrich': sv_enrich,
-            'sv_Gr': sv_Gr,
-            'tol_dyn': tol,
-            'cond_Gr': cond_val,
-        }
-        filename_comp = os.path.join(MechSystem.data_folder, "sv_structured_components_DG.pdf")
-        plot_structured_rb_components(components_dict, filename=filename_comp, title="Structured Reduced Basis Component Spectra (Discrete Gradient)")
-
-        # Approach 2: Modal Snapshot Projection Waterfall Plot
-        block_slices = {
-            r'Anchor ($v_0$)': (0, 1),
-            r'Kinematics ($V_{\mathrm{dyn}}$)': (1, 1 + r_dyn),
-        }
-        if r_enrich > 0:
-            block_slices[r'Constraints ($V_{\mathrm{enrich}}$)'] = (1 + r_dyn, nosc_r)
-
-        filename_modal = os.path.join(MechSystem.data_folder, "sv_structured_modal_energy_DG.pdf")
-        plot_structured_rb_modal_energy(modal_energies, block_slices, s_projected=sv_projected,
-                                        filename=filename_modal, title="Structured Reduced Basis Modal Energy Waterfall (Discrete Gradient)")
+        # Multi-Block Component Spectra & Modal Snapshot Projection Waterfall Plots
+        plot_structured_rb_diagnostics(
+            rb_dyn=rb_dyn,
+            nosc_r=nosc_r,
+            sv_dyn=sv_dyn,
+            sv_enrich=sv_enrich,
+            sv_Gr=sv_Gr,
+            cond_val=cond_val,
+            tol=tol,
+            modal_energies=modal_energies,
+            sv_projected=sv_projected,
+            data_folder=MechSystem.data_folder,
+            suffix="DG",
+            system_label="Discrete Gradient",
+        )
 
         # Set attributes on target classes
         basis = SymplecticBasis(RB, V_state=V_state)

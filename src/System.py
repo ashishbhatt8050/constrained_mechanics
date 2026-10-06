@@ -193,7 +193,7 @@ class SysConfig:
     reducer = 'psd'
     hyperreducer = 'MDEIM'
     constraint_type = 'spherical'
-    constraints_reduce = False # True = hyper-reduce constraints, False = reduce constraints
+    constraints_reduce = True # True = hyper-reduce constraints, False = reduce constraints
     use_mdeim_hessian = True # False = compute Hessian directly from full Hessian projected onto RB
 
     # MDEIM snapshot sampling settings (subsamples Hessian/Jacobian snapshots across FOM solves)
@@ -205,7 +205,7 @@ class SysConfig:
     mdeim_max_solvers = None                  # Optional cap on number of solvers sampled
 
     # Traveling-basis / adaptive windowing settings
-    n_windows = None                          # None = unbounded (physics-driven), 1 = disabled, >1 = window cap
+    n_windows = 1                             # None = unbounded (physics-driven), 1 = disabled, >1 = window cap
     grassmann_cos_threshold = 0.8988          # cos(26°) — misalignment trigger angle
     rolling_frac = 0.05                       # Fraction of reference snapshots per rolling step
     max_traveling_enrichment = 4              # Max local POD modes to add per window (caps basis bloat)

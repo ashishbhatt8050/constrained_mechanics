@@ -9,7 +9,7 @@
 # ==============================================================================
 
 #SBATCH --job-name=app8_lattice
-#SBATCH --output=app8_lattice-%j.out
+#SBATCH --output=/dev/null
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
@@ -38,8 +38,8 @@ monitor_job() {
     if [ -z "$JOBID" ]; then
         JOBID=$(squeue -u "$USER" -o "%i %j" -h 2>/dev/null | grep "app8_lattice" | head -n 1 | awk '{print $1}')
         if [ -z "$JOBID" ]; then
-            local LATEST_OUT=$(ls -t app8_lattice-*.out 2>/dev/null | head -n 1)
-            [ -n "$LATEST_OUT" ] && JOBID=$(echo "$LATEST_OUT" | sed -E 's/app8_lattice-([0-9]+)\.out/\1/')
+            local LATEST_OUT=$(ls -t data/*/app8_lattice-*.out app8_lattice-*.out 2>/dev/null | head -n 1)
+            [ -n "$LATEST_OUT" ] && JOBID=$(basename "$LATEST_OUT" | sed -E 's/app8_lattice-([0-9]+)\.out/\1/')
         fi
     fi
 
@@ -49,7 +49,14 @@ monitor_job() {
         exit 1
     fi
 
-    local LOGFILE="app8_lattice-${JOBID}.out"
+    # Locate logfile in the target date directory or latest data folder
+    local LOGFILE="data/${JOB_KEEP_TIME:-$(date +%Y-%m-%d)}/app8_lattice-${JOBID}.out"
+    if [ ! -f "$LOGFILE" ]; then
+        local LATEST_DATA_DIR=$(ls -td data/*/ 2>/dev/null | grep -v "joblib_cache" | head -n 1)
+        [ -n "$LATEST_DATA_DIR" ] && [ -f "${LATEST_DATA_DIR}app8_lattice-${JOBID}.out" ] && LOGFILE="${LATEST_DATA_DIR}app8_lattice-${JOBID}.out"
+    fi
+    [ ! -f "$LOGFILE" ] && [ -f "data/${JOB_KEEP_TIME:-$(date +%Y-%m-%d)}/logfile.txt" ] && LOGFILE="data/${JOB_KEEP_TIME:-$(date +%Y-%m-%d)}/logfile.txt"
+    [ ! -f "$LOGFILE" ] && [ -f "app8_lattice-${JOBID}.out" ] && LOGFILE="app8_lattice-${JOBID}.out"
     [ ! -f "$LOGFILE" ] && [ -f "logfile.txt" ] && LOGFILE="logfile.txt"
 
     echo "🔎 Monitoring SLURM job ID: $JOBID (Press Ctrl+C to exit)"
@@ -118,8 +125,8 @@ export DASK_NUM_WORKERS="${COMPUTE_WORKERS}"
 #   OMEGA2_TRAIN_WAVES=1   -> 1 * 30 = 30 training samples (split_idx)
 #   OMEGA2_TEST_WAVES=0.5  -> 0.5 * 30 = 15 test samples (2*15=30 tasks, exactly 1 worker wave!)
 # For full production run: OMEGA2_TRAIN_WAVES=4 OMEGA2_TEST_WAVES=2 sbatch submit_job_slurm.sh
-export OMEGA2_TRAIN_WAVES="${OMEGA2_TRAIN_WAVES:-4}"
-export OMEGA2_TEST_WAVES="${OMEGA2_TEST_WAVES:-2}"
+export OMEGA2_TRAIN_WAVES="${OMEGA2_TRAIN_WAVES:-1}"
+export OMEGA2_TEST_WAVES="${OMEGA2_TEST_WAVES:-0.3334}"
 
 # Local scratch directory setup for fast compute node NVMe I/O
 LOCAL_SCRATCH="${SLURM_TMPDIR:-/tmp/constrained_mechanics_${SLURM_JOB_ID:-$$}}"
@@ -135,17 +142,26 @@ else
     export JOB_KEEP_TIME="${JOB_KEEP_TIME:-$(date +%Y-%m-%d)}"
 fi
 TARGET_DATA_DIR="data/${JOB_KEEP_TIME}"
+JOB_TAG="${SLURM_JOB_ID:-local}"
+LOGFILE_NAME="app8_lattice-${JOB_TAG}.out"
+TARGET_LOGFILE="${PWD}/${TARGET_DATA_DIR}/${LOGFILE_NAME}"
+export TARGET_LOGFILE
 
 # Create directories on master storage and local scratch
 mkdir -p "${PWD}/${TARGET_DATA_DIR}"
 mkdir -p "${LOCAL_SCRATCH}/${TARGET_DATA_DIR}"
 
+# Create convenience symlink logfile.txt -> app8_lattice-${JOB_TAG}.out in target directory
+ln -sf "${LOGFILE_NAME}" "${PWD}/${TARGET_DATA_DIR}/logfile.txt"
+
 # Automatic synchronization trap: copy target run checkpoints/data from local scratch back to master node disk
 sync_scratch_to_master() {
     echo "🔄 Syncing run directory (${TARGET_DATA_DIR}) from local scratch to master node storage..."
     if [ -d "${LOCAL_SCRATCH}/${TARGET_DATA_DIR}" ]; then
+        # Ensure no stale/frozen logfiles in scratch can overwrite the live master log
+        rm -f "${LOCAL_SCRATCH}/${TARGET_DATA_DIR}/"*.out "${LOCAL_SCRATCH}/${TARGET_DATA_DIR}/"*.log "${LOCAL_SCRATCH}/${TARGET_DATA_DIR}/logfile*.txt" 2>/dev/null || true
         mkdir -p "${PWD}/${TARGET_DATA_DIR}"
-        rsync -a "${LOCAL_SCRATCH}/${TARGET_DATA_DIR}/" "${PWD}/${TARGET_DATA_DIR}/" 2>/dev/null || cp -r "${LOCAL_SCRATCH}/${TARGET_DATA_DIR}/"* "${PWD}/${TARGET_DATA_DIR}/" 2>/dev/null || true
+        rsync -au --exclude="*.out" --exclude="*.log" --exclude="logfile*.txt" "${LOCAL_SCRATCH}/${TARGET_DATA_DIR}/" "${PWD}/${TARGET_DATA_DIR}/" 2>/dev/null || true
     fi
     # Also sync any top-level symbolic expression pickles generated on scratch
     find "${LOCAL_SCRATCH}/data" -maxdepth 1 -name "symbolic_expr_*.pickle" -exec cp -t "${PWD}/data/" {} + 2>/dev/null || true
@@ -163,28 +179,29 @@ fi
 export MPLCONFIGDIR="${PWD}/matplotlib_cache"
 mkdir -p "$MPLCONFIGDIR"
 
-echo "Checking LaTeX environment..."
-which latex >/dev/null 2>&1 || echo "Warning: 'latex' not found. Matplotlib usetex=True will fail."
+echo "Checking LaTeX environment..." | tee -a "${TARGET_LOGFILE}"
+which latex >/dev/null 2>&1 || echo "Warning: 'latex' not found. Matplotlib usetex=True will fail." | tee -a "${TARGET_LOGFILE}"
 
 # Selective pre-staging: copy ONLY the specific target date directory and symbolic pickles from master to scratch
 if [ -d "${PWD}/${TARGET_DATA_DIR}" ]; then
-    echo "📥 Pre-staging target date directory (${TARGET_DATA_DIR}) from master node storage to local scratch..."
-    rsync -a "${PWD}/${TARGET_DATA_DIR}/" "${LOCAL_SCRATCH}/${TARGET_DATA_DIR}/" 2>/dev/null || cp -r "${PWD}/${TARGET_DATA_DIR}/"* "${LOCAL_SCRATCH}/${TARGET_DATA_DIR}/" 2>/dev/null || true
+    echo "📥 Pre-staging target date directory (${TARGET_DATA_DIR}) from master node storage to local scratch..." | tee -a "${TARGET_LOGFILE}"
+    rsync -au --exclude="*.out" --exclude="*.log" --exclude="logfile*.txt" "${PWD}/${TARGET_DATA_DIR}/" "${LOCAL_SCRATCH}/${TARGET_DATA_DIR}/" 2>/dev/null || true
 fi
 
 # Pre-stage symbolic expression pickle files (small files) from master node data to local scratch
 find "${PWD}/data" -maxdepth 1 -name "symbolic_expr_*.pickle" -exec cp -t "${LOCAL_SCRATCH}/data/" {} + 2>/dev/null || true
 
 # Execute Python job with timing capture
-echo "Starting job execution..."
-{ time python -u scripts/app8_lattice.py; } 2>&1 | tee logfile.txt
+echo "Starting job execution..." | tee -a "${TARGET_LOGFILE}"
+{ time python -u scripts/app8_lattice.py; } 2>&1 | tee -a "${TARGET_LOGFILE}"
 
 # Calculate timing & parallelization efficiency
 python3 << 'TIMING_EOF'
-import re, sys
+import os, re, sys
 
+logfile = os.environ.get('TARGET_LOGFILE', 'logfile.txt')
 try:
-    with open('logfile.txt') as f:
+    with open(logfile) as f:
         content = f.read()
 
     times = {}
@@ -199,7 +216,6 @@ try:
         real, user, sys_t = times['real'], times['user'], times['sys']
         total_cpu = user + sys_t
         eff = total_cpu / real if real > 0 else 0.0
-        import os
         total_cpus = float(os.environ.get('COMPUTE_WORKERS', os.environ.get('SLURM_CPUS_PER_TASK', 32)))
         util = (eff / total_cpus) * 100.0
 
@@ -215,16 +231,10 @@ Core utilization:           {util:.1f}% of {int(total_cpus)} CPUs
 ============================================
 """
         print(summary)
-        with open('logfile.txt', 'a') as f:
+        with open(logfile, 'a') as f:
             f.write(summary)
     else:
-        print("Warning: Could not parse timing output from logfile.txt", file=sys.stderr)
+        print(f"Warning: Could not parse timing output from {logfile}", file=sys.stderr)
 except Exception as e:
     print(f"Timing parse warning: {e}", file=sys.stderr)
 TIMING_EOF
-
-# Relocate SLURM log output to data directory
-LATEST_DATA_DIR=$(ls -td data/*/ 2>/dev/null | grep -v "joblib_cache" | head -n 1)
-if [ -n "$SLURM_JOB_ID" ] && [ -d "$LATEST_DATA_DIR" ]; then
-    [ -f "app8_lattice-${SLURM_JOB_ID}.out" ] && mv "app8_lattice-${SLURM_JOB_ID}.out" "$LATEST_DATA_DIR/"
-fi

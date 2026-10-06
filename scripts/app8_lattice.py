@@ -3,6 +3,7 @@
 
 import os
 import sys
+import copy
 import shutil
 import argparse
 
@@ -20,19 +21,18 @@ sys.setrecursionlimit(10000)
 import numpy as np
 from numpy import linalg as LA
 from matplotlib import rc
-import matplotlib.pyplot as plt
 
 # Dask imports
 from dask.distributed import Client, LocalCluster
 
 # Local application imports
-from ConcreteSolvers import (BaseSolverMixin, DiscreteGradientSolver, 
-                            ConformalStormerVerletSolver,
+from ConcreteSolvers import (BaseSolverMixin, ConformalStormerVerletSolver,
                             _matches_solver_family)
 from System import MechSystem, HamiltonianMechSystem, LagrangianMechSystem, load_symbolic_expressions, fast_dump, fast_load, get_data_dir, get_symbolic_expressions_file, check_checkpoint_exists
 from SymbolicComputer import IndexedBaseSymbolicComputer, manage_cache
 from PlotScript import (plot_omega_distribution, plot_pareto, plot_error_vs_basis_size,
-                        plot_prediction_results, save_figure, OKABE_ITO_PALETTE)
+                        plot_prediction_results, plot_solvers,
+                        plot_prediction_sanity_check, plot_combined_errors, plot_combined_phase_portraits)
 
 
 def _collect_metric(solver_list, cls, metric_fn):
@@ -208,72 +208,17 @@ def run_prediction_sanity_check(kwds, solvers_r, solvers_hr, original_solver_cla
             print(f"  Component breakdown: ROM (q_err={err_r_q:.2e}, p_err={err_r_p:.2e}) | HROM (q_err={err_hr_q:.2e}, p_err={err_hr_p:.2e})")
 
             # 5. Generate Diagnostic Plot
-            fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-            t = s_f.t_points
-
-            # (a) Pointwise Trajectory Error over time (log scale)
-            err_r_t = np.amax(np.abs(s_f.y - s_r.y), axis=1)
-            err_hr_t = np.amax(np.abs(s_f.y - s_hr.y), axis=1)
-            axes[0, 0].semilogy(t, err_r_t, label='ROM Error', color=OKABE_ITO_PALETTE[0], lw=1.8)
-            axes[0, 0].semilogy(t, err_hr_t, label='HROM Error', color=OKABE_ITO_PALETTE[1], ls='--', lw=1.8)
-            axes[0, 0].set_title(r"Max State Error $\|y_{\mathrm{FOM}}(t) - y_{\mathrm{model}}(t)\|_\infty$")
-            axes[0, 0].set_xlabel("Time (s)")
-            axes[0, 0].grid(True, which="both", ls=":")
-            axes[0, 0].legend()
-
-            # (b) Representative Coordinate Comparison (particle 0 position q_0)
-            axes[0, 1].plot(t, s_f.y[:, 0], label='FOM', color='black', lw=2.0)
-            axes[0, 1].plot(t, s_r.y[:, 0], label='ROM', color=OKABE_ITO_PALETTE[0], ls='--', lw=1.8)
-            axes[0, 1].plot(t, s_hr.y[:, 0], label='HROM', color=OKABE_ITO_PALETTE[1], ls=':', lw=1.8)
-            axes[0, 1].set_title(r"Trajectory Comparison ($q_0(t)$)")
-            axes[0, 1].set_xlabel("Time (s)")
-            axes[0, 1].grid(True, ls=":")
-            axes[0, 1].legend()
-
-            # (c) Energy Invariant Drift
-            has_eng = False
-            if getattr(s_f, 'eng_error', None) is not None:
-                axes[1, 0].semilogy(t, np.abs(s_f.eng_error) + 1e-16, label='FOM', color='black', lw=1.5)
-                has_eng = True
-            if getattr(s_r, 'eng_error', None) is not None:
-                axes[1, 0].semilogy(t, np.abs(s_r.eng_error) + 1e-16, label='ROM', color=OKABE_ITO_PALETTE[0], ls='--', lw=1.5)
-                has_eng = True
-            if getattr(s_hr, 'eng_error', None) is not None:
-                axes[1, 0].semilogy(t, np.abs(s_hr.eng_error) + 1e-16, label='HROM', color=OKABE_ITO_PALETTE[1], ls=':', lw=1.5)
-                has_eng = True
-            if has_eng:
-                axes[1, 0].set_title(r"Energy Drift $|\Delta H(t)|$")
-                axes[1, 0].set_xlabel("Time (s)")
-                axes[1, 0].grid(True, which="both", ls=":")
-                axes[1, 0].legend()
-            else:
-                axes[1, 0].text(0.5, 0.5, "Energy drift not available", ha='center', va='center', transform=axes[1, 0].transAxes)
-
-            # (d) Symplectic Invariant Error
-            has_sym = False
-            if getattr(s_f, 'sym_error', None) is not None:
-                axes[1, 1].semilogy(t, np.abs(s_f.sym_error) + 1e-16, label='FOM', color='black', lw=1.5)
-                has_sym = True
-            if getattr(s_r, 'sym_error', None) is not None:
-                axes[1, 1].semilogy(t, np.abs(s_r.sym_error) + 1e-16, label='ROM', color=OKABE_ITO_PALETTE[0], ls='--', lw=1.5)
-                has_sym = True
-            if getattr(s_hr, 'sym_error', None) is not None:
-                axes[1, 1].semilogy(t, np.abs(s_hr.sym_error) + 1e-16, label='HROM', color=OKABE_ITO_PALETTE[1], ls=':', lw=1.5)
-                has_sym = True
-            if has_sym:
-                axes[1, 1].set_title(r"Symplectic Error $|\Delta \mathrm{Sp}(t)|$")
-                axes[1, 1].set_xlabel("Time (s)")
-                axes[1, 1].grid(True, which="both", ls=":")
-                axes[1, 1].legend()
-            else:
-                axes[1, 1].text(0.5, 0.5, "Symplectic error not available", ha='center', va='center', transform=axes[1, 1].transAxes)
-
-            fig.suptitle(f"Sanity Check: {cls_name} | dt={dt:.4f} | Omega2 (test[{target_idx}])", fontsize=14)
-            plt.tight_layout()
-
             plot_path = os.path.join(MechSystem.data_folder, f"sanity_check_{cls_name}_dt_{dt:.4f}.pdf")
-            save_figure(fig, plot_path)
-            plt.close(fig)
+            plot_prediction_sanity_check(
+                s_f, s_r, s_hr,
+                plot_path=plot_path,
+                coord_label=r"Trajectory comparison ($q_0(t)$)",
+                system_label=None,
+                target_idx=target_idx,
+                target_omega2=target_omega2,
+                cls_name=cls_name,
+                dt=dt,
+            )
             print(f"  Saved comparison plot to: {plot_path}")
 
 
@@ -299,9 +244,6 @@ if __name__ == '__main__':
     parser.add_argument("--no-pgfplots", action="store_true", help="Disable generation of data files for PGFPlots")
     
     args = parser.parse_args()
-
-    # Set the pgfplots generation flag on the central config object
-    MechSystem.generate_pgfplots_data = not args.no_pgfplots
 
     # Configure LaTeX rendering based on availability
     if args.no_latex or not shutil.which('latex'):
@@ -349,23 +291,19 @@ if __name__ == '__main__':
                                 filename=os.path.join(MechSystem.data_folder, "omega2_dist.pdf"))
     
     # %% Cluster set-up and system solution
-    kwds = {
-        "nosc": MechSystem.nosc,  # Read nosc from the central configuration
-        "registered_solver_classes": [
-            # ConformalImplicitMidpointSolver,
-            DiscreteGradientSolver,
-            ConformalStormerVerletSolver,
-        ]
-    }
-    
-    # Save original solver classes for reporting
-    original_solver_classes = list(kwds['registered_solver_classes'])
+    original_solver_classes = [
+        # ConformalImplicitMidpointSolver,
+        # DiscreteGradientSolver,
+        ConformalStormerVerletSolver,
+    ]
 
-    kwds.update({
+    base_kwds = {
+        "nosc": MechSystem.nosc,  # Read nosc from the central configuration
+        "registered_solver_classes": list(original_solver_classes),
         'Omega2_space': MechSystem.Omega2_space,
         'Omega2_space_dim': len(MechSystem.Omega2_space),
         'pod_tol_sweep': MechSystem.pod_tol_sweep
-        })
+    }
     
     # Dask Cluster Configuration
     print("Initializing LocalCluster...", flush=True)
@@ -437,27 +375,24 @@ if __name__ == '__main__':
         checkpoint_path = MechSystem.data_folder
         kwds_file = os.path.join(checkpoint_path, 'kwds.joblib')
         solvers_file = os.path.join(checkpoint_path, 'solvers.joblib')
+        kwds_f = copy.deepcopy(base_kwds)
 
         if check_checkpoint_exists(checkpoint_path, kwds_file, solvers_file):
             print("Loading full solution from checkpoint...")
-            kwds = fast_load(kwds_file)
+            kwds_f = fast_load(kwds_file)
             solvers = fast_load(solvers_file)
         else:
-            BaseSolverMixin.parallel_solve_mech_system(kwds, solvers, client=client)
+            BaseSolverMixin.parallel_solve_mech_system(kwds_f, solvers, client=client)
             os.makedirs(checkpoint_path, exist_ok=True)
             print("Creating new checkpoint for full model...")
-            fast_dump(kwds, kwds_file)
+            fast_dump(kwds_f, kwds_file)
             fast_dump(solvers, solvers_file)
-        BaseSolverMixin.compute_convergence_rates(kwds, solvers)
-        BaseSolverMixin.plot_solvers(kwds, solvers)
+        BaseSolverMixin.compute_convergence_rates(kwds_f, solvers)
+        plot_solvers(kwds_f, solvers)
 
         # --- Reduced order solution ---
         print('Computing reduced bases...')
         MechSystem.indices_list = [np.arange(solver.n) for solver in solvers] # select solutions for POD (shuffle indices or implement a stride)
-        kwds.update({
-            'Omega2_space': MechSystem.Omega2_space_test,
-            'Omega2_space_dim': len(MechSystem.Omega2_space_test),
-        })
 
         # --- Basis Size Study ---
         study_data = {cls.__name__: {
@@ -470,16 +405,28 @@ if __name__ == '__main__':
             'ang_mom_error_f': [], 'ang_mom_error_r': [], 'ang_mom_error_hr': []
         } for cls in original_solver_classes}
 
-        for tol in kwds['pod_tol_sweep']:
+        for tol in base_kwds['pod_tol_sweep']:
             print(f"\n>>> Running MOR sweep for tolerance: {tol}")
-            kwds['pod_tol'] = tol
-            
-            # Reset registered classes to original full-order versions at start of each sweep
-            kwds['registered_solver_classes'] = list(original_solver_classes)
+
+            # Dedicated configuration for Reduced Order Model
+            kwds_r = copy.deepcopy(base_kwds)
+            kwds_r.update({
+                'pod_tol': tol,
+                'Omega2_space': MechSystem.Omega2_space_test,
+                'Omega2_space_dim': len(MechSystem.Omega2_space_test),
+            })
+
+            # Dedicated configuration for Hyper-Reduced Order Model
+            kwds_hr = copy.deepcopy(base_kwds)
+            kwds_hr.update({
+                'pod_tol': tol,
+                'Omega2_space': MechSystem.Omega2_space_test,
+                'Omega2_space_dim': len(MechSystem.Omega2_space_test),
+            })
 
             # Solve Reduced and Hyper-reduced
-            solvers_r = BaseSolverMixin.setup_and_solve_reduced_system(kwds, solvers, client=client)
-            solvers_hr = BaseSolverMixin.setup_and_solve_hyperreduced_system(kwds, solvers, client=client)
+            solvers_r = BaseSolverMixin.setup_and_solve_reduced_system(kwds_r, solvers, client=client)
+            solvers_hr = BaseSolverMixin.setup_and_solve_hyperreduced_system(kwds_hr, solvers, client=client)
 
             # Calculate errors for this tolerance
             if not MechSystem.predict:
@@ -627,7 +574,8 @@ if __name__ == '__main__':
 
             # Sanity check: evaluate ground-truth test FOM vs ROM and HROM predictions
             if 'solvers_r' in locals() and 'solvers_hr' in locals():
-                run_prediction_sanity_check(kwds, solvers_r, solvers_hr, original_solver_classes)
+                sanity_kwds = kwds_hr if 'kwds_hr' in locals() else base_kwds
+                run_prediction_sanity_check(sanity_kwds, solvers_r, solvers_hr, original_solver_classes)
 
     finally:
         if client:
@@ -636,11 +584,11 @@ if __name__ == '__main__':
 
     # %% Compute and display metrics
     print(f"\nFinal Reporting: Metrics correspond to tolerance {MechSystem.pod_tol_sweep[-1]}")
-    array_shape_train = (len(kwds['registered_solver_classes']), 
+    array_shape_train = (len(original_solver_classes), 
                   MechSystem.dt_space_dim, 
                   len(MechSystem.Omega2_space))
     
-    array_shape_test = (len(kwds['registered_solver_classes']), 
+    array_shape_test = (len(original_solver_classes), 
                   MechSystem.dt_space_dim, 
                   len(MechSystem.Omega2_space_test))
 
@@ -745,9 +693,25 @@ if __name__ == '__main__':
         print_failure_report("Reduced Order Model", solvers_r, MechSystem.Omega2_space_test)
     if 'solvers_hr' in locals():
         print_failure_report("Hyper-reduced Model", solvers_hr, MechSystem.Omega2_space_test)
-
     # %% Pareto plots
     if not MechSystem.predict and 'errors_r' in locals() and 'errors_hr' in locals():
         print("\nGenerating Pareto plots...")
         solver_names = [cls.__name__ for cls in original_solver_classes]
         plot_pareto(time_lapsed, errors_r, errors_hr, solver_names, MechSystem.dt_space, MechSystem.data_folder)
+
+    # %% Combined error plot for FOM, ROM, and HROM
+    print("\nGenerating combined error plot across model reduction orders...")
+    plot_combined_errors(
+        data_folder=MechSystem.data_folder,
+        registered_solver_classes=original_solver_classes
+    )
+
+    # %% Combined phase portraits for FOM, ROM, and HROM
+    print("\nGenerating combined phase portraits across model reduction orders...")
+    try:
+        plot_combined_phase_portraits(
+            data_folder=MechSystem.data_folder,
+            registered_solver_classes=original_solver_classes
+        )
+    except Exception as e:
+        print(f"  [Warning] Could not generate combined phase portraits: {e}")

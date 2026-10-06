@@ -218,12 +218,10 @@ ElasticaStormerVerletSolver.hyperreduced_solver = HyperReducedElasticaStormerVer
 ELASTICA_REDUCED_SOLVER_MAPPING = {
     ElasticaStormerVerletSolver: ReducedElasticaStormerVerletSolver,
     ReducedElasticaStormerVerletSolver: ReducedElasticaStormerVerletSolver,
-    HyperReducedElasticaStormerVerletSolver: ReducedElasticaStormerVerletSolver,
 }
 
 ELASTICA_HYPERREDUCED_SOLVER_MAPPING = {
     ElasticaStormerVerletSolver: HyperReducedElasticaStormerVerletSolver,
-    ReducedElasticaStormerVerletSolver: HyperReducedElasticaStormerVerletSolver,
     HyperReducedElasticaStormerVerletSolver: HyperReducedElasticaStormerVerletSolver,
 }
 
@@ -313,9 +311,9 @@ def plot_elastica_beam(solvers_f, solvers_r=None, solvers_hr=None, data_folder=N
         ax1.plot(coords_hr[-1, :, 0], coords_hr[-1, :, 1], coords_hr[-1, :, 2],
                  color='crimson', lw=2.2, ls=':', label='HROM ($t=T$)')
 
-    ax1.set_xlabel('X (axial, m)', labelpad=8)
-    ax1.set_ylabel('Y (lateral, m)', labelpad=8)
-    ax1.set_zlabel('Z (vertical, m)', labelpad=8)
+    ax1.set_xlabel('X (axial)', labelpad=8)
+    ax1.set_ylabel('Y (lateral)', labelpad=8)
+    ax1.set_zlabel('Z (vertical)', labelpad=8)
     ax1.set_title('(a) 3D Dynamic Centerline', fontsize=13, fontweight='bold')
     ax1.view_init(elev=20, azim=-60)
     ax1.legend(loc='upper right', fontsize=8)
@@ -323,7 +321,7 @@ def plot_elastica_beam(solvers_f, solvers_r=None, solvers_hr=None, data_folder=N
     sm = mcm.ScalarMappable(norm=norm, cmap=cmap)
     sm.set_array(t_points)
     cbar = fig.colorbar(sm, ax=ax1, shrink=0.6, pad=0.14)
-    cbar.set_label('Time (s)', fontsize=9)
+    cbar.set_label('Time', fontsize=9)
 
     # Panel (b): 2D Elevation Profiles z(x)
     ax2 = fig.add_subplot(gs[0, 1])
@@ -333,15 +331,15 @@ def plot_elastica_beam(solvers_f, solvers_r=None, solvers_hr=None, data_folder=N
         t_val = t_points[s_idx]
         col = colors_snaps[idx_color % len(colors_snaps)]
         ax2.plot(coords_f[s_idx, :, 0], coords_f[s_idx, :, 2],
-                 color=col, lw=2.0, label=f't = {t_val:.2f}s')
+                 color=col, lw=2.0, label=f't = {t_val:.2f}')
         if coords_hr is not None:
             ax2.plot(coords_hr[s_idx, :, 0], coords_hr[s_idx, :, 2],
                      color=col, lw=1.5, ls='--')
 
     ax2.plot([0], [0], 'k^', markersize=10, label='Pinned base')
     ax2.axhline(0, color='gray', lw=0.8, ls=':')
-    ax2.set_xlabel('Axial coordinate $x$ (m)', fontsize=11)
-    ax2.set_ylabel('Vertical deflection $z$ (m)', fontsize=11)
+    ax2.set_xlabel('Axial coordinate $x$', fontsize=11)
+    ax2.set_ylabel('Vertical deflection $z$', fontsize=11)
     ax2.set_title('(b) Elevation Deflection Profiles $z(x)$', fontsize=13, fontweight='bold')
     ax2.grid(True, linestyle='--', alpha=0.5)
     ax2.legend(loc='lower left', fontsize=8)
@@ -357,15 +355,15 @@ def plot_elastica_beam(solvers_f, solvers_r=None, solvers_hr=None, data_folder=N
         z_tip_hr = coords_hr[:, -1, 2]
         ax3.plot(t_points, z_tip_hr, color='crimson', lw=1.8, ls=':', label='HROM')
 
-    ax3.set_xlabel('Time $t$ (s)', fontsize=11)
-    ax3.set_ylabel('Tip vertical displacement $z_{\\mathrm{tip}}$ (m)', fontsize=11)
+    ax3.set_xlabel('Time $t$', fontsize=11)
+    ax3.set_ylabel('Tip vertical displacement $z_{\\mathrm{tip}}$', fontsize=11)
     ax3.set_title('(c) Tip Displacement History', fontsize=13, fontweight='bold')
     ax3.grid(True, linestyle='--', alpha=0.5)
     ax3.legend(loc='lower left', fontsize=9)
 
     if coords_hr is not None:
         err_tip_hrom = np.amax(np.abs(z_tip_f - coords_hr[:, -1, 2]))
-        ax3.text(0.95, 0.95, f'Max HROM Tip Error:\n{err_tip_hrom:.2e} m',
+        ax3.text(0.95, 0.95, f'Max HROM Tip Error:\n{err_tip_hrom:.2e}',
                  transform=ax3.transAxes, verticalalignment='top', horizontalalignment='right',
                  bbox=dict(boxstyle='round,pad=0.4', facecolor='white', alpha=0.8, edgecolor='gray'),
                  fontsize=8)
@@ -456,11 +454,11 @@ def plot_elastica_beam(solvers_f, solvers_r=None, solvers_hr=None, data_folder=N
         }]
 
         fig_ply.update_layout(
-            title=f"3D Euler Elastica Flexible Beam Dynamics ({n_nodes} nodes, L={ElasticaConfig.length}m)",
+            title=f"3D Euler Elastica Flexible Beam Dynamics ({n_nodes} nodes, L={ElasticaConfig.length})",
             scene=dict(
-                xaxis_title='X (axial, m)',
-                yaxis_title='Y (lateral, m)',
-                zaxis_title='Z (elevation, m)',
+                xaxis_title='X (axial)',
+                yaxis_title='Y (lateral)',
+                zaxis_title='Z (elevation)',
                 aspectmode='data'
             ),
             updatemenus=updatemenus,

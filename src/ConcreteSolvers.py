@@ -1,11 +1,10 @@
 import os
 import gc
-import hashlib
+import copy
 import warnings
 import numpy as np
 from numpy import linalg as LA
 from tqdm.auto import tqdm
-import matplotlib.pyplot as plt
 
 from System import (MechSystem, HamiltonianMechSystem, LagrangianMechSystem,
                    ReducedHamiltonianMechSystem, ReducedLagrangianMechSystem, HyperReducedHamiltonianMechSystem, HyperReducedLagrangianMechSystem,
@@ -14,7 +13,7 @@ from Reduction import Basis, IdentityBasis, as_basis
 from ODESolver import (ConformalStormerVerlet, ConformalImplicitMidpoint, 
                       DiscreteGradient)
 from ReduceMechSystem import ReduceMechSystem, HamiltonianReducer, DiscreteGradientReducer
-from PlotScript import plot_data, save_figure, timing
+from PlotScript import timing, plot_solvers, plot_combined_errors
 
 def _dask_worker(idx, *arg):
     """
@@ -139,6 +138,7 @@ class ReducedSolverMixin:
         p_r = y_red[nosc_r:].copy()
 
         # 1. Position Gauss-Newton reprojection: g(V q_r) = 0
+        # ASSUMPTION: Standard Euclidean/identity kinetic metric (M = I) used for tangent space projection.
         for _ in range(5):
             q_full = V @ q_r
             y_eval = np.concatenate([q_full, np.zeros(nosc)])
@@ -156,6 +156,8 @@ class ReducedSolverMixin:
             q_r -= G_r.T @ delta_lambda
 
         # 2. Velocity linear projection: G_r (p_r + delta_p_r) = 0
+        # ASSUMPTION: Velocity projection assumes dq/dt = p (identity mass). For general mass matrix M,
+        # the momentum projection onto the constraint nullspace uses M^{-1}: G_r M^{-1} G_r^T.
         q_full = V @ q_r
         y_eval = np.concatenate([q_full, np.zeros(nosc)])
         m = g_fn(y_eval).shape[0] // 2
@@ -635,6 +637,7 @@ class BaseSolverMixin:
             solver: An instance of the solver class with the solved trajectory.
         """
         T_final = kwds.get('T_final', MechSystem.T_final)
+        kwds = kwds.copy()
         kwds['pool'] = {
             'solver_class': solver_class, 
             'dt': dt, 
@@ -796,6 +799,7 @@ class BaseSolverMixin:
     def setup_and_solve_reduced_system(kwds, solvers, client=None):
         """Setup and solve the reduced-order system."""
         print(f'\nSetting up reduced system...')
+        kwds = copy.deepcopy(kwds)
 
         pod_tol = kwds.get('pod_tol', MechSystem.pod_tol_sweep[-1])
 
@@ -848,7 +852,7 @@ class BaseSolverMixin:
             fast_dump(solvers_r, solvers_file)
 
         BaseSolverMixin.compute_convergence_rates(kwds, solvers_r)
-        BaseSolverMixin.plot_solvers(kwds, solvers_r)
+        plot_solvers(kwds, solvers_r)
 
         return solvers_r
 
@@ -856,6 +860,7 @@ class BaseSolverMixin:
     def setup_and_solve_hyperreduced_system(kwds, solvers, client=None):
         """Setup and solve the hyper-reduced system."""
         print(f'\nSetting up hyper-reduced system...')
+        kwds = copy.deepcopy(kwds)
 
         pod_tol = kwds.get('pod_tol', MechSystem.pod_tol_sweep[-1])
 
@@ -885,6 +890,12 @@ class BaseSolverMixin:
         else:
             # Ensure reduction attributes (RB, nosc_r, V_state) are restored on Reducer classes
             BaseSolverMixin._restore_reduction_attrs(kwds)
+            # If Reducer classes lack RB (e.g. clean kwds_hr without solver_data), try restoring from ROM checkpoint
+            if getattr(HamiltonianReducer, 'RB', None) is None:
+                rom_kwds_file = os.path.join(checkpoint_path, f'kwds_r_{tol_suffix}.joblib')
+                if os.path.exists(rom_kwds_file):
+                    rom_kwds = fast_load(rom_kwds_file)
+                    BaseSolverMixin._restore_reduction_attrs(rom_kwds)
 
             # Setup hyperreduction using classmethod
             ham_solvers = [s for s in solvers if not isinstance(s, DiscreteGradient)]
@@ -953,7 +964,11 @@ class BaseSolverMixin:
 
 
         BaseSolverMixin.compute_convergence_rates(kwds, solvers_hr)
-        BaseSolverMixin.plot_solvers(kwds, solvers_hr)
+        plot_solvers(kwds, solvers_hr)
+        try:
+            plot_combined_errors(kwds=kwds, data_folder=checkpoint_path)
+        except Exception as e:
+            print(f"  [Warning] Could not generate combined error plot: {e}")
 
         return solvers_hr
 
@@ -1007,148 +1022,6 @@ class BaseSolverMixin:
                 all_r_values = empirical_orders(en_error, MechSystem.dt_space)
                 for i, dt_val in enumerate(MechSystem.dt_space):
                     print(f"{dt_val:12.6f}" + "".join([f" | {val:12.6f}" for val in all_r_values[i]]))
-
-    @staticmethod
-    def plot_solvers(kwds, solvers):
-        """
-        Generate and display plots for representative solver instances.
-
-        Parameters:
-            kwds (dict): Dictionary of keyword arguments containing registered_solver_classes.
-            solvers (list): List of solver instances used to solve the system.
-        """
-        for solver_class in kwds['registered_solver_classes']:
-            filtered_solvers = [s for s in solvers if s and _matches_solver_family(s, solver_class)]
-            if filtered_solvers:
-                filtered_solvers[-1].plot()
-
-    def plot(self):
-        """
-        Generate and display plots for the simulation results.
-        """
-        # ... (implementation same as original, omitted for brevity but assumed present in full file)
-        # Since I cannot copy the full implementation here without making the response huge, 
-        # I will assume the user copies the plot method from app8_lattice.py to here.
-        # For the purpose of this diff, I will include the full method in the actual file creation if needed,
-        # but here I will just copy it from the context provided.
-        
-        fig = plt.figure(figsize=(12, 12), constrained_layout=True)  # Make figure taller
-        fig.set_constrained_layout_pads(w_pad=0.1, h_pad=0.1, hspace=0.1, wspace=0.1)
-        # fig.tight_layout(pad=0)
-        omega2_hash = hashlib.md5(self.Omega2.tobytes()).hexdigest()[:8]
-        fig.suptitle(rf'integrator = {self.solver_class.__name__}, $\Delta t = {self.dt}$, $\Omega_2$ hash = {omega2_hash}')
-
-        gs = fig.add_gridspec(5, 2)
-        ax0, ax1, ax2, ax3, ax4 = [fig.add_subplot(gs[i, 0]) for i in [0, 1, 2, 3, 4]]
-        ax_pp = fig.add_subplot(gs[:5, -1], projection='3d')
-        ax_pp.set_box_aspect([1, 1, 1])  # Set aspect ratio to be equal for all axes
-
-        if getattr(self, 'sym_error', None) is not None:
-            plot_data(ax0, self.t_points, self.sym_error, xlims=(0, self.T_final), \
-                    ylabel=r'$\Delta Sp$', margins=10)
-
-            if max(abs(self.sym_error)) < 1e-15:
-                ax0.set_ylim([-1e-15, 1e-15])
-
-        if getattr(self, 'g_norm', None) is not None:
-            plot_data(
-                ax1,
-                self.t_points,
-                self.g_norm,
-                xlims=(0, self.T_final),
-                ylabel=r"$\Delta \mathcal{S}$",
-                margins=10,
-            )
-
-        if getattr(self, 'eng_error', None) is not None:
-            plot_data(ax2, self.t_points, self.eng_error, xlims=(0, self.T_final), \
-                    ylabel=r'$\Delta H$', margins=10)
-
-        if getattr(self, 'lin_momentum_err', None) is not None:
-            plot_data(ax3, self.t_points, self.lin_momentum_err, xlims=(0, self.T_final), \
-                    ylabel=r'$\Delta L$', margins=10)
-
-        if getattr(self, 'angular_momentum_err', None) is not None:
-            plot_data(ax4, self.t_points, self.angular_momentum_err, xlims=(0, self.T_final), \
-                    ylabel=r'$\Delta J$', margins=10)
-
-        ax4.set_xlabel('time')
-        # Plot the particle positions / beam centerline over time
-        coords = self.y[:, :self.nosc].reshape(-1, self.nosc // 3, 3)
-        sc = None
-        is_beam = (
-            getattr(self, 'is_elastica', False) or
-            hasattr(self, 'boundary') or
-            'Elastica' in self.__class__.__name__ or
-            (hasattr(self, 'ds') and hasattr(self, 'length'))
-        )
-        if is_beam:
-            n_steps = coords.shape[0]
-            # Pinned support marker at origin
-            ax_pp.scatter([coords[0, 0, 0]], [coords[0, 0, 1]], [coords[0, 0, 2]],
-                          s=80, c='black', marker='s', label='Pinned root', zorder=5)
-            # Trace tip path
-            ax_pp.plot(coords[:, -1, 0], coords[:, -1, 1], coords[:, -1, 2],
-                       'r--', lw=1.2, alpha=0.7, label='Tip path')
-            # Select 15 evenly-spaced snapshots
-            n_snaps = min(15, n_steps)
-            snap_indices = np.linspace(0, n_steps - 1, n_snaps, dtype=int)
-            import matplotlib.cm as mcm
-            import matplotlib.colors as mcolors
-            cmap = mcm.get_cmap('viridis')
-            norm = mcolors.Normalize(vmin=self.t_points[0], vmax=self.t_points[-1])
-            for s_idx in snap_indices:
-                t_val = self.t_points[s_idx]
-                color = cmap(norm(t_val))
-                ax_pp.plot(coords[s_idx, :, 0], coords[s_idx, :, 1], coords[s_idx, :, 2],
-                           color=color, lw=2.2, alpha=0.85)
-                ax_pp.scatter(coords[s_idx, :, 0], coords[s_idx, :, 1], coords[s_idx, :, 2],
-                              color=color, s=12, alpha=0.9)
-            sc = mcm.ScalarMappable(norm=norm, cmap=cmap)
-            sc.set_array(self.t_points)
-        else:
-            for i in range(coords.shape[1]):
-                ax_pp.scatter(coords[0, i, 0], coords[0, i, 1], coords[0, i, 2], s=20, c='teal')  # plot initial configuration
-                # ax_pp.plot(coords[:, i, 0], coords[:, i, 1], coords[:, i, 2], 'k-')  # plot system evolution
-                sc = ax_pp.scatter(coords[:, i, 0], coords[:, i, 1], coords[:, i, 2], c=self.t_points, cmap='viridis', s=1, alpha=0.1)
-
-                # Plot projection onto x-y plane (z=0)
-                ax_pp.plot(coords[:, i, 0], coords[:, i, 1], np.zeros_like(coords[:, i, 2]), 'r-', alpha=0.7)
-
-        # Set the axes' labels and title
-        ax_pp.set_xlabel('x', labelpad=10)
-        ax_pp.set_ylabel('y', labelpad=10)
-        ax_pp.set_zlabel('z', labelpad=10)
-        ax_pp.set_title('Phase portrait')
-        ax_pp.set_box_aspect([1, 1, 1])  # Set aspect ratio to be equal for all axes
-        ax_pp.view_init(elev=15, azim=45)
-
-        if sc:
-            cbar = fig.colorbar(sc, ax=ax_pp, shrink=0.5, pad=0.1)
-            cbar.set_label('Time')
-
-        # Hide inner labels
-        for ax in [ax0, ax1, ax2, ax3, ax4]:
-            ax.label_outer()
-
-        fig.show()            
-
-        fig_data = {
-            't_points': self.t_points,
-            'lin_momentum_err': getattr(self, 'lin_momentum_err', None),
-            'angular_momentum_err': getattr(self, 'angular_momentum_err', None),
-            'coords': coords
-        }
-        if getattr(self, 'sym_error', None) is not None:
-            fig_data['sym_error'] = self.sym_error
-        if getattr(self, 'g_norm', None) is not None:
-            fig_data['g_norm'] = self.g_norm
-        if getattr(self, 'eng_error', None) is not None:
-            fig_data['eng_error'] = self.eng_error
-
-        solver_name_short = self.solver_class.__name__.replace('Conformal', 'C').replace('StormerVerlet', 'SV').replace('ImplicitMidpoint', 'IM').replace('DiscreteGradient', 'DG').replace('HyperReduced', 'HR').replace('Reduced', 'R')
-        filename = os.path.join(MechSystem.data_folder, f"{solver_name_short}.pdf")
-        save_figure(fig, filename, fig_data=fig_data)
 
 class DiscreteGradientFixedPointMixin:
     def __init__(self, kwds):
@@ -1249,7 +1122,9 @@ class ConformalStormerVerletFixedPointMixin:
             # p_{n+1/2}
             p_half1 = p_half_unconstrained - half_dt_G_q0_T @ Lambda_1 # Lambda_1 is 1D
             
-            # q_{n+1}: Exact kinetic relation dq/dt = p for Hamiltonian systems
+            # ASSUMPTION: Separable Hamiltonian kinetics with identity mass (M = I):
+            # \nabla_p H(q, p) = p, which yields dq/dt = p. The position update q_{n+1} = q0 + dt * p_half1
+            # relies directly on \nabla_p H = p. If M != I, this becomes q_{n+1} = q0 + dt * M^{-1} p_half1.
             q_next = q0 + dt * p_half1
             x[1, :neq] = q_next
             
@@ -1278,7 +1153,9 @@ class ConformalStormerVerletFixedPointMixin:
                  raise RuntimeError(f"Nonlinear solver (position) did not converge. m: {m} -- Error: {LA.norm(g_pos)}")
 
         # 2. Velocity Constraints Loop (Solve for Lambda_2)
-        # q_{n+1} and p_half1 are fixed, so G(q_{n+1}) and force_next are constant wrt Lambda_2
+        # ASSUMPTION: Partitioned Störmer-Verlet (RATTLE/SHAKE) splitting:
+        # q_{n+1} and p_half1 are fixed during the velocity projection step. Therefore,
+        # the coupling term (\partial g_vel / \partial q) does not enter the Newton tangent R22 (\Delta q = 0).
         G_qnext = self.g_prime_diag(x[1])[:i0, :i1]
         x[1, neq:] = p_half1
         force_next = f(x[1], None)[neq:]
@@ -1305,6 +1182,11 @@ class ConformalStormerVerletFixedPointMixin:
                 break
                 
             # Jacobian R22 = -0.5 * dt * G(p_{n+1}) @ G(q_{n+1})^T
+            # ASSUMPTION: Linear velocity constraint dependency on momentum:
+            # g_vel(q, p) = G(q) @ p => \partial g_vel / \partial p = G(q).
+            # Hence G_pnext = self.g_prime(x[1])[i0:, i1:] equals G(q_{n+1}) = \nabla_q g_pos(q_{n+1}).
+            # This identity holds strictly for standard holonomic constraints with dq/dt = p,
+            # meaning R22 relies on the same spatial constraint Jacobian G as R11.
             G_pnext = self.g_prime(x[1])[i0:, i1:]
             R22 = G_pnext @ neg_half_dt_G_qnext_T
             
@@ -1341,6 +1223,9 @@ class ConformalStormerVerletFixedPointMixin:
     
     def g_prime_diag(self, y):
         """Compute g_prime using the original method"""
+        # ASSUMPTION: The constraint Jacobian G(y) has identical diagonal blocks:
+        # G_11 = \nabla_q g_pos(q) and G_22 = \nabla_p g_vel(q, p) \equiv \nabla_q g_pos(q).
+        # Slicing [:i0//2, :i1//2] extracts \nabla_q g_pos(q).
         _g_prime = self.g_prime(y)
         i0, i1 = _g_prime.shape
         _g_prime_11 = _g_prime[:i0//2, :i1//2]
@@ -1421,19 +1306,12 @@ REDUCED_SOLVER_MAPPING = {
     ReducedDiscreteGradientSolver: ReducedDiscreteGradientSolver,
     ReducedConformalStormerVerletSolver: ReducedConformalStormerVerletSolver,
     ReducedConformalImplicitMidpointSolver: ReducedConformalImplicitMidpointSolver,
-    # Map hyperreduced back to reduced (idempotent for tier lookup)
-    HyperReducedDiscreteGradientSolver: ReducedDiscreteGradientSolver,
-    HyperReducedConformalStormerVerletSolver: ReducedConformalStormerVerletSolver,
-    HyperReducedConformalImplicitMidpointSolver: ReducedConformalImplicitMidpointSolver
 }
 
 HYPERREDUCED_SOLVER_MAPPING = {
     DiscreteGradientSolver: HyperReducedDiscreteGradientSolver,
     ConformalStormerVerletSolver: HyperReducedConformalStormerVerletSolver,
     ConformalImplicitMidpointSolver: HyperReducedConformalImplicitMidpointSolver,
-    ReducedDiscreteGradientSolver: HyperReducedDiscreteGradientSolver,
-    ReducedConformalStormerVerletSolver: HyperReducedConformalStormerVerletSolver,
-    ReducedConformalImplicitMidpointSolver: HyperReducedConformalImplicitMidpointSolver,
     # Map hyperreduced to hyperreduced (idempotent)
     HyperReducedDiscreteGradientSolver: HyperReducedDiscreteGradientSolver,
     HyperReducedConformalStormerVerletSolver: HyperReducedConformalStormerVerletSolver,

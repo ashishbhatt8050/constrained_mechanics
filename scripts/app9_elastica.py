@@ -3,12 +3,12 @@
 
 import os
 import sys
+import copy
 import shutil
 import argparse
 import numpy as np
 from numpy import linalg as LA
 from matplotlib import rc
-import matplotlib.pyplot as plt
 
 # Set environment variables for single-thread control per worker
 os.environ['OMP_NUM_THREADS'] = '1'
@@ -33,39 +33,8 @@ from ElasticaSystem import (ElasticaConfig, ElasticaMechSystem,
                             make_elastica_initial_conditions,
                             plot_elastica_beam)
 from PlotScript import (plot_omega_distribution, plot_error_vs_basis_size,
-                        plot_prediction_results, save_figure, OKABE_ITO_PALETTE)
-
-
-class TeeLogger:
-    """Tee stdout and stderr to console and multiple logfiles simultaneously."""
-    def __init__(self, original_stream, *log_paths):
-        self.terminal = original_stream
-        self.log_files = []
-        for p in log_paths:
-            os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)
-            self.log_files.append(open(p, 'a', buffering=1))
-
-    def write(self, message):
-        self.terminal.write(message)
-        self.terminal.flush()
-        for f in self.log_files:
-            try:
-                f.write(message)
-                f.flush()
-            except Exception:
-                pass
-
-    def flush(self):
-        self.terminal.flush()
-        for f in self.log_files:
-            try:
-                f.flush()
-            except Exception:
-                pass
-
-    def add_log_path(self, p):
-        os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)
-        self.log_files.append(open(p, 'a', buffering=1))
+                        plot_prediction_results, plot_solvers,
+                        plot_prediction_sanity_check, plot_combined_errors)
 
 
 def _collect_metric(solver_list, cls, metric_fn):
@@ -195,55 +164,19 @@ def run_prediction_sanity_check(kwds, solvers_r, solvers_hr, original_solver_cla
             print(f"  Component breakdown: ROM (q_err={err_r_q:.2e}, p_err={err_r_p:.2e}) | HROM (q_err={err_hr_q:.2e}, p_err={err_hr_p:.2e})")
 
             # 5. Generate Diagnostic Plot
-            fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-            t = s_f.t_points
-
-            # (a) Pointwise Trajectory Error over time (log scale)
-            err_r_t = np.amax(np.abs(s_f.y - s_r.y), axis=1)
-            err_hr_t = np.amax(np.abs(s_f.y - s_hr.y), axis=1)
-            axes[0, 0].semilogy(t, err_r_t, label='ROM Error', color=OKABE_ITO_PALETTE[0], lw=1.8)
-            axes[0, 0].semilogy(t, err_hr_t, label='HROM Error', color=OKABE_ITO_PALETTE[1], ls='--', lw=1.8)
-            axes[0, 0].set_title(r"Max State Error $\|y_{\mathrm{FOM}}(t) - y_{\mathrm{model}}(t)\|_\infty$")
-            axes[0, 0].set_xlabel("Time (s)")
-            axes[0, 0].grid(True, which="both", ls=":")
-            axes[0, 0].legend()
-
-            # (b) Tip Vertical Deflection Comparison z_tip(t)
-            axes[0, 1].plot(t, z_tip_f, label='FOM', color='black', lw=2.0)
-            axes[0, 1].plot(t, z_tip_r, label='ROM', color=OKABE_ITO_PALETTE[0], ls='--', lw=1.8)
-            axes[0, 1].plot(t, z_tip_hr, label='HROM', color=OKABE_ITO_PALETTE[1], ls=':', lw=1.8)
-            axes[0, 1].set_title(r"Tip Deflection $z_{\mathrm{tip}}(t)$")
-            axes[0, 1].set_xlabel("Time (s)")
-            axes[0, 1].set_ylabel("Tip Deflection (m)")
-            axes[0, 1].grid(True, ls=":")
-            axes[0, 1].legend()
-
-            # (c) Energy Invariant Drift
-            if getattr(s_f, 'eng_error', None) is not None:
-                axes[1, 0].semilogy(t, np.abs(s_f.eng_error) + 1e-16, label='FOM', color='black', lw=1.5)
-                axes[1, 0].semilogy(t, np.abs(s_r.eng_error) + 1e-16, label='ROM', color=OKABE_ITO_PALETTE[0], ls='--', lw=1.5)
-                axes[1, 0].semilogy(t, np.abs(s_hr.eng_error) + 1e-16, label='HROM', color=OKABE_ITO_PALETTE[1], ls=':', lw=1.5)
-                axes[1, 0].set_title(r"Energy Drift $|\Delta H(t)|$")
-                axes[1, 0].set_xlabel("Time (s)")
-                axes[1, 0].grid(True, which="both", ls=":")
-                axes[1, 0].legend()
-
-            # (d) Symplectic Invariant Error
-            if getattr(s_f, 'sym_error', None) is not None:
-                axes[1, 1].semilogy(t, np.abs(s_f.sym_error) + 1e-16, label='FOM', color='black', lw=1.5)
-                axes[1, 1].semilogy(t, np.abs(s_r.sym_error) + 1e-16, label='ROM', color=OKABE_ITO_PALETTE[0], ls='--', lw=1.5)
-                axes[1, 1].semilogy(t, np.abs(s_hr.sym_error) + 1e-16, label='HROM', color=OKABE_ITO_PALETTE[1], ls=':', lw=1.5)
-                axes[1, 1].set_title(r"Symplectic Error $|\Delta \mathrm{Sp}(t)|$")
-                axes[1, 1].set_xlabel("Time (s)")
-                axes[1, 1].grid(True, which="both", ls=":")
-                axes[1, 1].legend()
-
-            fig.suptitle(f"Sanity Check: Elastica {cls_name} | dt={dt:.4f} | Omega2 (test[-1])", fontsize=14)
-            plt.tight_layout()
-
             plot_path = os.path.join(MechSystem.data_folder, f"sanity_check_{cls_name}_dt_{dt:.4f}.pdf")
-            save_figure(fig, plot_path)
-            plt.close(fig)
+            plot_prediction_sanity_check(
+                s_f, s_r, s_hr,
+                plot_path=plot_path,
+                coord_series=(z_tip_f, z_tip_r, z_tip_hr),
+                coord_label=r"Tip deflection $z_{\mathrm{tip}}(t)$",
+                coord_ylabel="Tip deflection",
+                system_label="Elastica",
+                target_idx=len(MechSystem.Omega2_space_test) - 1,
+                target_omega2=last_omega2,
+                cls_name=cls_name,
+                dt=dt,
+            )
             print(f"  Saved comparison plot to: {plot_path}")
 
             # 6. Generate dedicated 3D/2D Elastica beam plot for this test parameter
@@ -297,7 +230,6 @@ if __name__ == '__main__':
 
     # 2. Configure MechSystem
     MechSystem.nosc = nosc
-    MechSystem.generate_pgfplots_data = not args.no_pgfplots
     MechSystem.predict = ElasticaConfig.predict
     MechSystem.dt_space = ElasticaConfig.dt_space
     MechSystem.dt_space_dim = len(ElasticaConfig.dt_space)
@@ -308,12 +240,6 @@ if __name__ == '__main__':
     MechSystem.M = ElasticaConfig.M
     MechSystem.data_folder = ElasticaMechSystem.data_folder
     os.makedirs(MechSystem.data_folder, exist_ok=True)
-
-    # Set up dedicated Tee logger for Elastica (root logfile)
-    logfile_root = os.path.abspath("logfile_elastica.txt")
-    sys.stdout = TeeLogger(sys.stdout, logfile_root)
-    sys.stderr = TeeLogger(sys.stderr, logfile_root)
-    print(f"Logging to: {logfile_root}", flush=True)
 
     # Recompute initial state satisfying g(q0) = 0 and d/dt g(q0, p0) = 0
     MechSystem.y_init = make_elastica_initial_conditions(n_nodes, ElasticaConfig.ds, ElasticaConfig.boundary)
@@ -349,16 +275,7 @@ if __name__ == '__main__':
                  clean_checkpoints=args.clean,
                  clean_symbolic=args.clear_symbolic)
 
-    # Attach run-folder logfile after cache/checkpoint cleaning
     os.makedirs(checkpoint_path, exist_ok=True)
-    logfile_run = os.path.join(checkpoint_path, "logfile.txt")
-    if os.path.exists(logfile_root):
-        shutil.copy2(logfile_root, logfile_run)
-    if hasattr(sys.stdout, 'add_log_path'):
-        sys.stdout.add_log_path(logfile_run)
-    if hasattr(sys.stderr, 'add_log_path'):
-        sys.stderr.add_log_path(logfile_run)
-    print(f"Run-specific log initialized at: {logfile_run}", flush=True)
 
     # 3. Compute or load symbolic expressions
     if not os.path.exists(expressions_file):
@@ -386,16 +303,14 @@ if __name__ == '__main__':
                                 filename=os.path.join(MechSystem.data_folder, "omega2_dist.pdf"))
 
     # 4. Cluster Setup
-    kwds = {
+    original_solver_classes = [ConformalStormerVerletSolver]
+    base_kwds = {
         "nosc": nosc,
-        "registered_solver_classes": [ConformalStormerVerletSolver]
-    }
-    original_solver_classes = list(kwds['registered_solver_classes'])
-    kwds.update({
+        "registered_solver_classes": list(original_solver_classes),
         'Omega2_space': MechSystem.Omega2_space,
         'Omega2_space_dim': len(MechSystem.Omega2_space),
         'pod_tol_sweep': MechSystem.pod_tol_sweep
-    })
+    }
 
     # Determine number of workers safely:
     if args.n_workers is not None:
@@ -427,28 +342,25 @@ if __name__ == '__main__':
         print("Computing full Elastica solution...")
         kwds_file = os.path.join(checkpoint_path, 'kwds.joblib')
         solvers_file = os.path.join(checkpoint_path, 'solvers.joblib')
+        kwds_f = copy.deepcopy(base_kwds)
 
         if check_checkpoint_exists(checkpoint_path, kwds_file, solvers_file):
             print("Loading full Elastica solution from checkpoint...")
-            kwds = fast_load(kwds_file)
+            kwds_f = fast_load(kwds_file)
             solvers = fast_load(solvers_file)
         else:
-            BaseSolverMixin.parallel_solve_mech_system(kwds, solvers, client=client)
+            BaseSolverMixin.parallel_solve_mech_system(kwds_f, solvers, client=client)
             os.makedirs(checkpoint_path, exist_ok=True)
             print("Creating new checkpoint for full Elastica model...")
-            fast_dump(kwds, kwds_file)
+            fast_dump(kwds_f, kwds_file)
             fast_dump(solvers, solvers_file)
 
-        BaseSolverMixin.compute_convergence_rates(kwds, solvers)
-        BaseSolverMixin.plot_solvers(kwds, solvers)
+        BaseSolverMixin.compute_convergence_rates(kwds_f, solvers)
+        plot_solvers(kwds_f, solvers)
 
         # --- Reduced order setup ---
         print("Setting up snapshot indices for Elastica POD...")
         MechSystem.indices_list = [np.arange(solver.n) for solver in solvers]
-        kwds.update({
-            'Omega2_space': MechSystem.Omega2_space_test,
-            'Omega2_space_dim': len(MechSystem.Omega2_space_test),
-        })
 
         study_data = {cls.__name__: {
             'sizes': [], 'sizes_hr': [], 'err_r': [], 'err_hr': [],
@@ -460,14 +372,26 @@ if __name__ == '__main__':
             'ang_mom_error_f': [], 'ang_mom_error_r': [], 'ang_mom_error_hr': []
         } for cls in original_solver_classes}
 
-        for tol in kwds['pod_tol_sweep']:
+        for tol in base_kwds['pod_tol_sweep']:
             print(f"\n>>> Running MOR sweep for tolerance: {tol}")
-            kwds['pod_tol'] = tol
-            kwds['registered_solver_classes'] = list(original_solver_classes)
+
+            kwds_r = copy.deepcopy(base_kwds)
+            kwds_r.update({
+                'pod_tol': tol,
+                'Omega2_space': MechSystem.Omega2_space_test,
+                'Omega2_space_dim': len(MechSystem.Omega2_space_test),
+            })
+
+            kwds_hr = copy.deepcopy(base_kwds)
+            kwds_hr.update({
+                'pod_tol': tol,
+                'Omega2_space': MechSystem.Omega2_space_test,
+                'Omega2_space_dim': len(MechSystem.Omega2_space_test),
+            })
 
             # Solve Reduced and Hyper-reduced (with adaptive traveling bases!)
-            solvers_r = BaseSolverMixin.setup_and_solve_reduced_system(kwds, solvers, client=client)
-            solvers_hr = BaseSolverMixin.setup_and_solve_hyperreduced_system(kwds, solvers, client=client)
+            solvers_r = BaseSolverMixin.setup_and_solve_reduced_system(kwds_r, solvers, client=client)
+            solvers_hr = BaseSolverMixin.setup_and_solve_hyperreduced_system(kwds_hr, solvers, client=client)
 
             if not MechSystem.predict:
                 for cls_idx, cls in enumerate(original_solver_classes):
@@ -553,11 +477,19 @@ if __name__ == '__main__':
 
             # Sanity check: evaluate ground-truth test FOM vs ROM and HROM predictions
             if 'solvers_r' in locals() and 'solvers_hr' in locals():
-                run_prediction_sanity_check(kwds, solvers_r, solvers_hr, original_solver_classes)
+                sanity_kwds = kwds_hr if 'kwds_hr' in locals() else base_kwds
+                run_prediction_sanity_check(sanity_kwds, solvers_r, solvers_hr, original_solver_classes)
 
         # Dedicated 3D and 2D Elastica beam visualization
         print("\nGenerating dedicated 3D and 2D Elastica beam plots...")
         plot_elastica_beam(solvers, solvers_r, solvers_hr, data_folder=MechSystem.data_folder)
+
+        # Combined error plot for FOM, ROM, and HROM
+        print("\nGenerating combined error plot across model reduction orders...")
+        plot_combined_errors(
+            data_folder=MechSystem.data_folder,
+            registered_solver_classes=original_solver_classes
+        )
 
         print("\nElastica Model Order Reduction study completed successfully!")
 

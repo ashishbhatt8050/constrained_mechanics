@@ -233,6 +233,9 @@ class ConformalStormerVerlet(ODESolver):
         ODESolver.__init__(self, kwds)
 
     def advance(self):
+        # ASSUMPTION: Separable Hamiltonian with standard kinetic relation:
+        # \nabla_p H(q, p) = p (identity mass M = I), and \nabla_q H independent of p.
+        # Intermediate step f_eval_1[:half] evaluates \nabla_p H to advance position coordinates.
         u, f, k, t, neq = self.u, self.f, self.k, self.t, self.neq
         dt = self.dt
         Gamma_p, Gamma_m = self.Gamma_p(dt), self.Gamma_m(dt)
@@ -255,6 +258,9 @@ class ConformalStormerVerlet(ODESolver):
         return u_buf, u_buf
 
     def var_advance(self):
+        # ASSUMPTION: Separable Hamiltonian with zero cross-derivatives:
+        # H_{qp} = H_{pq} = 0. The variational advance matrix explicitly partitions
+        # dfdu into H_qq and H_pp diagonal blocks.
         u, f, dfdu, k, t, Ecoeff, neq = self.u, self.f, self.dfdu, self.k, \
                                             self.t, self.Ecoeff, self.neq
         dt = self.dt

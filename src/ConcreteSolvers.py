@@ -83,7 +83,185 @@ def _matches_solver_family(solver, base_cls):
     return bool(stripped_solver and stripped_base and stripped_solver == stripped_base)
 
 
-class ReducedSolverMixin:
+class MassMatrixOperator:
+    """
+    Polymorphic operator for mass matrix M and inverse mass matrix M^{-1}.
+    
+    Supports:
+      - 'identity': M = I, returns vector/matrix directly (zero overhead).
+      - 'scalar': M = m * I, scales directly by 1/m (or m).
+      - 'diagonal': M = diag(m), multiplies element-wise by precomputed 1/m (O(N) / broadcast).
+      - 'direct': Precomputed 2D M^{-1}, matrix multiplication M^{-1} @ A.
+      - 'solve': Linear solve M @ X = A via Cholesky / linsolve (more stable for ill-conditioned M).
+    """
+    def __init__(self, mass=None, inv_mass=None, mode='auto'):
+        self.mode = mode
+        self.mass = mass
+        self.inv_mass = inv_mass
+        self._cho = None
+        self._use_cho = False
+        self._setup()
+
+    def _setup(self):
+        if self.inv_mass is None and self.mass is None:
+            self.mode = 'identity'
+            return
+
+        # Scalar
+        if isinstance(self.inv_mass, (int, float, np.floating, np.integer)):
+            self.mode = 'scalar'
+            self.inv_m = float(self.inv_mass)
+            self.m = 1.0 / self.inv_m if self.inv_m != 0 else np.nan
+            return
+        if isinstance(self.mass, (int, float, np.floating, np.integer)):
+            self.mode = 'scalar'
+            self.m = float(self.mass)
+            self.inv_m = 1.0 / self.m if self.m != 0 else np.nan
+            return
+
+        # 1D array -> diagonal
+        if self.inv_mass is not None and isinstance(self.inv_mass, np.ndarray) and self.inv_mass.ndim == 1:
+            if np.allclose(self.inv_mass, self.inv_mass[0]):
+                self.mode = 'scalar'
+                self.inv_m = float(self.inv_mass[0])
+                self.m = 1.0 / self.inv_m if self.inv_m != 0 else np.nan
+                return
+            self.mode = 'diagonal'
+            self.inv_diag = np.ascontiguousarray(self.inv_mass, dtype=float)
+            self.diag = 1.0 / self.inv_diag if self.mass is None else np.ascontiguousarray(self.mass, dtype=float)
+            return
+        if self.mass is not None and isinstance(self.mass, np.ndarray) and self.mass.ndim == 1:
+            if np.allclose(self.mass, self.mass[0]):
+                self.mode = 'scalar'
+                self.m = float(self.mass[0])
+                self.inv_m = 1.0 / self.m if self.m != 0 else np.nan
+                return
+            self.mode = 'diagonal'
+            self.diag = np.ascontiguousarray(self.mass, dtype=float)
+            self.inv_diag = 1.0 / self.diag
+            return
+
+        # 2D array
+        if self.mode == 'auto':
+            if self.mass is not None and isinstance(self.mass, np.ndarray) and self.mass.ndim == 2:
+                if np.allclose(self.mass, np.diag(np.diag(self.mass))):
+                    diag_m = np.diag(self.mass)
+                    if np.allclose(diag_m, diag_m[0]):
+                        self.mode = 'scalar'
+                        self.m = float(diag_m[0])
+                        self.inv_m = 1.0 / self.m if self.m != 0 else np.nan
+                        return
+                    self.mode = 'diagonal'
+                    self.diag = diag_m
+                    self.inv_diag = 1.0 / self.diag
+                    return
+            if self.inv_mass is not None and isinstance(self.inv_mass, np.ndarray) and self.inv_mass.ndim == 2:
+                if np.allclose(self.inv_mass, np.diag(np.diag(self.inv_mass))):
+                    diag_inv = np.diag(self.inv_mass)
+                    if np.allclose(diag_inv, diag_inv[0]):
+                        self.mode = 'scalar'
+                        self.inv_m = float(diag_inv[0])
+                        self.m = 1.0 / self.inv_m if self.inv_m != 0 else np.nan
+                        return
+                    self.mode = 'diagonal'
+                    self.inv_diag = diag_inv
+                    self.diag = 1.0 / self.inv_diag
+                    return
+
+            if self.inv_mass is not None:
+                self.mode = 'direct'
+            elif self.mass is not None:
+                self.mode = 'solve'
+
+        if self.mode == 'direct':
+            if self.inv_mass is None and self.mass is not None:
+                import scipy.linalg as sla
+                self.inv_mass = sla.inv(self.mass)
+        elif self.mode == 'solve':
+            if self.mass is None and self.inv_mass is not None:
+                import scipy.linalg as sla
+                self.mass = sla.inv(self.inv_mass)
+            try:
+                import scipy.linalg as sla
+                self._cho = sla.cho_factor(self.mass)
+                self._use_cho = True
+            except Exception:
+                self._use_cho = False
+
+    def apply_inv(self, A):
+        """Apply M^{-1} to 1D vector (N,) or 2D matrix (N, K)."""
+        if self.mode == 'identity':
+            return A
+        elif self.mode == 'scalar':
+            return self.inv_m * A
+        elif self.mode == 'diagonal':
+            if A.ndim == 1:
+                return self.inv_diag * A
+            return self.inv_diag[:, None] * A
+        elif self.mode == 'direct':
+            return self.inv_mass @ A
+        elif self.mode == 'solve':
+            import scipy.linalg as sla
+            if self._use_cho:
+                return sla.cho_solve(self._cho, A)
+            return sla.solve(self.mass, A, assume_a='pos')
+        raise ValueError(f"Unknown MassMatrixOperator mode: {self.mode}")
+
+    def apply(self, A):
+        """Apply M to 1D vector (N,) or 2D matrix (N, K)."""
+        if self.mode == 'identity':
+            return A
+        elif self.mode == 'scalar':
+            return self.m * A
+        elif self.mode == 'diagonal':
+            if A.ndim == 1:
+                return self.diag * A
+            return self.diag[:, None] * A
+        elif self.mode in ('direct', 'solve'):
+            if self.mass is not None:
+                return self.mass @ A
+            import scipy.linalg as sla
+            return sla.inv(self.inv_mass) @ A
+        raise ValueError(f"Unknown MassMatrixOperator mode: {self.mode}")
+
+
+class MassOperatorMixin:
+    """Mixin providing polymorphic mass matrix operations."""
+
+    @property
+    def mass_operator(self):
+        op = getattr(self, '_mass_operator', None)
+        if op is None:
+            mass = getattr(self, 'mass', getattr(self, 'mass_matrix', None))
+            inv_mass = getattr(self, 'inv_mass', getattr(self, 'M_inv', None))
+            mode = getattr(self, 'mass_solver_mode', 'auto')
+
+            if mass is None and inv_mass is None:
+                mass_node = getattr(self, 'mass_node', None)
+                if mass_node is None and hasattr(self, 'mass_total') and hasattr(self, 'n_nodes'):
+                    mass_node = float(self.mass_total) / float(self.n_nodes)
+                if mass_node is not None:
+                    inv_mass = 1.0 / float(mass_node)
+                    mass = float(mass_node)
+
+            self._mass_operator = MassMatrixOperator(mass=mass, inv_mass=inv_mass, mode=mode)
+            op = self._mass_operator
+        return op
+
+    @mass_operator.setter
+    def mass_operator(self, op):
+        self._mass_operator = op
+
+    def apply_M_inv(self, A):
+        """Apply M^{-1} to vector or matrix A polymorphically."""
+        return self.mass_operator.apply_inv(A)
+
+    def apply_M(self, A):
+        """Apply M to vector or matrix A polymorphically."""
+        return self.mass_operator.apply(A)
+
+
+class ReducedSolverMixin(MassOperatorMixin):
     """Mixin providing polymorphic hooks for reduced-order and hyper-reduced solvers."""
     model_tier = 'rom'
 
@@ -155,20 +333,22 @@ class ReducedSolverMixin:
                 delta_lambda = LA.lstsq(G_r @ G_r.T, g_q, rcond=None)[0]
             q_r -= G_r.T @ delta_lambda
 
-        # 2. Velocity linear projection: G_r (p_r + delta_p_r) = 0
-        # ASSUMPTION: Velocity projection assumes dq/dt = p (identity mass). For general mass matrix M,
-        # the momentum projection onto the constraint nullspace uses M^{-1}: G_r M^{-1} G_r^T.
+        # 2. Velocity linear projection: G_r M_r^{-1} (p_r + delta_p_r) = 0
+        # For general mass matrix M, the momentum projection onto the constraint nullspace uses M^{-1}:
+        # G_r M_r^{-1} G_r^T delta_lambda_p = G_r M_r^{-1} p_r
         q_full = V @ q_r
         y_eval = np.concatenate([q_full, np.zeros(nosc)])
         m = g_fn(y_eval).shape[0] // 2
         G_q = g_prime_fn(y_eval)[:m, :nosc]
         G_r = G_q @ V
-        Gp = G_r @ p_r
+        M_inv_Gr_T = self.apply_M_inv(G_r.T)
+        Gp = G_r @ self.apply_M_inv(p_r)
         if LA.norm(Gp) > 1e-12:
+            gram = G_r @ M_inv_Gr_T
             try:
-                delta_lambda_p = LA.solve(G_r @ G_r.T, Gp)
+                delta_lambda_p = LA.solve(gram, Gp)
             except LA.LinAlgError:
-                delta_lambda_p = LA.lstsq(G_r @ G_r.T, Gp, rcond=None)[0]
+                delta_lambda_p = LA.lstsq(gram, Gp, rcond=None)[0]
             p_r -= G_r.T @ delta_lambda_p
 
         y_proj = np.empty_like(y_red)
@@ -213,7 +393,7 @@ class HyperReducedSolverMixin(ReducedSolverMixin):
     model_tier = 'hrom'
 
 
-class BaseSolverMixin:
+class BaseSolverMixin(MassOperatorMixin):
     """
     Base mixin class providing common solving capabilities for solvers.
     """
@@ -1112,8 +1292,8 @@ class ConformalStormerVerletFixedPointMixin:
         # p_half (unconstrained)
         p_half_unconstrained = p0 + 0.5 * dt * f(x[0], None)[neq:]
 
-        # Precompute position Jacobian factor: (-0.5 * dt^2) * G(q0)^T
-        half_dt2_G_q0_T = (-0.5 * dt**2) * G_q0.T
+        # Precompute position Jacobian factor: (-0.5 * dt^2) * (M^{-1} @ G(q0)^T)
+        half_dt2_M_inv_G_q0_T = (-0.5 * dt**2) * self.apply_M_inv(G_q0.T)
         half_dt_G_q0_T = 0.5 * dt * G_q0.T
         
         # 1. Position Constraints Loop (Solve for Lambda_1)
@@ -1122,10 +1302,8 @@ class ConformalStormerVerletFixedPointMixin:
             # p_{n+1/2}
             p_half1 = p_half_unconstrained - half_dt_G_q0_T @ Lambda_1 # Lambda_1 is 1D
             
-            # ASSUMPTION: Separable Hamiltonian kinetics with identity mass (M = I):
-            # \nabla_p H(q, p) = p, which yields dq/dt = p. The position update q_{n+1} = q0 + dt * p_half1
-            # relies directly on \nabla_p H = p. If M != I, this becomes q_{n+1} = q0 + dt * M^{-1} p_half1.
-            q_next = q0 + dt * p_half1
+            # Position update: q_{n+1} = q0 + dt * M^{-1} @ p_half1
+            q_next = q0 + dt * self.apply_M_inv(p_half1)
             x[1, :neq] = q_next
             
             # Check position constraints
@@ -1138,9 +1316,9 @@ class ConformalStormerVerletFixedPointMixin:
             if norm_g_pos < self.tol:
                 break
                 
-            # Jacobian R11 = G(q_{n+1}) @ (-0.5 * dt^2 * G(q0)^T)
+            # Jacobian R11 = G(q_{n+1}) @ (-0.5 * dt^2 * M^{-1} @ G(q0)^T)
             G_qnext = self.g_prime_diag(x[1])[:i0, :i1]
-            R11 = G_qnext @ half_dt2_G_q0_T
+            R11 = G_qnext @ half_dt2_M_inv_G_q0_T
             
             Delta_Lambda_1 = LA.lstsq(R11, g_pos, rcond=None)[0]
             Lambda_1 -= Delta_Lambda_1
@@ -1149,6 +1327,8 @@ class ConformalStormerVerletFixedPointMixin:
         if m >= self.M:
              if getattr(self, 'RB', None) is not None and LA.norm(g_pos) < 1e-5 and not m%100:
                  print(f"Warning: Position constraints not fully satisfied (error={LA.norm(g_pos):.2e}) in reduced model. Continuing.", flush=True)
+             elif LA.norm(g_pos) < 1e-10:
+                 pass  # Satisfied up to double-precision floating-point roundoff floor
              else:
                  raise RuntimeError(f"Nonlinear solver (position) did not converge. m: {m} -- Error: {LA.norm(g_pos)}")
 
@@ -1193,10 +1373,14 @@ class ConformalStormerVerletFixedPointMixin:
             Delta_Lambda_2 = LA.lstsq(R22, g_vel, rcond=None)[0]
             Lambda_2 -= Delta_Lambda_2
             m += 1
+            if norm_g_vel < 1e-10 and LA.norm(Delta_Lambda_2) < 1e-14 * (LA.norm(Lambda_2) + 1.0):
+                break
             
         if m >= self.M:
              if getattr(self, 'RB', None) is not None and LA.norm(g_vel) < 1e-5 and not m%100:
                  print(f"Warning: Velocity constraints not fully satisfied (error={LA.norm(g_vel):.2e}) in reduced model. Continuing.", flush=True)
+             elif LA.norm(g_vel) < 1e-10:
+                 pass  # Satisfied up to double-precision floating-point roundoff floor
              else:
                  raise RuntimeError(f"Nonlinear solver (velocity) did not converge. m: {m} -- Error: {LA.norm(g_vel)}")
              

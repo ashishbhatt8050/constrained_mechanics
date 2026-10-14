@@ -276,8 +276,8 @@ if __name__ == '__main__':
         args.no_pgfplots = True
         print(f"Quick smoke-test mode: n_nodes={n_nodes}, t_final={t_final}s, n_samples={n_samples}")
     else:
-        n_nodes = 21 if args.n_nodes is None else args.n_nodes
-        t_final = 3.0 if args.t_final is None else args.t_final
+        n_nodes = ElasticaConfig.n_nodes if args.n_nodes is None else args.n_nodes
+        t_final = ElasticaConfig.T_final if args.t_final is None else args.t_final
         if args.n_samples is not None:
             n_samples = args.n_samples
             split_idx = max(1, int(n_samples * ElasticaConfig.train_ratio))
@@ -295,6 +295,9 @@ if __name__ == '__main__':
     ElasticaConfig.n_nodes = n_nodes
     ElasticaConfig.nosc = nosc
     ElasticaConfig.ds = ElasticaConfig.length / (n_nodes - 1)
+    ElasticaConfig.mass_node = ElasticaConfig.mass_total / n_nodes
+    ElasticaConfig.mass = ElasticaConfig.mass_node
+    ElasticaConfig.inv_mass = 1.0 / ElasticaConfig.mass_node
     ElasticaConfig.num_joints = n_nodes - 2
     ElasticaConfig.T_final = t_final
     ElasticaConfig._Omega2_space_dim = n_samples
@@ -307,6 +310,9 @@ if __name__ == '__main__':
 
     # 2. Configure MechSystem
     MechSystem.nosc = nosc
+    MechSystem.mass_node = ElasticaConfig.mass_node
+    MechSystem.mass = ElasticaConfig.mass
+    MechSystem.inv_mass = ElasticaConfig.inv_mass
     MechSystem.predict = ElasticaConfig.predict
     MechSystem.dt_space = ElasticaConfig.dt_space
     MechSystem.dt_space_dim = len(ElasticaConfig.dt_space)
@@ -350,7 +356,12 @@ if __name__ == '__main__':
     cache_dir = get_data_dir('joblib_cache_elastica')
     os.makedirs(cache_dir, exist_ok=True)
     checkpoint_path = MechSystem.data_folder
-    expressions_file = get_symbolic_expressions_file_elastica(nosc)
+    expressions_file = get_symbolic_expressions_file_elastica(
+        nosc,
+        length=ElasticaConfig.length,
+        mass_total=ElasticaConfig.mass_total,
+        boundary=ElasticaConfig.boundary,
+    )
     config_hash = MechSystem.get_config_hash()
 
     manage_cache(nosc, config_hash, cache_dir, checkpoint_path, expressions_file,
@@ -364,7 +375,7 @@ if __name__ == '__main__':
     if not os.path.exists(expressions_file):
         print(f"Generating Elastica symbolic expressions for nosc={nosc} (nodes={n_nodes})...")
         computer = ElasticaSymbolicComputer(nosc, length=ElasticaConfig.length,
-                                            mass_total=float(n_nodes),
+                                            mass_total=ElasticaConfig.mass_total,
                                             gravity=ElasticaConfig.gravity,
                                             boundary=ElasticaConfig.boundary)
         expressions = {}
@@ -372,9 +383,9 @@ if __name__ == '__main__':
         print(f"Computed Elastica symbolic expressions in {tl:.2f} seconds.")
         os.makedirs(os.path.dirname(expressions_file), exist_ok=True)
         fast_dump(expressions, expressions_file)
-        persistent_file = os.path.join('data', f"symbolic_expr_elastica_{nosc}_cse.pickle")
+        persistent_file = os.path.join('data', os.path.basename(expressions_file))
         if os.path.abspath(expressions_file) != os.path.abspath(persistent_file):
-            os.makedirs('data', exist_ok=True)
+            os.makedirs(os.path.dirname(persistent_file), exist_ok=True)
             fast_dump(expressions, persistent_file)
 
     load_symbolic_expressions(HamiltonianMechSystem, expressions_file=expressions_file)
@@ -389,6 +400,8 @@ if __name__ == '__main__':
     original_solver_classes = [ConformalStormerVerletSolver]
     base_kwds = {
         "nosc": nosc,
+        "mass": ElasticaConfig.mass,
+        "inv_mass": ElasticaConfig.inv_mass,
         "registered_solver_classes": list(original_solver_classes),
         'Omega2_space': MechSystem.Omega2_space,
         'Omega2_space_dim': len(MechSystem.Omega2_space),
@@ -418,15 +431,18 @@ if __name__ == '__main__':
     print(f"Dask cluster started with {len(client.scheduler_info()['workers'])} workers.", flush=True)
 
     # Initialize all Dask worker processes with the Elastica symbolic expressions and configuration
-    def init_elastica_worker(expr_file, nosc_val, y_init_val, t_final_val):
+    def init_elastica_worker(expr_file, nosc_val, y_init_val, t_final_val, mass_val, inv_mass_val):
         from System import MechSystem, HamiltonianMechSystem, load_symbolic_expressions
         MechSystem.nosc = nosc_val
         MechSystem.y_init = y_init_val
         MechSystem.T_final = t_final_val
+        MechSystem.mass = mass_val
+        MechSystem.inv_mass = inv_mass_val
         MechSystem.has_momentum_invariants = False
         load_symbolic_expressions(HamiltonianMechSystem, expressions_file=expr_file)
 
-    client.run(init_elastica_worker, expressions_file, nosc, MechSystem.y_init, MechSystem.T_final)
+    client.run(init_elastica_worker, expressions_file, nosc, MechSystem.y_init, MechSystem.T_final,
+               ElasticaConfig.mass, ElasticaConfig.inv_mass)
 
     try:
         # --- Full order solution ---
@@ -451,6 +467,9 @@ if __name__ == '__main__':
 
         # --- Reduced order setup ---
         print("Setting up snapshot indices for Elastica POD...")
+        if not solvers or any(s is None for s in solvers):
+            failed_count = sum(1 for s in solvers if s is None) if solvers else "all"
+            raise RuntimeError(f"FOM solve failed: {failed_count} solver(s) returned None. Check worker logs.")
         MechSystem.indices_list = [np.arange(solver.n) for solver in solvers]
 
         study_data = {cls.__name__: {

@@ -18,20 +18,44 @@ np.random.seed(42)
 rng = np.random.default_rng(seed=42)
 
 
-def get_symbolic_expressions_file_elastica(nosc):
+def get_symbolic_expressions_file_elastica(nosc, length=None, mass_total=None, boundary="pinned"):
     """Path to the cached symbolic expressions for Elastica."""
-    filename = f"symbolic_expr_elastica_{nosc}_cse.pickle"
+    if length is None:
+        length = getattr(ElasticaConfig, 'length', 1.0)
+    if mass_total is None:
+        mass_total = getattr(ElasticaConfig, 'mass_total', 1.0)
+
+    filename = f"symbolic_expr_elastica_{nosc}_L{float(length):.1f}_M{float(mass_total):.1f}_{boundary}_cse.pickle"
     scratch_file = get_data_dir(filename)
     persistent_file = os.path.join('data', filename)
-    if not os.path.exists(scratch_file) and os.path.exists(persistent_file):
+    if os.path.exists(scratch_file):
+        return scratch_file
+    if os.path.exists(persistent_file):
         return persistent_file
-    return scratch_file
+
+    # Fallback to legacy filename only if parameters match legacy defaults (L=1.0, M=float(n_nodes))
+    legacy_name = f"symbolic_expr_elastica_{nosc}_cse.pickle"
+    legacy_scratch = get_data_dir(legacy_name)
+    legacy_persistent = os.path.join('data', legacy_name)
+    n_nodes = nosc // 3
+    if np.isclose(float(length), 1.0) and np.isclose(float(mass_total), float(n_nodes)) and boundary == "pinned":
+        if os.path.exists(legacy_persistent):
+            return legacy_persistent
+        if os.path.exists(legacy_scratch):
+            return legacy_scratch
+
+    return persistent_file
 
 
 def load_symbolic_expressions_elastica(cls):
     """Class decorator to load cached elastica symbolic expressions."""
     try:
-        expr_file = get_symbolic_expressions_file_elastica(cls.nosc)
+        expr_file = get_symbolic_expressions_file_elastica(
+            cls.nosc,
+            length=getattr(cls, 'length', None),
+            mass_total=getattr(cls, 'mass_total', None),
+            boundary=getattr(cls, 'boundary', 'pinned')
+        )
         expressions = fast_load(expr_file)
     except Exception:
         return cls
@@ -55,6 +79,9 @@ class ElasticaConfig(SysConfig):
     gravity = 9.81
     boundary = "pinned"  # 'pinned' or 'clamped'
     ds = length / (n_nodes - 1)
+    mass_node = mass_total / n_nodes
+    mass = mass_node
+    inv_mass = 1.0 / mass_node
 
     # Time-stepping
     predict = True
@@ -71,7 +98,7 @@ class ElasticaConfig(SysConfig):
     if predict:
         dt_space_dim = 1
         dt_space = np.array([0.001])
-        T_final = dt_space[-1] * 3e1  # 3.0 seconds
+        T_final = dt_space[-1] * 3e3  # 3.0 seconds
 
         # Dynamically align training split and test size to integer multiples of compute workers
         # to ensure 100% core occupancy and eliminate idle tail stragglers during parallel solves.
@@ -175,6 +202,10 @@ class ElasticaMechSystem(ElasticaConfig, MechSystem):
     data_folder = get_data_dir(os.path.join(keep_time, "elastica"))
     os.makedirs(data_folder, exist_ok=True)
 
+    mass_node = ElasticaConfig.mass_node
+    mass = ElasticaConfig.mass
+    inv_mass = ElasticaConfig.inv_mass
+
     # Initial state satisfying g(q0) = 0 and G(q0) p0 = 0 (q0 . p0 = 0)
     y_init = make_elastica_initial_conditions(ElasticaConfig.n_nodes, ElasticaConfig.ds, ElasticaConfig.boundary)
 
@@ -183,6 +214,10 @@ class ElasticaMechSystem(ElasticaConfig, MechSystem):
             kwds = {}
         if kwargs:
             kwds = {**kwds, **kwargs}
+        if 'mass' not in kwds:
+            kwds['mass'] = getattr(self, 'mass', ElasticaConfig.mass)
+        if 'inv_mass' not in kwds:
+            kwds['inv_mass'] = getattr(self, 'inv_mass', ElasticaConfig.inv_mass)
         super().__init__(kwds)
         # Ensure JJ matches the elastica nosc
         self.JJ = self.compute_J(self.nosc_r if hasattr(self, 'RB') else self.nosc)

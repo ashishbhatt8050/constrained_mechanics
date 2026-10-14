@@ -18,9 +18,8 @@ import numpy as np
 from Reduction import Basis, IdentityBasis, as_basis
 
 # get numpy random seed value
-rng = np.random.default_rng(
-    seed=267257368022227711484290921317604022527
-)  # rng = np.random.default_rng(seed=408394104)  # Create RNG with fixed seed
+np.random.seed(42)
+rng = np.random.default_rng(seed=42)
 
 import shutil
 
@@ -187,7 +186,7 @@ class SysConfig:
     
     # Solver and reduction settings
     tol, M, var = 1.0E-12, 500, True
-    tol_reduced = 1.0E-8
+    tol_reduced = None                        # None = disabled (uses full model tol), float = override for reduced models
     # pod_tol_ham = 1e-10
     # pod_tol_dg = 1e-10
     reducer = 'psd'
@@ -209,13 +208,14 @@ class SysConfig:
     grassmann_cos_threshold = 0.8988          # cos(26°) — misalignment trigger angle
     rolling_frac = 0.05                       # Fraction of reference snapshots per rolling step
     max_traveling_enrichment = 4              # Max local POD modes to add per window (caps basis bloat)
-    max_nosc_r = 150                          # Hard ceiling on reduced position coordinates per window
+    max_nosc_r = None                         # None = disabled (no ceiling on reduced position coordinates), int = hard ceiling per window
     
     # System parameters
     nosc = 54 * 10  # Number of oscillators
     assert nosc % 6 == 0, 'nosc must be divisible by 6'
+    has_momentum_invariants = True            # True for translation/rotation invariant systems (e.g. lattice)
 
-    predict = True # False = reproduce results of the full model
+    predict = False # False = reproduce results of the full model
 
     if predict: # prediction parameters
         pod_tol_sweep = [1e-2]
@@ -468,7 +468,8 @@ class ReducedHamiltonianMechSystem(HamiltonianMechSystem):
                             setattr(self, k, v)
                     break
         super().__init__(kwds, **kwargs)
-        self.tol = self.tol_reduced
+        if getattr(self, 'tol_reduced', None) is not None:
+            self.tol = self.tol_reduced
 
 
 class ReducedLagrangianMechSystem(LagrangianMechSystem):
@@ -502,7 +503,8 @@ class ReducedLagrangianMechSystem(LagrangianMechSystem):
                             setattr(self, k, v)
                     break
         super().__init__(kwds, **kwargs)
-        self.tol = self.tol_reduced
+        if getattr(self, 'tol_reduced', None) is not None:
+            self.tol = self.tol_reduced
 
 
 class HyperReducedHamiltonianMechSystem(ReducedHamiltonianMechSystem):

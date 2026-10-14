@@ -244,6 +244,7 @@ if __name__ == '__main__':
         print("--- Comparing Evaluation Speed of Lambdified Functions ---")
 
         # --- Prepare numerical data for testing ---
+        np.random.seed(42)
         y_num = np.random.rand(2 * nosc)
         y1_num = np.random.rand(2 * nosc)
         omega2_num = np.random.rand(nosc // 3 - 2)

@@ -173,7 +173,7 @@ class ReduceMechSystem(MechSystem):
         
         def _generator():
             # Process batches serially to align with incremental_POD's serial consumption
-            for batch_indices in tqdm(batches, desc=f"Computing snapshots (serially)", leave=False):
+            for batch_indices in tqdm(batches, desc="Computing snapshots (serially)", leave=False):
                 batch_res = process_batch(batch_indices)
                 yield batch_res
                 # Trigger GC if batch is substantial
@@ -669,7 +669,7 @@ class ReduceMechSystem(MechSystem):
             print(f'\n  [Constraint Window {w+1}/{n_windows}]', flush=True)
 
             # ── g_prime MDEIM ─────────────────────────────────────────────────
-            print(f'    Computing g_prime MDEIM...', flush=True)
+            print('    Computing g_prime MDEIM...', flush=True)
             if solver_type == 'Hamiltonian':
                 # Constraint Jacobian G(y) for holonomic systems has block structure:
                 # [ G_11(q)           0      ]
@@ -785,7 +785,7 @@ class ReduceMechSystem(MechSystem):
 
             # ── g_prime_x_lambda_y MDEIM (DG only) ───────────────────────────
             if solver_type == 'DiscreteGradient':
-                print(f'    Computing g_prime_x_lambda_y MDEIM...', flush=True)
+                print('    Computing g_prime_x_lambda_y MDEIM...', flush=True)
                 results_gplxy = []
                 sampled_gplxy_pairs = cls.get_mdeim_solver_indices(solvers, win_indices)
                 for solver, indices in sampled_gplxy_pairs:
@@ -1454,7 +1454,6 @@ class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
         RB = cls.RB
         nosc_r = cls.nosc_r
         
-        attr = cls.ham_z_expr
         attr_11 = RB[:cls.nosc, :nosc_r]
         P11, _ = DEIM(attr_11, plot_deim=False)
 
@@ -1718,7 +1717,7 @@ class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
                 rb_w = U_state_global.copy()
 
             # ── 2c. Ensure local constraint normal space is spanned and well-conditioned ─
-            max_nr = getattr(cls, 'max_nosc_r', 150)
+            max_nr = getattr(cls, 'max_nosc_r', None)
             rb_w = cls._build_structured_basis(rb_w, G_test_w, max_cols=max_nr)
 
             # ── 2d. Safety cap ────────────────────────────────────────────────
@@ -2265,7 +2264,7 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
                 rb_w = U_state_global.copy()
 
             # ── 2c. Ensure local constraint normal space is spanned and well-conditioned ─
-            max_nr = getattr(cls, 'max_nosc_r', 150)
+            max_nr = getattr(cls, 'max_nosc_r', None)
             rb_w = cls._build_structured_basis(rb_w, G_test_w, max_cols=max_nr)
 
             # ── 2d. Safety cap ────────────────────────────────────────────────
@@ -2331,7 +2330,6 @@ class DiscreteGradientReducer(ReduceMechSystem, LagrangianMechSystem):
         for w in range(n_windows):
             win_indices = window_indices[w]
             RB_w = cls.RB_windows[w]
-            nosc_r_w = cls.nosc_r_windows[w]
             print(f'\n  [Window {w+1}/{n_windows}] Computing hyper-reduction...')
 
             # ── DEIM for lag_dg ─────────────────────────────────────────────────

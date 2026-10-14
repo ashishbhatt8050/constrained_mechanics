@@ -67,7 +67,7 @@ def manage_cache(nosc, config_hash, cache_dir, checkpoint_dir, expressions_file,
                 should_clear_cache = True
                 should_clear_checkpoints = True
             elif data.get('config_hash') != config_hash:
-                print(f"SysConfig parameters changed. Clearing joblib cache and checkpoints.")
+                print("SysConfig parameters changed. Clearing joblib cache and checkpoints.")
                 should_clear_cache = True
                 should_clear_checkpoints = True
         except Exception as e:

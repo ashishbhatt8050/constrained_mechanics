@@ -32,7 +32,7 @@ def f(mu, indices=None):
     return func
 
 # Generate snapshots
-np.random.seed(0)
+np.random.seed(42)
 snapshots = np.zeros((n, num_snapshots))
 mu = np.linspace(1, np.pi, num_snapshots)
 for i in range(num_snapshots):

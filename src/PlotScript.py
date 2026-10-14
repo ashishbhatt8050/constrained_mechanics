@@ -1116,9 +1116,6 @@ def plot_error_vs_basis_size(basis_sizes, hr_basis_sizes, errors_r, errors_hr, s
     # Extract study data from kwargs
     dt_space = kwargs.get('dt_space', [])
     full_times_raw = kwargs.get('full_times_raw', {})
-    full_errs_raw = kwargs.get('full_errs_raw', {})    
-    times_r_raw = kwargs.get('times_r_raw', [])
-    times_hr_raw = kwargs.get('times_hr_raw', kwargs.get('times_dr_raw', []))
 
     fig, axes_grid = plt.subplots(2, 2, figsize=(22, 18.6))
     ax_err_r, ax_err_hr = axes_grid[0]
@@ -1131,8 +1128,7 @@ def plot_error_vs_basis_size(basis_sizes, hr_basis_sizes, errors_r, errors_hr, s
     tol_markers = ['o', 's', '^', 'D', 'v', '<', '>', 'p', 'h', '*']
     marker_map = {tol: tol_markers[i % len(tol_markers)] for i, tol in enumerate(pod_tols)}
 
-    # Define line styles and colors for solvers
-    solver_linestyles = ['-', '--', ':', '-.']
+    # Define colors for solvers
     solver_colors = OKABE_ITO_PALETTE # Use the colorblind-safe palette
 
     # Store handles for legends
@@ -1146,7 +1142,6 @@ def plot_error_vs_basis_size(basis_sizes, hr_basis_sizes, errors_r, errors_hr, s
         configure_axis(ax)
         ax.tick_params(axis='both', labelsize=24)
         all_x_col, all_y_col = [], []
-        curr_max_x = (2 * np.nanmax(np.concatenate(basis_sizes)) if ax_idx == 0 else 2 * np.nanmax(np.concatenate(hr_basis_sizes))) if basis_sizes else 1
 
         for i, name in enumerate(solver_names):
             color = solver_colors[i % len(solver_colors)]
@@ -1283,25 +1278,42 @@ def _plot_metric_panel(ax, metric_data, i, j, marker, color, ms, all_y_values, x
         if isinstance(arr, np.ndarray) and arr.size > 0:
             val = np.nanmean(np.nanmean(arr, axis=1))
             val_plot = max(abs(val), 1e-16) if np.isfinite(val) else val
-            ax.semilogy([x_pos], [val_plot], marker=marker, color=color,
-                        linestyle='None', markersize=ms,
-                        markerfacecolor=color, markeredgecolor=color, zorder=3)
-            all_y_values.append(val_plot)
+            if np.isfinite(val_plot):
+                ax.semilogy([x_pos], [val_plot], marker=marker, color=color,
+                            linestyle='None', markersize=ms,
+                            markerfacecolor=color, markeredgecolor=color, zorder=3)
+                all_y_values.append(val_plot)
+                return True
+    return False
 
 
-def _plot_speedup_panel(ax, times_raw, i, j, marker, color, avg_full, all_y_values, x_pos=None):
-    """Plot a speedup marker on *ax* if timing data is valid."""
+def _plot_speedup_panel(ax, times_raw, i, j, marker, color, avg_full, all_y_values, x_pos=None, width=0.10):
+    """Plot speedup boxplot and mean marker on *ax* if timing data is valid."""
     if x_pos is None:
         x_pos = i
     if len(times_raw) > i and len(times_raw[i]) > j:
         t_arr = times_raw[i][j]
         if isinstance(t_arr, np.ndarray) and t_arr.size > 0 and avg_full is not None:
-            speedup = np.nanmean(avg_full / np.nanmean(t_arr, axis=1))
-            ax.plot([x_pos], [speedup], marker=marker, color=color,
-                    linestyle='None', markersize=9,
-                    markerfacecolor=color, markeredgecolor=color, zorder=3)
-            all_y_values.append(speedup)
-            return speedup
+            if getattr(avg_full, 'ndim', 0) > 0 and t_arr.ndim > 1:
+                spd_arr = (avg_full[:, None] / t_arr).flatten()
+            else:
+                spd_arr = (np.nanmean(avg_full) / t_arr).flatten()
+            spd_clean = spd_arr[np.isfinite(spd_arr)]
+            if len(spd_clean) > 0:
+                ax.boxplot([spd_clean], positions=[x_pos], widths=width,
+                           patch_artist=True, showmeans=True,
+                           meanprops=dict(marker='o', markerfacecolor=color, markeredgecolor='black', markersize=6, zorder=4),
+                           medianprops=dict(color='black', linewidth=1.5),
+                           boxprops=dict(facecolor=color, alpha=0.25, edgecolor=color, linewidth=1.5),
+                           whiskerprops=dict(color=color, linewidth=1.2),
+                           capprops=dict(color=color, linewidth=1.2),
+                           flierprops=dict(marker='.', markerfacecolor=color, markeredgecolor=color, markersize=4),
+                           zorder=3)
+                rng = np.random.RandomState(42 + int(abs(x_pos) * 100))
+                jit = rng.uniform(-width * 0.35, width * 0.35, size=len(spd_clean))
+                ax.scatter(x_pos + jit, spd_clean, color=color, alpha=0.6, s=18, edgecolors='none', zorder=5)
+                all_y_values.extend(spd_clean.tolist())
+                return float(np.mean(spd_clean))
     return None
 
 
@@ -1452,12 +1464,12 @@ def plot_prediction_results(solver_names, pod_tols=None, dt_space=None, data_fol
         for level in tier_keys:
             _error_groups[level]['data'][suffix] = levels[level]
 
-    marker_map = {tol: m for tol, m in zip(pod_tols, ['o', 's', '^', 'D', 'v', '<', '>', 'p', 'h', '*'])}
     metric_marker_map = {suffix: (m, ms) for suffix, m, _, ms in _PLOT_METRICS}
     solver_colors = OKABE_ITO_PALETTE
 
     all_y_values_err = []
     all_y_values_spd = [1.0]
+    plotted_suffixes = set()
 
     for i, name in enumerate(solver_names):
         color = solver_colors[i % len(solver_colors)]
@@ -1475,40 +1487,74 @@ def plot_prediction_results(solver_names, pod_tols=None, dt_space=None, data_fol
             for level in tier_keys:
                 x_pos = i + tier_offsets[level]
                 for suffix, (mkr, ms) in metric_marker_map.items():
-                    _plot_metric_panel(ax_err, _error_groups[level]['data'].get(suffix),
-                                       i, j, mkr, color, ms, all_y_values_err, x_pos=x_pos)
+                    if _plot_metric_panel(ax_err, _error_groups[level]['data'].get(suffix),
+                                          i, j, mkr, color, ms, all_y_values_err, x_pos=x_pos):
+                        plotted_suffixes.add(suffix)
 
-            # --- Speedup markers on vertical platforms ---
+            # --- Speedup boxplots and mean markers on vertical platforms ---
             x_fom = i + tier_offsets['f']
             x_rom = i + tier_offsets['r']
             x_hrom = i + tier_offsets['hr']
 
-            # FOM reference speedup is 1.0x
-            ax_spd.plot([x_fom], [1.0], marker='o', color=color, markersize=9, zorder=3)
-            all_y_values_spd.append(1.0)
+            n_tols = len(pod_tols)
+            tol_offset = (j - (n_tols - 1) / 2) * (0.12 / max(1, n_tols)) if n_tols > 1 else 0.0
+            box_width = 0.10 / max(1, n_tols) if n_tols > 1 else 0.10
+
+            pos_r = x_rom + tol_offset
+            pos_hr = x_hrom + tol_offset
+
+            # FOM reference boxplot & mean
+            if j == 0:
+                if isinstance(full_time, np.ndarray) and full_time.size > 0 and avg_full is not None:
+                    if getattr(avg_full, 'ndim', 0) > 0 and full_time.ndim > 1:
+                        spd_f_arr = (avg_full[:, None] / full_time).flatten()
+                    else:
+                        spd_f_arr = (np.nanmean(avg_full) / full_time).flatten()
+                    spd_f_clean = spd_f_arr[np.isfinite(spd_f_arr)]
+                else:
+                    spd_f_clean = np.array([1.0])
+
+                if len(spd_f_clean) > 0:
+                    ax_spd.boxplot([spd_f_clean], positions=[x_fom], widths=0.10,
+                                   patch_artist=True, showmeans=True,
+                                   meanprops=dict(marker='o', markerfacecolor=color, markeredgecolor='black', markersize=6, zorder=4),
+                                   medianprops=dict(color='black', linewidth=1.5),
+                                   boxprops=dict(facecolor=color, alpha=0.25, edgecolor=color, linewidth=1.5),
+                                   whiskerprops=dict(color=color, linewidth=1.2),
+                                   capprops=dict(color=color, linewidth=1.2),
+                                   flierprops=dict(marker='.', markerfacecolor=color, markeredgecolor=color, markersize=4),
+                                   zorder=3)
+                    all_y_values_spd.extend(spd_f_clean.tolist())
+                    rng_f = np.random.RandomState(42)
+                    jit_f = rng_f.uniform(-0.10 * 0.35, 0.10 * 0.35, size=len(spd_f_clean))
+                    ax_spd.scatter(x_fom + jit_f, spd_f_clean, color=color, alpha=0.6, s=18, edgecolors='none', zorder=5)
+                    sp_f_mean = float(np.mean(spd_f_clean))
+                else:
+                    sp_f_mean = 1.0
 
             sp_r = _plot_speedup_panel(ax_spd, times_r_raw, i, j, 'o', color,
-                                       avg_full, all_y_values_spd, x_pos=x_rom)
+                                       avg_full, all_y_values_spd, x_pos=pos_r, width=box_width)
             sp_hr = _plot_speedup_panel(ax_spd, times_hr_raw, i, j, 'o', color,
-                                        avg_full, all_y_values_spd, x_pos=x_hrom)
+                                        avg_full, all_y_values_spd, x_pos=pos_hr, width=box_width)
 
-            # Connect speedup points with dashed line
+            # Connect mean speedups with dashed line
             pts_x = [x_fom]
-            pts_y = [1.0]
+            pts_y = [sp_f_mean]
             if sp_r is not None and np.isfinite(sp_r):
-                pts_x.append(x_rom)
+                pts_x.append(pos_r)
                 pts_y.append(sp_r)
             if sp_hr is not None and np.isfinite(sp_hr):
-                pts_x.append(x_hrom)
+                pts_x.append(pos_hr)
                 pts_y.append(sp_hr)
             if len(pts_x) > 1:
                 ax_spd.plot(pts_x, pts_y, color=color, linestyle='--', linewidth=1.5, alpha=0.7, zorder=2)
 
-    # Legend handles for the five error metrics
+    # Filter legend handles strictly to metrics that were actually plotted
     error_legend_handles = [
         Line2D([0], [0], marker=m, color='black', label=label,
                markersize=ms, linestyle='None')
-        for _, m, label, ms in _PLOT_METRICS
+        for sfx, m, label, ms in _PLOT_METRICS
+        if sfx in plotted_suffixes
     ]
 
     n_solvers = len(solver_names)
@@ -1541,9 +1587,18 @@ def plot_prediction_results(solver_names, pod_tols=None, dt_space=None, data_fol
     ax_err.set_title('Mean invariant error magnitude', fontsize=16, pad=12)
     ax_err.set_ylabel('Mean error magnitude', fontsize=14)
 
-    ax_spd.set_title('Mean speedup factor', fontsize=16, pad=12)
-    ax_spd.set_ylabel('Mean speedup factor', fontsize=14)
+    ax_spd.set_title('Speedup factor', fontsize=16, pad=12)
+    ax_spd.set_ylabel('Speedup factor', fontsize=14)
     ax_spd.axhline(1.0, color='black', linestyle=':', linewidth=1.2, alpha=0.7, zorder=1)
+
+    iqr_label = r'IQR (25\%--75\%)' if plt.rcParams.get('text.usetex', False) else 'IQR (25%–75%)'
+    speedup_legend_handles = [
+        Line2D([0], [0], marker='o', color='black', label='Mean', markersize=6, linestyle='--'),
+        Line2D([0], [0], color='black', label='Median', linewidth=1.5),
+        Patch(facecolor='0.7', edgecolor='0.4', label=iqr_label, alpha=0.5),
+        Line2D([0], [0], marker='o', color='0.5', label='Individual runs', markersize=4, linestyle='None', alpha=0.7),
+    ]
+    ax_spd.legend(handles=speedup_legend_handles, loc='upper left', fontsize=11, frameon=True)
 
     adjust_axis_limits(ax_err, all_y_values_err, axis='y', is_log_scale=True, max_steps=10)
     adjust_axis_limits(ax_spd, all_y_values_spd, axis='y', is_log_scale=False, max_steps=10)
@@ -1555,10 +1610,10 @@ def plot_prediction_results(solver_names, pod_tols=None, dt_space=None, data_fol
     target_filename = kwargs.get('filename', None)
     if target_filename is None:
         filename = os.path.join(data_folder, 'prediction_results.pdf')
-    elif not os.path.isabs(target_filename) and data_folder is not None:
-        filename = os.path.join(data_folder, target_filename)
-    else:
+    elif os.path.isabs(target_filename) or (data_folder is None) or target_filename.startswith(data_folder):
         filename = target_filename
+    else:
+        filename = os.path.join(data_folder, target_filename)
     fig_data = {
         'solver_names': solver_names,
         'pod_tols': pod_tols,
@@ -1589,19 +1644,22 @@ def plot_prediction_results(solver_names, pod_tols=None, dt_space=None, data_fol
 
 def plot_prediction_sanity_check(s_f, s_r=None, s_hr=None, plot_path=None,
                                  coord_series=None,
-                                 coord_label=r"Trajectory comparison ($q_0(t)$)",
+                                 coord_label=None,
                                  coord_ylabel=None,
                                  system_label=None,
                                  target_idx=None,
                                  target_omega2=None,
                                  cls_name=None,
-                                 dt=None):
+                                 dt=None,
+                                 **kwargs):
     """
-    Generate diagnostic 2x2 comparison plots for prediction sanity check against ground-truth FOM:
+    Generate diagnostic 3x2 comparison plots for prediction sanity check against ground-truth FOM:
     (a) Max pointwise state error over time: ||y_FOM(t) - y_model(t)||_inf
-    (b) Representative coordinate comparison (e.g. q_0 or tip deflection)
+    (b) Phase space error (constraint norm) |Delta S(t)|
     (c) Energy invariant drift |Delta H(t)|
     (d) Symplectic invariant error |Delta Sp(t)|
+    (e) Linear momentum error |Delta L(t)|
+    (f) Angular momentum error |Delta J(t)|
 
     Parameters
     ----------
@@ -1613,13 +1671,8 @@ def plot_prediction_sanity_check(s_f, s_r=None, s_hr=None, plot_path=None,
         Hyper-Reduced Order Model (HROM) solver. Not needed if s_f is a dict.
     plot_path : str, optional
         File path where the plot should be saved (.pdf).
-    coord_series : tuple of (np.ndarray, np.ndarray, np.ndarray), optional
-        Tuple of (y_fom_coord, y_rom_coord, y_hrom_coord) for panel (b).
-        If None, defaults to the first coordinate s.y[:, 0].
-    coord_label : str, optional
-        Title for panel (b). Default is 'Trajectory Comparison ($q_0(t)$)'.
-    coord_ylabel : str, optional
-        Y-axis label for panel (b).
+    coord_series, coord_label, coord_ylabel : optional
+        Deprecated parameters preserved for backward compatibility.
     system_label : str, optional
         Optional prefix for figure suptitle (e.g. 'Elastica').
     target_idx : int, optional
@@ -1641,15 +1694,21 @@ def plot_prediction_sanity_check(s_f, s_r=None, s_hr=None, plot_path=None,
         t = fig_data['t']
         err_r_t = fig_data['err_r_t']
         err_hr_t = fig_data['err_hr_t']
-        coord_f = fig_data.get('coord_fom', fig_data.get('q0_fom'))
-        coord_r = fig_data.get('coord_rom', fig_data.get('q0_rom'))
-        coord_hr = fig_data.get('coord_hrom', fig_data.get('q0_hrom'))
         eng_error_f = fig_data.get('eng_error_fom')
         eng_error_r = fig_data.get('eng_error_rom')
         eng_error_hr = fig_data.get('eng_error_hrom')
         sym_error_f = fig_data.get('sym_error_fom')
         sym_error_r = fig_data.get('sym_error_rom')
         sym_error_hr = fig_data.get('sym_error_hrom')
+        g_norm_f = fig_data.get('g_norm_fom', fig_data.get('phase_error_fom'))
+        g_norm_r = fig_data.get('g_norm_rom', fig_data.get('phase_error_rom'))
+        g_norm_hr = fig_data.get('g_norm_hrom', fig_data.get('phase_error_hrom'))
+        lin_mom_f = fig_data.get('lin_mom_error_fom', fig_data.get('lin_momentum_err_fom'))
+        lin_mom_r = fig_data.get('lin_mom_error_rom', fig_data.get('lin_momentum_err_rom'))
+        lin_mom_hr = fig_data.get('lin_mom_error_hrom', fig_data.get('lin_momentum_err_hrom'))
+        ang_mom_f = fig_data.get('ang_mom_error_fom', fig_data.get('angular_momentum_err_fom'))
+        ang_mom_r = fig_data.get('ang_mom_error_rom', fig_data.get('angular_momentum_err_rom'))
+        ang_mom_hr = fig_data.get('ang_mom_error_hrom', fig_data.get('angular_momentum_err_hrom'))
         cls_name = cls_name or fig_data.get('cls_name', '')
         dt = dt or fig_data.get('dt', None)
         target_idx = target_idx if target_idx is not None else fig_data.get('target_idx', None)
@@ -1664,133 +1723,122 @@ def plot_prediction_sanity_check(s_f, s_r=None, s_hr=None, plot_path=None,
         err_r_t = np.amax(np.abs(s_f.y - s_r.y), axis=1)
         err_hr_t = np.amax(np.abs(s_f.y - s_hr.y), axis=1)
 
-        if coord_series is not None:
-            coord_f, coord_r, coord_hr = coord_series
-        else:
-            coord_f, coord_r, coord_hr = s_f.y[:, 0], s_r.y[:, 0], s_hr.y[:, 0]
-
         eng_error_f = getattr(s_f, 'eng_error', None)
         eng_error_r = getattr(s_r, 'eng_error', None)
         eng_error_hr = getattr(s_hr, 'eng_error', None)
         sym_error_f = getattr(s_f, 'sym_error', None)
         sym_error_r = getattr(s_r, 'sym_error', None)
         sym_error_hr = getattr(s_hr, 'sym_error', None)
+        g_norm_f = getattr(s_f, 'g_norm', None)
+        g_norm_r = getattr(s_r, 'g_norm', None)
+        g_norm_hr = getattr(s_hr, 'g_norm', None)
+        lin_mom_f = getattr(s_f, 'lin_momentum_err', None)
+        lin_mom_r = getattr(s_r, 'lin_momentum_err', None)
+        lin_mom_hr = getattr(s_hr, 'lin_momentum_err', None)
+        ang_mom_f = getattr(s_f, 'angular_momentum_err', None)
+        ang_mom_r = getattr(s_r, 'angular_momentum_err', None)
+        ang_mom_hr = getattr(s_hr, 'angular_momentum_err', None)
 
         fig_data = {
             't': t,
             'err_r_t': err_r_t,
             'err_hr_t': err_hr_t,
-            'coord_fom': coord_f,
-            'coord_rom': coord_r,
-            'coord_hrom': coord_hr,
-            'q0_fom': s_f.y[:, 0],
-            'q0_rom': s_r.y[:, 0],
-            'q0_hrom': s_hr.y[:, 0],
             'eng_error_fom': eng_error_f,
             'eng_error_rom': eng_error_r,
             'eng_error_hrom': eng_error_hr,
             'sym_error_fom': sym_error_f,
             'sym_error_rom': sym_error_r,
             'sym_error_hrom': sym_error_hr,
+            'g_norm_fom': g_norm_f,
+            'g_norm_rom': g_norm_r,
+            'g_norm_hrom': g_norm_hr,
+            'lin_mom_error_fom': lin_mom_f,
+            'lin_mom_error_rom': lin_mom_r,
+            'lin_mom_error_hrom': lin_mom_hr,
+            'ang_mom_error_fom': ang_mom_f,
+            'ang_mom_error_rom': ang_mom_r,
+            'ang_mom_error_hrom': ang_mom_hr,
             'dt': dt,
             'target_idx': target_idx,
             'target_omega2': target_omega2,
             'cls_name': cls_name,
         }
+        if hasattr(s_f, 'y') and s_f.y is not None:
+            fig_data['q0_fom'] = s_f.y[:, 0]
+        if s_r is not None and hasattr(s_r, 'y') and s_r.y is not None:
+            fig_data['q0_rom'] = s_r.y[:, 0]
+        if s_hr is not None and hasattr(s_hr, 'y') and s_hr.y is not None:
+            fig_data['q0_hrom'] = s_hr.y[:, 0]
 
     if shutil.which('latex') and not plt.rcParams.get('text.usetex', False):
         plt.rc('text', usetex=True)
         plt.rc('font', family='serif')
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    has_momentum = any(d is not None and np.asarray(d).size > 0 and np.any(np.isfinite(d))
+                       for d in [lin_mom_f, lin_mom_r, lin_mom_hr, ang_mom_f, ang_mom_r, ang_mom_hr])
+
+    if has_momentum:
+        fig, axes = plt.subplots(3, 2, figsize=(14, 13))
+    else:
+        fig, axes = plt.subplots(2, 2, figsize=(14, 9.5))
+
     for ax in axes.flatten():
         configure_axis(ax)
         ax.grid(True, which="both", linestyle=':', alpha=0.6)
 
     # (a) Pointwise Trajectory Error over time (log scale)
-    axes[0, 0].semilogy(t, np.maximum(err_r_t, 1e-16), label='ROM error', color=OKABE_ITO_PALETTE[0], lw=1.8)
-    axes[0, 0].semilogy(t, np.maximum(err_hr_t, 1e-16), label='HROM error', color=OKABE_ITO_PALETTE[1], ls='--', lw=1.8)
+    axes[0, 0].semilogy(t, np.maximum(err_r_t, 1e-16), label='ROM', color=OKABE_ITO_PALETTE[0], ls='--', lw=1.8)
+    axes[0, 0].semilogy(t, np.maximum(err_hr_t, 1e-16), label='HROM', color=OKABE_ITO_PALETTE[1], ls='-.', lw=1.8)
     axes[0, 0].set_title(r"Max state error $\|y_{\mathrm{FOM}}(t) - y_{\mathrm{model}}(t)\|_\infty$")
     axes[0, 0].set_xlabel("Time")
-    axes[0, 0].legend(loc='best', framealpha=0.9)
     adjust_axis_limits(axes[0, 0], t, axis='x', is_log_scale=False)
     y_err = np.concatenate([err_r_t, err_hr_t])
     y_err_pos = y_err[y_err > 0]
     if len(y_err_pos) > 0:
         adjust_axis_limits(axes[0, 0], y_err_pos, axis='y', is_log_scale=True, max_steps=1)
 
-    # (b) Representative Coordinate Comparison
-    axes[0, 1].plot(t, coord_f, label='FOM', color='black', lw=2.0)
-    axes[0, 1].plot(t, coord_r, label='ROM', color=OKABE_ITO_PALETTE[0], ls='--', lw=1.8)
-    axes[0, 1].plot(t, coord_hr, label='HROM', color=OKABE_ITO_PALETTE[1], ls=':', lw=1.8)
-    axes[0, 1].set_title(coord_label)
-    axes[0, 1].set_xlabel("Time")
-    if coord_ylabel:
-        axes[0, 1].set_ylabel(coord_ylabel)
-    axes[0, 1].legend(loc='best', framealpha=0.9)
-    adjust_axis_limits(axes[0, 1], t, axis='x', is_log_scale=False)
-    y_coord = np.concatenate([coord_f, coord_r, coord_hr])
-    adjust_axis_limits(axes[0, 1], y_coord, axis='y', is_log_scale=False, max_steps=1)
+    def _plot_metric_panel(ax, title, f_data, r_data, hr_data):
+        has_data = False
+        pts = []
+        if f_data is not None:
+            y_f = np.abs(np.asarray(f_data, dtype=float)) + 1e-16
+            ax.semilogy(t, y_f, label='FOM', color='black', ls='-', lw=1.6)
+            pts.append(y_f)
+            has_data = True
+        if r_data is not None:
+            y_r = np.abs(np.asarray(r_data, dtype=float)) + 1e-16
+            ax.semilogy(t, y_r, label='ROM', color=OKABE_ITO_PALETTE[0], ls='--', lw=1.6)
+            pts.append(y_r)
+            has_data = True
+        if hr_data is not None:
+            y_hr = np.abs(np.asarray(hr_data, dtype=float)) + 1e-16
+            ax.semilogy(t, y_hr, label='HROM', color=OKABE_ITO_PALETTE[1], ls='-.', lw=1.6)
+            pts.append(y_hr)
+            has_data = True
+        if has_data:
+            ax.set_title(title)
+            ax.set_xlabel("Time")
+            adjust_axis_limits(ax, t, axis='x', is_log_scale=False)
+            all_pts = np.concatenate(pts)
+            all_pos = all_pts[all_pts > 0]
+            if len(all_pos) > 0:
+                adjust_axis_limits(ax, all_pos, axis='y', is_log_scale=True, max_steps=1)
+        else:
+            ax.text(0.5, 0.5, f"{title} not available", ha='center', va='center', transform=ax.transAxes)
+
+    # (b) Phase space error (constraint norm)
+    _plot_metric_panel(axes[0, 1], r"Phase space error $|\Delta \mathcal{S}(t)|$", g_norm_f, g_norm_r, g_norm_hr)
 
     # (c) Energy Invariant Drift
-    has_eng = False
-    eng_pts = []
-    if eng_error_f is not None:
-        y_f_eng = np.abs(eng_error_f) + 1e-16
-        axes[1, 0].semilogy(t, y_f_eng, label='FOM', color='black', lw=1.5)
-        eng_pts.append(y_f_eng)
-        has_eng = True
-    if eng_error_r is not None:
-        y_r_eng = np.abs(eng_error_r) + 1e-16
-        axes[1, 0].semilogy(t, y_r_eng, label='ROM', color=OKABE_ITO_PALETTE[0], ls='--', lw=1.5)
-        eng_pts.append(y_r_eng)
-        has_eng = True
-    if eng_error_hr is not None:
-        y_hr_eng = np.abs(eng_error_hr) + 1e-16
-        axes[1, 0].semilogy(t, y_hr_eng, label='HROM', color=OKABE_ITO_PALETTE[1], ls=':', lw=1.5)
-        eng_pts.append(y_hr_eng)
-        has_eng = True
-    if has_eng:
-        axes[1, 0].set_title(r"Energy drift $|\Delta H(t)|$")
-        axes[1, 0].set_xlabel("Time")
-        axes[1, 0].legend(loc='best', framealpha=0.9)
-        adjust_axis_limits(axes[1, 0], t, axis='x', is_log_scale=False)
-        all_eng = np.concatenate(eng_pts)
-        all_eng_pos = all_eng[all_eng > 0]
-        if len(all_eng_pos) > 0:
-            adjust_axis_limits(axes[1, 0], all_eng_pos, axis='y', is_log_scale=True, max_steps=1)
-    else:
-        axes[1, 0].text(0.5, 0.5, "Energy drift not available", ha='center', va='center', transform=axes[1, 0].transAxes)
+    _plot_metric_panel(axes[1, 0], r"Energy drift $|\Delta H(t)|$", eng_error_f, eng_error_r, eng_error_hr)
 
     # (d) Symplectic Invariant Error
-    has_sym = False
-    sym_pts = []
-    if sym_error_f is not None:
-        y_f_sym = np.abs(sym_error_f) + 1e-16
-        axes[1, 1].semilogy(t, y_f_sym, label='FOM', color='black', lw=1.5)
-        sym_pts.append(y_f_sym)
-        has_sym = True
-    if sym_error_r is not None:
-        y_r_sym = np.abs(sym_error_r) + 1e-16
-        axes[1, 1].semilogy(t, y_r_sym, label='ROM', color=OKABE_ITO_PALETTE[0], ls='--', lw=1.5)
-        sym_pts.append(y_r_sym)
-        has_sym = True
-    if sym_error_hr is not None:
-        y_hr_sym = np.abs(sym_error_hr) + 1e-16
-        axes[1, 1].semilogy(t, y_hr_sym, label='HROM', color=OKABE_ITO_PALETTE[1], ls=':', lw=1.5)
-        sym_pts.append(y_hr_sym)
-        has_sym = True
-    if has_sym:
-        axes[1, 1].set_title(r"Symplectic error $|\Delta \mathrm{Sp}(t)|$")
-        axes[1, 1].set_xlabel("Time")
-        axes[1, 1].legend(loc='best', framealpha=0.9)
-        adjust_axis_limits(axes[1, 1], t, axis='x', is_log_scale=False)
-        all_sym = np.concatenate(sym_pts)
-        all_sym_pos = all_sym[all_sym > 0]
-        if len(all_sym_pos) > 0:
-            adjust_axis_limits(axes[1, 1], all_sym_pos, axis='y', is_log_scale=True, max_steps=1)
-    else:
-        axes[1, 1].text(0.5, 0.5, "Symplectic error not available", ha='center', va='center', transform=axes[1, 1].transAxes)
+    _plot_metric_panel(axes[1, 1], r"Symplectic error $|\Delta \mathrm{Sp}(t)|$", sym_error_f, sym_error_r, sym_error_hr)
+
+    # (e) Linear & (f) Angular Momentum Errors (only for systems possessing momentum invariants)
+    if has_momentum:
+        _plot_metric_panel(axes[2, 0], r"Linear momentum error $|\Delta L(t)|$", lin_mom_f, lin_mom_r, lin_mom_hr)
+        _plot_metric_panel(axes[2, 1], r"Angular momentum error $|\Delta J(t)|$", ang_mom_f, ang_mom_r, ang_mom_hr)
 
     title_prefix = f"{system_label} " if system_label else ""
     dt_str = f", $\\Delta t={dt:.4f}$" if dt is not None else ""
@@ -1798,7 +1846,18 @@ def plot_prediction_sanity_check(s_f, s_r=None, s_hr=None, plot_path=None,
     safe_cls_name = cls_name.replace('_', r'\_') if cls_name else ""
     safe_prefix = title_prefix.replace('_', r'\_')
     fig.suptitle(f"Sanity check: {safe_prefix}{safe_cls_name}{dt_str}{idx_str}", fontsize=20)
-    fig.tight_layout()
+
+    # Central legend at the bottom for all subplots
+    legend_elements = [
+        Line2D([0], [0], color='black', ls='-', lw=2.2, label='FOM (Ground truth)'),
+        Line2D([0], [0], color=OKABE_ITO_PALETTE[0], ls='--', lw=2.2, label='ROM'),
+        Line2D([0], [0], color=OKABE_ITO_PALETTE[1], ls='-.', lw=2.2, label='HROM'),
+    ]
+    fig.legend(handles=legend_elements, loc='lower center', ncol=3, fontsize=16,
+               frameon=True, framealpha=0.95, facecolor='white', edgecolor='#cccccc',
+               bbox_to_anchor=(0.5, 0.012))
+
+    fig.tight_layout(rect=[0.0, 0.045, 1.0, 0.96])
 
     if plot_path:
         save_figure(fig, plot_path, fig_data=fig_data)
@@ -2193,7 +2252,7 @@ def _resolve_solver_base(solver_repr):
 
 def plot_combined_errors(data_folder=None, solver_name=None, registered_solver_classes=None,
                          filename=None, kwds=None, fom_data=None, rom_data=None, hrom_data=None,
-                         show_fig=False, col_colors=None, title=None, **kwargs):
+                         solvers=None, show_fig=False, col_colors=None, title=None, **kwargs):
     """
     Generate and save a combined 5x3 grid of subplots for errors alone across
     Full-Order Model (FOM), Reduced-Order Model (ROM), and Hyper-Reduced Order Model (HROM):
@@ -2202,7 +2261,7 @@ def plot_combined_errors(data_folder=None, solver_name=None, registered_solver_c
     - Columns (3): FOM, ROM, HROM.
 
     The subplots are populated from the corresponding .data.pickle files (e.g., CSVSolver.data.pickle,
-    RCSVSolver.data.pickle, HRCSVSolver.data.pickle) saved during the run.
+    RCSVSolver.data.pickle, HRCSVSolver.data.pickle) saved during the run, or directly from passed solvers.
     Fail-safe: will not crash if any or all of the solvers fail to produce valid results or data.
 
     Parameters
@@ -2220,6 +2279,8 @@ def plot_combined_errors(data_folder=None, solver_name=None, registered_solver_c
         Dictionary of keyword arguments containing 'registered_solver_classes'.
     fom_data, rom_data, hrom_data : dict, optional
         Pre-loaded data dictionaries (skips loading from file if supplied).
+    solvers : dict or list, optional
+        Solver instances or dict of {'FOM': s_f, 'ROM': s_r, 'HROM': s_hr}.
     show_fig : bool, optional
         Whether to display the figure via fig.show(). Default is False.
     col_colors : list of 3 colors, optional
@@ -2232,6 +2293,56 @@ def plot_combined_errors(data_folder=None, solver_name=None, registered_solver_c
     """
     from System import MechSystem
     target_folder = data_folder or getattr(MechSystem, 'data_folder', None) or 'data'
+
+    # Extract metrics from solver instances if supplied
+    solvers = solvers or kwargs.get('solvers')
+    if solvers is not None:
+        s_f, s_r, s_hr = None, None, None
+        if isinstance(solvers, dict):
+            s_f = solvers.get('FOM', solvers.get('fom'))
+            s_r = solvers.get('ROM', solvers.get('rom'))
+            s_hr = solvers.get('HROM', solvers.get('hrom'))
+        elif isinstance(solvers, (list, tuple)):
+            if len(solvers) > 0:
+                s_f = solvers[0]
+            if len(solvers) > 1:
+                s_r = solvers[1]
+            if len(solvers) > 2:
+                s_hr = solvers[2]
+
+        def _extract_error_data(s):
+            if s is None:
+                return None
+            if isinstance(s, dict):
+                return s
+            return {
+                't_points': getattr(s, 't_points', None),
+                'sym_error': getattr(s, 'sym_error', None),
+                'g_norm': getattr(s, 'g_norm', getattr(s, 'constraint_error', getattr(s, 'phase_error', None))),
+                'eng_error': getattr(s, 'eng_error', None),
+                'lin_momentum_err': getattr(s, 'lin_momentum_err', getattr(s, 'lin_mom_error', None)),
+                'angular_momentum_err': getattr(s, 'angular_momentum_err', getattr(s, 'ang_mom_error', None)),
+            }
+
+        if fom_data is None and s_f is not None:
+            fom_data = _extract_error_data(s_f)
+        if rom_data is None and s_r is not None:
+            rom_data = _extract_error_data(s_r)
+        if hrom_data is None and s_hr is not None:
+            hrom_data = _extract_error_data(s_hr)
+
+        if solver_name is None:
+            for cand in [s_f, s_r, s_hr]:
+                if cand is not None:
+                    if hasattr(cand, 'solver_class') and cand.solver_class is not None:
+                        solver_name = cand.solver_class.__name__
+                        break
+                    elif hasattr(cand, '__class__') and not isinstance(cand, dict):
+                        solver_name = cand.__class__.__name__
+                        break
+                    elif isinstance(cand, dict) and 'solver_name' in cand:
+                        solver_name = cand['solver_name']
+                        break
 
     # Determine base solver names to process
     base_names = []
@@ -2247,6 +2358,8 @@ def plot_combined_errors(data_folder=None, solver_name=None, registered_solver_c
             b = _resolve_solver_base(cls)
             if b not in base_names:
                 base_names.append(b)
+    elif fom_data is not None or rom_data is not None or hrom_data is not None:
+        base_names.append('CSVSolver')
     else:
         # Auto-discover from files in target_folder
         if os.path.exists(target_folder):
@@ -2402,8 +2515,12 @@ def plot_combined_errors(data_folder=None, solver_name=None, registered_solver_c
 
         if filename is None:
             out_pdf = os.path.join(target_folder, f"{base_name}_combined_errors.pdf")
+        elif os.path.isabs(filename) or (target_folder and filename.startswith(target_folder)):
+            out_pdf = filename
+        elif os.path.dirname(filename):
+            out_pdf = filename
         else:
-            out_pdf = filename if os.path.isabs(filename) else os.path.join(target_folder, filename)
+            out_pdf = os.path.join(target_folder, filename)
 
         combined_fig_data = {
             'FOM': cur_fom,
@@ -2419,16 +2536,17 @@ def plot_combined_errors(data_folder=None, solver_name=None, registered_solver_c
             print(f"Saved combined error plot to {out_pdf}")
 
             # Also save canonical combined_errors.pdf for ease of reference
-            default_out_pdf = os.path.join(target_folder, "combined_errors.pdf")
-            if os.path.abspath(out_pdf) != os.path.abspath(default_out_pdf):
-                try:
-                    shutil.copyfile(out_pdf, default_out_pdf)
-                    default_data = os.path.join(target_folder, "combined_errors.data.pickle")
-                    src_data = os.path.splitext(out_pdf)[0] + ".data.pickle"
-                    if os.path.exists(src_data):
-                        shutil.copyfile(src_data, default_data)
-                except Exception:
-                    pass
+            if filename is None:
+                default_out_pdf = os.path.join(target_folder, "combined_errors.pdf")
+                if os.path.abspath(out_pdf) != os.path.abspath(default_out_pdf):
+                    try:
+                        shutil.copyfile(out_pdf, default_out_pdf)
+                        default_data = os.path.join(target_folder, "combined_errors.data.pickle")
+                        src_data = os.path.splitext(out_pdf)[0] + ".data.pickle"
+                        if os.path.exists(src_data):
+                            shutil.copyfile(src_data, default_data)
+                    except Exception:
+                        pass
         except Exception as e:
             print(f"  [plot_combined_errors] Warning: Could not save figure to {out_pdf}: {e}")
 
@@ -2444,6 +2562,7 @@ def plot_combined_errors(data_folder=None, solver_name=None, registered_solver_c
 
 def plot_combined_phase_portraits(data_folder=None, solver_name=None, registered_solver_classes=None,
                                   filename=None, kwds=None, fom_data=None, rom_data=None, hrom_data=None,
+                                  solvers=None,
                                   times=[1.0, 2.0, 3.0], radius=0.5, rung_color='#555555',
                                   strand1_color=OKABE_ITO_PALETTE[4],
                                   strand2_color=OKABE_ITO_PALETTE[5],
@@ -2486,6 +2605,8 @@ def plot_combined_phase_portraits(data_folder=None, solver_name=None, registered
         Dictionary of keyword arguments containing 'registered_solver_classes'.
     fom_data, rom_data, hrom_data : dict, optional
         Pre-loaded data dictionaries (skips loading from file if supplied).
+    solvers : dict or list, optional
+        Solver instances or dict of {'FOM': s_f, 'ROM': s_r, 'HROM': s_hr}.
     times : list of float, optional
         Time instances to plot in rows. Default is [1.0, 2.0, 3.0].
     radius : float, optional
@@ -2519,6 +2640,59 @@ def plot_combined_phase_portraits(data_folder=None, solver_name=None, registered
     from System import MechSystem
     target_folder = data_folder or getattr(MechSystem, 'data_folder', None) or 'data'
 
+    # Extract coordinates from solver instances if supplied
+    solvers = solvers or kwargs.get('solvers')
+    if solvers is not None:
+        s_f, s_r, s_hr = None, None, None
+        if isinstance(solvers, dict):
+            s_f = solvers.get('FOM', solvers.get('fom'))
+            s_r = solvers.get('ROM', solvers.get('rom'))
+            s_hr = solvers.get('HROM', solvers.get('hrom'))
+        elif isinstance(solvers, (list, tuple)):
+            if len(solvers) > 0:
+                s_f = solvers[0]
+            if len(solvers) > 1:
+                s_r = solvers[1]
+            if len(solvers) > 2:
+                s_hr = solvers[2]
+
+        def _extract_phase_data(s):
+            if s is None:
+                return None
+            if isinstance(s, dict):
+                return s
+            t_pts = getattr(s, 't_points', None)
+            if hasattr(s, 'coords') and s.coords is not None:
+                c = s.coords
+            elif hasattr(s, 'y') and s.y is not None:
+                nosc = getattr(s, 'nosc', None)
+                if nosc is None:
+                    nosc = getattr(MechSystem, 'nosc', s.y.shape[1] // 2)
+                c = s.y[:, :nosc].reshape(-1, nosc // 3, 3)
+            else:
+                c = None
+            return {'coords': c, 't_points': t_pts}
+
+        if fom_data is None and s_f is not None:
+            fom_data = _extract_phase_data(s_f)
+        if rom_data is None and s_r is not None:
+            rom_data = _extract_phase_data(s_r)
+        if hrom_data is None and s_hr is not None:
+            hrom_data = _extract_phase_data(s_hr)
+
+        if solver_name is None:
+            for cand in [s_f, s_r, s_hr]:
+                if cand is not None:
+                    if hasattr(cand, 'solver_class') and cand.solver_class is not None:
+                        solver_name = cand.solver_class.__name__
+                        break
+                    elif hasattr(cand, '__class__') and not isinstance(cand, dict):
+                        solver_name = cand.__class__.__name__
+                        break
+                    elif isinstance(cand, dict) and 'solver_name' in cand:
+                        solver_name = cand['solver_name']
+                        break
+
     # Determine base solver names to process
     base_names = []
     if solver_name is not None:
@@ -2533,6 +2707,8 @@ def plot_combined_phase_portraits(data_folder=None, solver_name=None, registered
             b = _resolve_solver_base(cls)
             if b not in base_names:
                 base_names.append(b)
+    elif fom_data is not None or rom_data is not None or hrom_data is not None:
+        base_names.append('CSVSolver')
     else:
         # Auto-discover from files in target_folder
         if os.path.exists(target_folder):
@@ -2730,8 +2906,12 @@ def plot_combined_phase_portraits(data_folder=None, solver_name=None, registered
 
         if filename is None:
             out_pdf = os.path.join(target_folder, f"{base_name}_combined_phase_portraits.pdf")
+        elif os.path.isabs(filename) or (target_folder and filename.startswith(target_folder)):
+            out_pdf = filename
+        elif os.path.dirname(filename):
+            out_pdf = filename
         else:
-            out_pdf = filename if os.path.isabs(filename) else os.path.join(target_folder, filename)
+            out_pdf = os.path.join(target_folder, filename)
 
         combined_phase_data = {
             'FOM': cur_fom,
@@ -2748,16 +2928,17 @@ def plot_combined_phase_portraits(data_folder=None, solver_name=None, registered
             print(f"Saved combined phase portraits to {out_pdf}")
 
             # Also save canonical combined_phase_portraits.pdf for ease of reference
-            default_out_pdf = os.path.join(target_folder, "combined_phase_portraits.pdf")
-            if os.path.abspath(out_pdf) != os.path.abspath(default_out_pdf):
-                try:
-                    shutil.copyfile(out_pdf, default_out_pdf)
-                    default_data = os.path.join(target_folder, "combined_phase_portraits.data.pickle")
-                    src_data = os.path.splitext(out_pdf)[0] + ".data.pickle"
-                    if os.path.exists(src_data):
-                        shutil.copyfile(src_data, default_data)
-                except Exception:
-                    pass
+            if filename is None:
+                default_out_pdf = os.path.join(target_folder, "combined_phase_portraits.pdf")
+                if os.path.abspath(out_pdf) != os.path.abspath(default_out_pdf):
+                    try:
+                        shutil.copyfile(out_pdf, default_out_pdf)
+                        default_data = os.path.join(target_folder, "combined_phase_portraits.data.pickle")
+                        src_data = os.path.splitext(out_pdf)[0] + ".data.pickle"
+                        if os.path.exists(src_data):
+                            shutil.copyfile(src_data, default_data)
+                    except Exception:
+                        pass
         except Exception as e:
             print(f"  [plot_combined_phase_portraits] Warning: Could not save figure to {out_pdf}: {e}")
 
@@ -3370,6 +3551,210 @@ def plot_initial_lattice_cylindrical(coords=None, radius=0.5, pitch=15.0, nosc=5
     save_figure(fig, filename, fig_data=fig_data)
     plt.close(fig)
     return fig, axes_list
+
+
+def plot_elastica_beam(solvers_f, solvers_r=None, solvers_hr=None, data_folder=None,
+                       filename="elastica_beam_test_sanity_check.pdf", solver_idx=0, **kwargs):
+    """
+    Dedicated visualization for the Discrete Euler Elastica / Flexible Beam:
+    - Panel (a): 3D perspective of dynamic beam centerline deformation over time,
+      with FOM, ROM, and HROM compared at final state t = T.
+    - Panel (b): 2D elevation profiles z(x) across time snapshots (t = T/2 and t = T).
+    - Panel (c): Tip vertical deflection history z_tip(t) comparing FOM, ROM, and HROM.
+
+    Color scheme & styling:
+    - Standardized Okabe-Ito colorblind-accessible palette:
+      FOM: Black solid ('-')
+      ROM: Okabe-Ito Orange ('--')
+      HROM: Okabe-Ito Sky Blue ('-.')
+    - Tip trajectory: Okabe-Ito Vermillion ('--')
+    - Enforced physical 3D lateral scaling to prevent spurious numerical roundoff magnification.
+    - Saves publication-quality PDF and companion .data.pickle via save_figure.
+    """
+    if solvers_hr is None:
+        solvers_hr = kwargs.get('solvers_dr', None)
+
+    if data_folder is None:
+        try:
+            from System import MechSystem
+            data_folder = getattr(MechSystem, 'data_folder', 'data')
+        except ImportError:
+            data_folder = 'data'
+    os.makedirs(data_folder, exist_ok=True)
+
+    if isinstance(solvers_f, (list, tuple)):
+        sf = solvers_f[solver_idx] if len(solvers_f) > solver_idx else None
+    else:
+        sf = solvers_f
+
+    if sf is None:
+        print("[plot_elastica_beam] No FOM solver provided; skipping.")
+        return
+
+    if isinstance(solvers_r, (list, tuple)):
+        sr = solvers_r[solver_idx] if len(solvers_r) > solver_idx else None
+    else:
+        sr = solvers_r
+
+    if isinstance(solvers_hr, (list, tuple)):
+        shr = solvers_hr[solver_idx] if len(solvers_hr) > solver_idx else None
+    else:
+        shr = solvers_hr
+
+    t_points = sf.t_points
+    nosc = sf.nosc
+    n_nodes = nosc // 3
+    coords_f = sf.y[:, :nosc].reshape(-1, n_nodes, 3)
+    coords_r = sr.y[:, :nosc].reshape(-1, n_nodes, 3) if sr is not None and getattr(sr, 'y', None) is not None else None
+    coords_hr = shr.y[:, :nosc].reshape(-1, n_nodes, 3) if shr is not None and getattr(shr, 'y', None) is not None else None
+
+    n_steps = coords_f.shape[0]
+
+    usetex = plt.rcParams.get('text.usetex', False)
+    lbl_fom_T = r"FOM ($t = T$)" if usetex else "FOM (t = T)"
+    lbl_rom_T = r"ROM ($t = T$)" if usetex else "ROM (t = T)"
+    lbl_hrom_T = r"HROM ($t = T$)" if usetex else "HROM (t = T)"
+
+    # --- Matplotlib Publication Figure ---
+    fig = plt.figure(figsize=(18, 5.5))
+    gs = fig.add_gridspec(1, 3, width_ratios=[1.2, 1, 1], wspace=0.28)
+
+    # Panel (a): 3D Dynamic Centerline Deformation
+    ax1 = fig.add_subplot(gs[0, 0], projection='3d')
+    n_snaps = min(12, n_steps)
+    snap_indices = np.linspace(0, n_steps - 1, n_snaps, dtype=int)
+
+    # Pinned anchor marker at origin
+    ax1.scatter([0], [0], [0], s=90, c='black', marker='s', label='Root pinned', zorder=10)
+
+    # Intermediate snapshots of FOM centerline in subtle progression
+    for s_idx in snap_indices[:-1]:
+        ax1.plot(coords_f[s_idx, :, 0], coords_f[s_idx, :, 1], coords_f[s_idx, :, 2],
+                 color='#999999', lw=1.2, ls='--', alpha=0.5)
+
+    # Free tip trajectory in Okabe-Ito Vermillion
+    ax1.plot(coords_f[:, -1, 0], coords_f[:, -1, 1], coords_f[:, -1, 2],
+             color=OKABE_ITO_PALETTE[5], ls='--', lw=1.5, alpha=0.85, label='Tip trajectory')
+
+    # Final beam state comparison at t = T
+    ax1.plot(coords_f[-1, :, 0], coords_f[-1, :, 1], coords_f[-1, :, 2],
+             color='black', lw=2.5, ls='-', label=lbl_fom_T)
+    if coords_r is not None:
+        ax1.plot(coords_r[-1, :, 0], coords_r[-1, :, 1], coords_r[-1, :, 2],
+                 color=OKABE_ITO_PALETTE[0], lw=2.0, ls='--', label=lbl_rom_T)
+    if coords_hr is not None:
+        ax1.plot(coords_hr[-1, :, 0], coords_hr[-1, :, 1], coords_hr[-1, :, 2],
+                 color=OKABE_ITO_PALETTE[1], lw=2.0, ls='-.', label=lbl_hrom_T)
+
+    # Physical scaling limits for 3D box:
+    # Ensure minimum physical lateral span of at least 0.4 m to avoid
+    # numerical roundoff (~1e-18) in nominal in-plane motion being magnified.
+    x_all = coords_f[:, :, 0]
+    y_all = coords_f[:, :, 1]
+    z_all = coords_f[:, :, 2]
+    x_max = float(np.amax(x_all))
+    z_min, z_max = float(np.amin(z_all)), float(np.amax(z_all))
+    y_span = max(float(np.ptp(y_all)), 0.4)
+    y_mid = float(np.mean(y_all))
+
+    ax1.set_xlim([-0.05, max(x_max + 0.05, 1.05)])
+    ax1.set_ylim([y_mid - y_span / 2.0, y_mid + y_span / 2.0])
+    ax1.set_zlim([min(z_min - 0.05, -0.25), max(z_max + 0.05, 0.05)])
+    ax1.set_box_aspect([1.1, 0.4, 0.3])
+
+    ax1.set_xlabel('X (axial)', labelpad=8)
+    ax1.set_ylabel('Y (lateral)', labelpad=8)
+    ax1.set_zlabel('Z (vertical)', labelpad=8)
+    ax1.set_title('(a) 3D Dynamic Centerline', fontsize=13, fontweight='bold')
+    ax1.view_init(elev=20, azim=-60)
+    ax1.legend(loc='upper right', fontsize=8)
+
+    # Panel (b): 2D Elevation Profiles z(x)
+    ax2 = fig.add_subplot(gs[0, 1])
+    mid_idx = n_steps // 2
+    t_mid = t_points[mid_idx]
+    t_end = t_points[-1]
+
+    lbl_fom_mid = rf"FOM ($t = {t_mid:.2f}$)" if usetex else f"FOM (t = {t_mid:.2f})"
+    lbl_rom_mid = rf"ROM ($t = {t_mid:.2f}$)" if usetex else f"ROM (t = {t_mid:.2f})"
+    lbl_hrom_mid = rf"HROM ($t = {t_mid:.2f}$)" if usetex else f"HROM (t = {t_mid:.2f})"
+    lbl_fom_end = rf"FOM ($t = {t_end:.2f}$)" if usetex else f"FOM (t = {t_end:.2f})"
+    lbl_rom_end = rf"ROM ($t = {t_end:.2f}$)" if usetex else f"ROM (t = {t_end:.2f})"
+    lbl_hrom_end = rf"HROM ($t = {t_end:.2f}$)" if usetex else f"HROM (t = {t_end:.2f})"
+
+    # Mid snapshot (t = T/2)
+    ax2.plot(coords_f[mid_idx, :, 0], coords_f[mid_idx, :, 2],
+             color='0.5', lw=1.6, ls='-', label=lbl_fom_mid)
+    if coords_r is not None:
+        ax2.plot(coords_r[mid_idx, :, 0], coords_r[mid_idx, :, 2],
+                 color=OKABE_ITO_PALETTE[0], lw=1.4, ls='--', alpha=0.7, label=lbl_rom_mid)
+    if coords_hr is not None:
+        ax2.plot(coords_hr[mid_idx, :, 0], coords_hr[mid_idx, :, 2],
+                 color=OKABE_ITO_PALETTE[1], lw=1.4, ls='-.', alpha=0.7, label=lbl_hrom_mid)
+
+    # Final snapshot (t = T)
+    ax2.plot(coords_f[-1, :, 0], coords_f[-1, :, 2],
+             color='black', lw=2.2, ls='-', label=lbl_fom_end)
+    if coords_r is not None:
+        ax2.plot(coords_r[-1, :, 0], coords_r[-1, :, 2],
+                 color=OKABE_ITO_PALETTE[0], lw=1.8, ls='--', label=lbl_rom_end)
+    if coords_hr is not None:
+        ax2.plot(coords_hr[-1, :, 0], coords_hr[-1, :, 2],
+                 color=OKABE_ITO_PALETTE[1], lw=1.8, ls='-.', label=lbl_hrom_end)
+
+    ax2.plot([0], [0], 'k^', markersize=10, label='Pinned base')
+    ax2.axhline(0, color='gray', lw=0.8, ls=':')
+    ax2.set_xlabel('Axial coordinate $x$', fontsize=11)
+    ax2.set_ylabel('Vertical deflection $z$', fontsize=11)
+    ax2.set_title('(b) Elevation Deflection Profiles $z(x)$', fontsize=13, fontweight='bold')
+    ax2.grid(True, linestyle='--', alpha=0.5)
+    ax2.legend(loc='lower left', fontsize=7.5)
+
+    # Panel (c): Tip Deflection History z_tip(t)
+    ax3 = fig.add_subplot(gs[0, 2])
+    z_tip_f = coords_f[:, -1, 2]
+    ax3.plot(t_points, z_tip_f, color='black', lw=2.2, ls='-', label='FOM')
+    if coords_r is not None:
+        z_tip_r = coords_r[:, -1, 2]
+        ax3.plot(t_points, z_tip_r, color=OKABE_ITO_PALETTE[0], lw=1.8, ls='--', label='ROM')
+    if coords_hr is not None:
+        z_tip_hr = coords_hr[:, -1, 2]
+        ax3.plot(t_points, z_tip_hr, color=OKABE_ITO_PALETTE[1], lw=1.8, ls='-.', label='HROM')
+
+    ax3.set_xlabel('Time $t$', fontsize=11)
+    ax3.set_ylabel(r'Tip vertical displacement $z_{\mathrm{tip}}$', fontsize=11)
+    ax3.set_title('(c) Tip Displacement History', fontsize=13, fontweight='bold')
+    ax3.grid(True, linestyle='--', alpha=0.5)
+    ax3.legend(loc='lower left', fontsize=9)
+
+    err_text = []
+    if coords_r is not None:
+        err_tip_r = float(np.amax(np.abs(z_tip_f - z_tip_r)))
+        err_text.append(f"ROM: {err_tip_r:.2e}")
+    if coords_hr is not None:
+        err_tip_hr = float(np.amax(np.abs(z_tip_f - z_tip_hr)))
+        err_text.append(f"HROM: {err_tip_hr:.2e}")
+    if err_text:
+        box_str = "Max Tip Error:\n" + "\n".join(err_text)
+        ax3.text(0.95, 0.95, box_str,
+                 transform=ax3.transAxes, verticalalignment='top', horizontalalignment='right',
+                 bbox=dict(boxstyle='round,pad=0.4', facecolor='white', alpha=0.8, edgecolor='gray'),
+                 fontsize=8)
+
+    out_pdf = os.path.join(data_folder, filename) if not os.path.isabs(filename) else filename
+    fig_data = {
+        't_points': t_points,
+        'coords_f': coords_f,
+        'coords_r': coords_r,
+        'coords_hr': coords_hr,
+        'z_tip_f': z_tip_f,
+        'z_tip_r': coords_r[:, -1, 2] if coords_r is not None else None,
+        'z_tip_hr': coords_hr[:, -1, 2] if coords_hr is not None else None,
+    }
+    save_figure(fig, out_pdf, fig_data=fig_data)
+    plt.close(fig)
+    print(f"Saved dedicated Elastica beam plot to {out_pdf}")
+    return fig
 
 
 

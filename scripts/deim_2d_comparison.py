@@ -43,7 +43,7 @@ def f(mu, indices=None):
         return func_vals
 
 # Generate snapshots
-np.random.seed(0)
+np.random.seed(42)
 snapshots = np.zeros((n, num_snapshots))
 mu1_values = np.linspace(-1, -0.01, num_mu1_samples)
 mu2_values = np.linspace(-1, -0.01, num_mu2_samples)

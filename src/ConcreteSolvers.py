@@ -13,7 +13,7 @@ from Reduction import Basis, IdentityBasis, as_basis
 from ODESolver import (ConformalStormerVerlet, ConformalImplicitMidpoint, 
                       DiscreteGradient)
 from ReduceMechSystem import ReduceMechSystem, HamiltonianReducer, DiscreteGradientReducer
-from PlotScript import timing, plot_solvers, plot_combined_errors
+from PlotScript import timing
 
 def _dask_worker(idx, *arg):
     """
@@ -24,7 +24,7 @@ def _dask_worker(idx, *arg):
     print(f"Worker {idx} starting...", flush=True)
     
     try:
-        with warnings.catch_warnings(record=True) as w_list:
+        with warnings.catch_warnings():
             warnings.simplefilter("always")
             warnings.filterwarnings("error", category=RuntimeWarning)
             # BaseSolverMixin is in the module's scope, so this is fine.
@@ -619,8 +619,14 @@ class BaseSolverMixin:
         self.compute_energy_error()
         self.compute_sym_error()
         self.compute_constraint_error()
-        self.compute_linear_momentum_error()
-        self.compute_angular_momentum_error()
+        if getattr(MechSystem, 'has_momentum_invariants', True):
+            self.compute_linear_momentum_error()
+            self.compute_angular_momentum_error()
+        else:
+            self.lin_momentum_err = None
+            self.lin_mom_error = np.nan
+            self.angular_momentum_err = None
+            self.ang_mom_error = np.nan
 
     @staticmethod
     def solve_mech_system(solver_class, dt, Omega2, kwds):
@@ -679,7 +685,7 @@ class BaseSolverMixin:
             # This prevents deadlock when using adaptive scaling with min_workers=0
             if not client.scheduler_info()['workers']:
                 print("Cluster has 0 workers. Triggering scaling...", flush=True)
-                dummy = client.submit(lambda x: x, 0)
+                client.submit(lambda x: x, 0)
                 client.wait_for_workers(1)
 
             kwds_future = client.scatter(kwds, broadcast=True)
@@ -798,7 +804,7 @@ class BaseSolverMixin:
     @staticmethod
     def setup_and_solve_reduced_system(kwds, solvers, client=None):
         """Setup and solve the reduced-order system."""
-        print(f'\nSetting up reduced system...')
+        print('\nSetting up reduced system...')
         kwds = copy.deepcopy(kwds)
 
         pod_tol = kwds.get('pod_tol', MechSystem.pod_tol_sweep[-1])
@@ -852,14 +858,13 @@ class BaseSolverMixin:
             fast_dump(solvers_r, solvers_file)
 
         BaseSolverMixin.compute_convergence_rates(kwds, solvers_r)
-        plot_solvers(kwds, solvers_r)
 
         return solvers_r
 
     @staticmethod
     def setup_and_solve_hyperreduced_system(kwds, solvers, client=None):
         """Setup and solve the hyper-reduced system."""
-        print(f'\nSetting up hyper-reduced system...')
+        print('\nSetting up hyper-reduced system...')
         kwds = copy.deepcopy(kwds)
 
         pod_tol = kwds.get('pod_tol', MechSystem.pod_tol_sweep[-1])
@@ -964,11 +969,6 @@ class BaseSolverMixin:
 
 
         BaseSolverMixin.compute_convergence_rates(kwds, solvers_hr)
-        plot_solvers(kwds, solvers_hr)
-        try:
-            plot_combined_errors(kwds=kwds, data_folder=checkpoint_path)
-        except Exception as e:
-            print(f"  [Warning] Could not generate combined error plot: {e}")
 
         return solvers_hr
 

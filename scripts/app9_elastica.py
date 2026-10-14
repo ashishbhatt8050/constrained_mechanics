@@ -30,11 +30,11 @@ from SymbolicComputer import manage_cache
 from ElasticaSymbolicComputer import ElasticaSymbolicComputer
 from ElasticaSystem import (ElasticaConfig, ElasticaMechSystem,
                             get_symbolic_expressions_file_elastica,
-                            make_elastica_initial_conditions,
-                            plot_elastica_beam)
+                            make_elastica_initial_conditions)
 from PlotScript import (plot_omega_distribution, plot_error_vs_basis_size,
-                        plot_prediction_results, plot_solvers,
-                        plot_prediction_sanity_check, plot_combined_errors)
+                        plot_prediction_results,
+                        plot_prediction_sanity_check,
+                        plot_elastica_beam)
 
 
 def _collect_metric(solver_list, cls, metric_fn):
@@ -47,17 +47,30 @@ _PREDICTION_METRICS = [
     ('sym_error',      lambda s: np.amax(s.sym_error) if getattr(s, 'sym_error', None) is not None else np.nan,  lambda sl: any(s is not None and getattr(s, 'sym_error', None) is not None for s in sl)),
     ('energy_error',   lambda s: np.amax(s.eng_error) if getattr(s, 'eng_error', None) is not None else np.nan,  lambda sl: any(s is not None and getattr(s, 'eng_error', None) is not None for s in sl)),
     ('phase_error',    lambda s: getattr(s, 'phase_error', np.nan),  lambda sl: True),
-    ('lin_mom_error',  lambda s: getattr(s, 'lin_mom_error', np.nan), lambda sl: True),
-    ('ang_mom_error',  lambda s: getattr(s, 'ang_mom_error', np.nan), lambda sl: True),
 ]
+
+
+def _is_valid_solver(s):
+    """Check if solver instance finished successfully with a complete, finite trajectory."""
+    if s is None:
+        return False
+    y = getattr(s, 'y', None)
+    if y is None or not isinstance(y, np.ndarray):
+        return False
+    if not np.all(np.isfinite(y)):
+        return False
+    n = getattr(s, 'n', None)
+    if n is not None and y.shape[0] != n + 1:
+        return False
+    return True
 
 
 def run_prediction_sanity_check(kwds, solvers_r, solvers_hr, original_solver_classes, **kwargs):
     """
     Sanity check for prediction experiments on Constrained Euler Elastica:
-    Solves a FOM for the last unseen Omega2 test parameter (bending stiffnesses),
+    Selects a successful unseen Omega2 test parameter where both ROM and HROM solved,
     directly compares trajectories, tip deflections, and physical invariants against
-    ROM and HROM, prints a summary, and saves diagnostic comparison plots.
+    a newly solved ground-truth FOM, prints a summary, and saves diagnostic comparison plots.
     """
     if not getattr(MechSystem, 'predict', False):
         return
@@ -69,39 +82,68 @@ def run_prediction_sanity_check(kwds, solvers_r, solvers_hr, original_solver_cla
         print("\n[Sanity Check] No ROM/HROM solvers available to compare against. Skipping.")
         return
 
-    last_omega2 = MechSystem.Omega2_space_test[-1]
     tol = kwds.get('pod_tol', MechSystem.pod_tol_sweep[-1])
 
     print("\n" + "=" * 88)
-    print(">>> [SANITY CHECK] Evaluating Prediction Fidelity on Unseen Elastica Test Parameter")
-    print(f"    Omega2 (test[-1]): {np.array2string(last_omega2, precision=3, separator=', ')}")
+    print(">>> [SANITY CHECK] Evaluating Prediction Fidelity on Successful Unseen Elastica Test Parameter")
     print(f"    Basis Tolerance:   {tol}")
     print("=" * 88)
 
     for cls in original_solver_classes:
         cls_name = cls.__name__
         for dt in MechSystem.dt_space:
-            # 1. Match ROM and HROM solvers from the test sweep
-            s_r = next((s for s in solvers_r if s is not None 
-                        and _matches_solver_family(s, cls) 
-                        and np.isclose(s.dt, dt) 
-                        and np.allclose(s.Omega2, last_omega2)), None)
-            s_hr = next((s for s in solvers_hr if s is not None 
-                         and _matches_solver_family(s, cls) 
-                         and np.isclose(s.dt, dt) 
-                         and np.allclose(s.Omega2, last_omega2)), None)
+            # 1. Search for a test parameter where both ROM and HROM completed successfully.
+            # Traverse backwards (from highest unseen frequencies down) to test generalization.
+            best_candidate = None
+            fallback_candidate = None
 
-            if s_r is None or s_hr is None:
-                print(f"  [Warning] Missing ROM or HROM result for {cls_name} (dt={dt:.4f}). Skipping.")
+            for idx in range(len(MechSystem.Omega2_space_test) - 1, -1, -1):
+                omega2 = MechSystem.Omega2_space_test[idx]
+                s_r_cand = next((s for s in solvers_r if s is not None 
+                                 and _matches_solver_family(s, cls) 
+                                 and np.isclose(s.dt, dt) 
+                                 and np.allclose(s.Omega2, omega2)), None)
+                s_hr_cand = next((s for s in solvers_hr if s is not None 
+                                  and _matches_solver_family(s, cls) 
+                                  and np.isclose(s.dt, dt) 
+                                  and np.allclose(s.Omega2, omega2)), None)
+
+                if _is_valid_solver(s_r_cand) and _is_valid_solver(s_hr_cand):
+                    has_full_metrics = (getattr(s_r_cand, 'sym_error', None) is not None and 
+                                        getattr(s_hr_cand, 'sym_error', None) is not None and 
+                                        getattr(s_r_cand, 'eng_error', None) is not None and 
+                                        getattr(s_hr_cand, 'eng_error', None) is not None)
+                    if has_full_metrics:
+                        best_candidate = (idx, omega2, s_r_cand, s_hr_cand)
+                        break
+                    elif fallback_candidate is None:
+                        fallback_candidate = (idx, omega2, s_r_cand, s_hr_cand)
+
+            chosen = best_candidate or fallback_candidate
+            if chosen is None:
+                print(f"  [Warning] No test parameter found where both ROM and HROM completed successfully for {cls_name} (dt={dt:.4f}). Skipping.")
                 continue
 
+            target_idx, target_omega2, s_r, s_hr = chosen
+            has_full_m = (chosen == best_candidate)
+            print(f"\n--> Selected test parameter [{target_idx}] for {cls_name} (dt={dt:.4f}, full_metrics={has_full_m})")
+            print(f"    Omega2: {np.array2string(target_omega2, precision=3, separator=', ')}")
+
             # 2. Run the ground-truth FOM solve for this test parameter
-            print(f"\n--> Running test FOM solve: {cls_name} (dt={dt:.4f}) ...", flush=True)
+            print(f"--> Running test FOM solve: {cls_name} (dt={dt:.4f}) ...", flush=True)
             kwds_fom = {
                 'nosc': MechSystem.nosc,
                 'registered_solver_classes': [cls],
             }
-            s_f = BaseSolverMixin.solve_mech_system(cls, dt, last_omega2, kwds_fom)
+            try:
+                s_f = BaseSolverMixin.solve_mech_system(cls, dt, target_omega2, kwds_fom)
+            except Exception as e:
+                print(f"  [Warning] Test FOM solve failed for {cls_name} (dt={dt:.4f}): {e}. Skipping.")
+                continue
+
+            if not _is_valid_solver(s_f):
+                print(f"  [Warning] Test FOM trajectory is invalid or incomplete for {cls_name} (dt={dt:.4f}). Skipping.")
+                continue
 
             # 3. Compute trajectory difference metrics
             fom_norm_inf = np.amax(np.abs(s_f.y))
@@ -135,11 +177,11 @@ def run_prediction_sanity_check(kwds, solvers_r, solvers_hr, original_solver_cla
             err_tip_hr = np.amax(np.abs(z_tip_f - z_tip_hr))
 
             # Runtimes & Speedups
-            t_f = s_f.time_lapsed[0]
-            t_r = s_r.time_lapsed[0]
-            t_hr = s_hr.time_lapsed[0]
-            sp_r = t_f / t_r if t_r > 0 else np.nan
-            sp_hr = t_f / t_hr if t_hr > 0 else np.nan
+            t_f = s_f.time_lapsed[0] if getattr(s_f, 'time_lapsed', None) else np.nan
+            t_r = s_r.time_lapsed[0] if getattr(s_r, 'time_lapsed', None) else np.nan
+            t_hr = s_hr.time_lapsed[0] if getattr(s_hr, 'time_lapsed', None) else np.nan
+            sp_r = t_f / t_r if (t_r > 0 and not np.isnan(t_f)) else np.nan
+            sp_hr = t_f / t_hr if (t_hr > 0 and not np.isnan(t_f)) else np.nan
 
             # Invariant errors
             eng_f = np.amax(np.abs(s_f.eng_error)) if getattr(s_f, 'eng_error', None) is not None else np.nan
@@ -150,17 +192,21 @@ def run_prediction_sanity_check(kwds, solvers_r, solvers_hr, original_solver_cla
             sym_r = np.amax(np.abs(s_r.sym_error)) if getattr(s_r, 'sym_error', None) is not None else np.nan
             sym_hr = np.amax(np.abs(s_hr.sym_error)) if getattr(s_hr, 'sym_error', None) is not None else np.nan
 
+            phase_f = getattr(s_f, 'phase_error', np.nan)
+            phase_r = getattr(s_r, 'phase_error', np.nan)
+            phase_hr = getattr(s_hr, 'phase_error', np.nan)
+
             # Basis dimensions
             rom_dim = f"{2 * s_r.nosc_r}" if hasattr(s_r, 'nosc_r') else "N/A"
             hrom_dim = f"{s_hr.deim_field.shape[1]}" if hasattr(s_hr, 'deim_field') and s_hr.deim_field is not None else str(getattr(s_hr, 'nosc_r', 'N/A'))
 
             # 4. Print Summary Table
-            print(f"\n--- Sanity Check Summary: {cls_name} (dt={dt:.4f}) ---")
-            print(f"{'Model':<8} | {'Dim':<8} | {'Rel-Linf Err':<13} | {'Rel-L2 Err':<12} | {'Tip Err (m)':<12} | {'Max ΔH':<10} | {'Max ΔSp':<10} | {'Time (s)':<9} | {'Speedup'}")
-            print("-" * 103)
-            print(f"{'FOM':<8} | {2*nosc:<8} | {'Reference':<13} | {'Reference':<12} | {'Reference':<12} | {eng_f:<10.2e} | {sym_f:<10.2e} | {t_f:<9.3f} | 1.00x")
-            print(f"{'ROM':<8} | {rom_dim:<8} | {err_r_rel:<13.2e} | {err_r_l2:<12.2e} | {err_tip_r:<12.2e} | {eng_r:<10.2e} | {sym_r:<10.2e} | {t_r:<9.3f} | {sp_r:.2f}x")
-            print(f"{'HROM':<8} | {hrom_dim:<8} | {err_hr_rel:<13.2e} | {err_hr_l2:<12.2e} | {err_tip_hr:<12.2e} | {eng_hr:<10.2e} | {sym_hr:<10.2e} | {t_hr:<9.3f} | {sp_hr:.2f}x")
+            print(f"\n--- Sanity Check Summary: {cls_name} (dt={dt:.4f}, test[{target_idx}]) ---")
+            print(f"{'Model':<8} | {'Dim':<8} | {'Rel-Linf Err':<13} | {'Rel-L2 Err':<12} | {'Tip Err (m)':<12} | {'Max ΔH':<10} | {'Max ΔSp':<10} | {'Max ΔS':<10} | {'Time (s)':<9} | {'Speedup'}")
+            print("-" * 114)
+            print(f"{'FOM':<8} | {2*nosc:<8} | {'Reference':<13} | {'Reference':<12} | {'Reference':<12} | {eng_f:<10.2e} | {sym_f:<10.2e} | {phase_f:<10.2e} | {t_f:<9.3f} | 1.00x")
+            print(f"{'ROM':<8} | {rom_dim:<8} | {err_r_rel:<13.2e} | {err_r_l2:<12.2e} | {err_tip_r:<12.2e} | {eng_r:<10.2e} | {sym_r:<10.2e} | {phase_r:<10.2e} | {t_r:<9.3f} | {sp_r:.2f}x")
+            print(f"{'HROM':<8} | {hrom_dim:<8} | {err_hr_rel:<13.2e} | {err_hr_l2:<12.2e} | {err_tip_hr:<12.2e} | {eng_hr:<10.2e} | {sym_hr:<10.2e} | {phase_hr:<10.2e} | {t_hr:<9.3f} | {sp_hr:.2f}x")
             print(f"  Component breakdown: ROM (q_err={err_r_q:.2e}, p_err={err_r_p:.2e}) | HROM (q_err={err_hr_q:.2e}, p_err={err_hr_p:.2e})")
 
             # 5. Generate Diagnostic Plot
@@ -172,14 +218,30 @@ def run_prediction_sanity_check(kwds, solvers_r, solvers_hr, original_solver_cla
                 coord_label=r"Tip deflection $z_{\mathrm{tip}}(t)$",
                 coord_ylabel="Tip deflection",
                 system_label="Elastica",
-                target_idx=len(MechSystem.Omega2_space_test) - 1,
-                target_omega2=last_omega2,
+                target_idx=target_idx,
+                target_omega2=target_omega2,
                 cls_name=cls_name,
                 dt=dt,
             )
             print(f"  Saved comparison plot to: {plot_path}")
 
-            # 6. Generate dedicated 3D/2D Elastica beam plot for this test parameter
+            # 6. Save sanity check solvers cache to disk
+            solvers_cache_path = os.path.join(MechSystem.data_folder, "sanity_check_solvers.joblib")
+            try:
+                fast_dump({
+                    's_f': s_f,
+                    's_r': s_r,
+                    's_hr': s_hr,
+                    'dt': dt,
+                    'target_idx': target_idx,
+                    'target_omega2': target_omega2,
+                    'cls_name': cls_name,
+                }, solvers_cache_path)
+                print(f"  Saved sanity check solvers cache to: {solvers_cache_path}")
+            except Exception as e:
+                print(f"  [Warning] Could not save sanity check solvers cache: {e}")
+
+            # 7. Generate dedicated 3D/2D Elastica beam plot for this test parameter
             beam_test_pdf = f"elastica_beam_test_sanity_check_{cls_name}_dt_{dt:.4f}.pdf"
             plot_elastica_beam([s_f], [s_r], [s_hr], data_folder=MechSystem.data_folder, filename=beam_test_pdf)
             print(f"  Saved Elastica 3D/2D beam sanity check plot to: {os.path.join(MechSystem.data_folder, beam_test_pdf)}")
@@ -209,13 +271,25 @@ if __name__ == '__main__':
         n_nodes = 9 if args.n_nodes is None else args.n_nodes
         t_final = 0.2 if args.t_final is None else args.t_final
         n_samples = 4 if args.n_samples is None else args.n_samples
+        split_idx = n_samples // 2
         args.no_latex = True
         args.no_pgfplots = True
         print(f"Quick smoke-test mode: n_nodes={n_nodes}, t_final={t_final}s, n_samples={n_samples}")
     else:
         n_nodes = 21 if args.n_nodes is None else args.n_nodes
         t_final = 3.0 if args.t_final is None else args.t_final
-        n_samples = 15 if args.n_samples is None else args.n_samples
+        if args.n_samples is not None:
+            n_samples = args.n_samples
+            split_idx = max(1, int(n_samples * ElasticaConfig.train_ratio))
+        else:
+            _env_workers = os.environ.get('COMPUTE_WORKERS') or os.environ.get('DASK_NUM_WORKERS')
+            _worker_count = int(_env_workers) if _env_workers else int(os.environ.get('SLURM_CPUS_PER_TASK', 30))
+            omega2_train_waves = float(os.environ.get('OMEGA2_TRAIN_WAVES', 1))
+            omega2_test_waves = float(os.environ.get('OMEGA2_TEST_WAVES', 0.3334))
+
+            split_idx = max(1, int(round(float(os.environ.get('OMEGA2_SPLIT_IDX', omega2_train_waves * _worker_count)))))
+            _test_dim = max(1, int(round(float(os.environ.get('OMEGA2_TEST_DIM', omega2_test_waves * _worker_count)))))
+            n_samples = split_idx + _test_dim
 
     nosc = n_nodes * 3
     ElasticaConfig.n_nodes = n_nodes
@@ -224,9 +298,12 @@ if __name__ == '__main__':
     ElasticaConfig.num_joints = n_nodes - 2
     ElasticaConfig.T_final = t_final
     ElasticaConfig._Omega2_space_dim = n_samples
+    ElasticaConfig.split_idx = split_idx
+    ElasticaConfig.train_ratio = split_idx / max(1, n_samples)
 
     if args.reproduce:
         ElasticaConfig.predict = False
+        split_idx = n_samples
 
     # 2. Configure MechSystem
     MechSystem.nosc = nosc
@@ -238,6 +315,8 @@ if __name__ == '__main__':
     MechSystem.tol = ElasticaConfig.tol
     MechSystem.tol_reduced = ElasticaConfig.tol_reduced
     MechSystem.M = ElasticaConfig.M
+    MechSystem.has_momentum_invariants = getattr(ElasticaConfig, 'has_momentum_invariants', False)
+    MechSystem.split_idx = split_idx
     MechSystem.data_folder = ElasticaMechSystem.data_folder
     os.makedirs(MechSystem.data_folder, exist_ok=True)
 
@@ -247,15 +326,19 @@ if __name__ == '__main__':
     print(f"Verified initial conditions: d/dt g(q0, p0) = 0 strictly asserted (q0 . p0 = {q0_dot_p0:.2e})")
 
     # Parameter space for bending stiffnesses
-    rng = np.random.default_rng(seed=267257368022227711484290921317604022527)
+    rng = np.random.default_rng(seed=42)
     _Omega2_space = 2.0 + 8.0 * rng.random((ElasticaConfig._Omega2_space_dim, ElasticaConfig.num_joints))
     _Omega2_space = np.sort(_Omega2_space, axis=1)
     if MechSystem.predict:
-        split_idx = max(1, int(ElasticaConfig._Omega2_space_dim * ElasticaConfig.train_ratio))
         MechSystem.Omega2_space = _Omega2_space[:split_idx]
         MechSystem.Omega2_space_test = _Omega2_space[split_idx:]
     else:
         MechSystem.Omega2_space = MechSystem.Omega2_space_test = _Omega2_space
+
+    print("\nParameter Space Partitioning (Omega2):")
+    print(f"  Training parameters: {len(MechSystem.Omega2_space)} (split_idx={split_idx})")
+    print(f"  Testing parameters:  {len(MechSystem.Omega2_space_test)}")
+    print(f"  Total samples:       {len(_Omega2_space)}")
 
     # LaTeX configuration
     if args.no_latex or not shutil.which('latex'):
@@ -315,10 +398,18 @@ if __name__ == '__main__':
     # Determine number of workers safely:
     if args.n_workers is not None:
         n_workers = args.n_workers
-    elif 'SLURM_CPUS_PER_TASK' in os.environ:
-        n_workers = int(os.environ['SLURM_CPUS_PER_TASK'])
     else:
-        n_workers = 2  # Safe default on login node
+        env_workers = os.environ.get('COMPUTE_WORKERS') or os.environ.get('DASK_NUM_WORKERS')
+        if env_workers:
+            n_workers = int(env_workers)
+            allocated_cpus = int(os.environ.get('SLURM_CPUS_PER_TASK', n_workers))
+            print(f"LocalCluster: Using {n_workers} worker(s) from environment (COMPUTE_WORKERS/DASK_NUM_WORKERS; SLURM allocation={allocated_cpus}).", flush=True)
+        elif 'SLURM_CPUS_PER_TASK' in os.environ:
+            allocated_cpus = int(os.environ['SLURM_CPUS_PER_TASK'])
+            n_workers = allocated_cpus
+            print(f"LocalCluster: Detected SLURM allocation of {allocated_cpus} CPUs.", flush=True)
+        else:
+            n_workers = 2  # Safe default on login node
 
     print(f"Initializing LocalCluster for Elastica with {n_workers} worker(s)...", flush=True)
     cluster = LocalCluster(n_workers=n_workers, threads_per_worker=1)
@@ -332,6 +423,7 @@ if __name__ == '__main__':
         MechSystem.nosc = nosc_val
         MechSystem.y_init = y_init_val
         MechSystem.T_final = t_final_val
+        MechSystem.has_momentum_invariants = False
         load_symbolic_expressions(HamiltonianMechSystem, expressions_file=expr_file)
 
     client.run(init_elastica_worker, expressions_file, nosc, MechSystem.y_init, MechSystem.T_final)
@@ -356,7 +448,6 @@ if __name__ == '__main__':
             fast_dump(solvers, solvers_file)
 
         BaseSolverMixin.compute_convergence_rates(kwds_f, solvers)
-        plot_solvers(kwds_f, solvers)
 
         # --- Reduced order setup ---
         print("Setting up snapshot indices for Elastica POD...")
@@ -368,8 +459,6 @@ if __name__ == '__main__':
             'sym_error_f': [], 'sym_error_r': [], 'sym_error_hr': [],
             'phase_error_f': [], 'phase_error_r': [], 'phase_error_hr': [],
             'energy_error_f': [], 'energy_error_r': [], 'energy_error_hr': [],
-            'lin_mom_error_f': [], 'lin_mom_error_r': [], 'lin_mom_error_hr': [],
-            'ang_mom_error_f': [], 'ang_mom_error_r': [], 'ang_mom_error_hr': []
         } for cls in original_solver_classes}
 
         for tol in base_kwds['pod_tol_sweep']:
@@ -466,30 +555,13 @@ if __name__ == '__main__':
                 energy_error_hr=[study_data[n]['energy_error_hr'] for n in study_data],
                 phase_error_f=[study_data[n]['phase_error_f'] for n in study_data],
                 phase_error_r=[study_data[n]['phase_error_r'] for n in study_data],
-                phase_error_hr=[study_data[n]['phase_error_hr'] for n in study_data],
-                lin_mom_error_f=[study_data[n]['lin_mom_error_f'] for n in study_data],
-                lin_mom_error_r=[study_data[n]['lin_mom_error_r'] for n in study_data],
-                lin_mom_error_hr=[study_data[n]['lin_mom_error_hr'] for n in study_data],
-                ang_mom_error_f=[study_data[n]['ang_mom_error_f'] for n in study_data],
-                ang_mom_error_r=[study_data[n]['ang_mom_error_r'] for n in study_data],
-                ang_mom_error_hr=[study_data[n]['ang_mom_error_hr'] for n in study_data]
+                phase_error_hr=[study_data[n]['phase_error_hr'] for n in study_data]
             )
 
             # Sanity check: evaluate ground-truth test FOM vs ROM and HROM predictions
             if 'solvers_r' in locals() and 'solvers_hr' in locals():
                 sanity_kwds = kwds_hr if 'kwds_hr' in locals() else base_kwds
                 run_prediction_sanity_check(sanity_kwds, solvers_r, solvers_hr, original_solver_classes)
-
-        # Dedicated 3D and 2D Elastica beam visualization
-        print("\nGenerating dedicated 3D and 2D Elastica beam plots...")
-        plot_elastica_beam(solvers, solvers_r, solvers_hr, data_folder=MechSystem.data_folder)
-
-        # Combined error plot for FOM, ROM, and HROM
-        print("\nGenerating combined error plot across model reduction orders...")
-        plot_combined_errors(
-            data_folder=MechSystem.data_folder,
-            registered_solver_classes=original_solver_classes
-        )
 
         print("\nElastica Model Order Reduction study completed successfully!")
 

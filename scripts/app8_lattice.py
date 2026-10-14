@@ -31,8 +31,8 @@ from ConcreteSolvers import (BaseSolverMixin, ConformalStormerVerletSolver,
 from System import MechSystem, HamiltonianMechSystem, LagrangianMechSystem, load_symbolic_expressions, fast_dump, fast_load, get_data_dir, get_symbolic_expressions_file, check_checkpoint_exists
 from SymbolicComputer import IndexedBaseSymbolicComputer, manage_cache
 from PlotScript import (plot_omega_distribution, plot_pareto, plot_error_vs_basis_size,
-                        plot_prediction_results, plot_solvers,
-                        plot_prediction_sanity_check, plot_combined_errors, plot_combined_phase_portraits)
+                        plot_prediction_results,
+                        plot_prediction_sanity_check, plot_combined_phase_portraits)
 
 
 def _collect_metric(solver_list, cls, metric_fn):
@@ -194,17 +194,29 @@ def run_prediction_sanity_check(kwds, solvers_r, solvers_hr, original_solver_cla
             sym_r = np.amax(np.abs(s_r.sym_error)) if getattr(s_r, 'sym_error', None) is not None else np.nan
             sym_hr = np.amax(np.abs(s_hr.sym_error)) if getattr(s_hr, 'sym_error', None) is not None else np.nan
 
+            phase_f = getattr(s_f, 'phase_error', np.nan)
+            phase_r = getattr(s_r, 'phase_error', np.nan)
+            phase_hr = getattr(s_hr, 'phase_error', np.nan)
+
+            lin_f = getattr(s_f, 'lin_mom_error', np.nan)
+            lin_r = getattr(s_r, 'lin_mom_error', np.nan)
+            lin_hr = getattr(s_hr, 'lin_mom_error', np.nan)
+
+            ang_f = getattr(s_f, 'ang_mom_error', np.nan)
+            ang_r = getattr(s_r, 'ang_mom_error', np.nan)
+            ang_hr = getattr(s_hr, 'ang_mom_error', np.nan)
+
             # Basis dimensions
             rom_dim = f"{2 * s_r.nosc_r}" if hasattr(s_r, 'nosc_r') else "N/A"
             hrom_dim = f"{s_hr.deim_field.shape[1]}" if hasattr(s_hr, 'deim_field') and s_hr.deim_field is not None else str(getattr(s_hr, 'nosc_r', 'N/A'))
 
             # 4. Print Summary Table
             print(f"\n--- Sanity Check Summary: {cls_name} (dt={dt:.4f}, test[{target_idx}]) ---")
-            print(f"{'Model':<8} | {'Dim':<8} | {'Rel-Linf Err':<13} | {'Rel-L2 Err':<12} | {'Max ΔH':<10} | {'Max ΔSp':<10} | {'Time (s)':<9} | {'Speedup'}")
-            print("-" * 88)
-            print(f"{'FOM':<8} | {2*nosc:<8} | {'Reference':<13} | {'Reference':<12} | {eng_f:<10.2e} | {sym_f:<10.2e} | {t_f:<9.3f} | 1.00x")
-            print(f"{'ROM':<8} | {rom_dim:<8} | {err_r_rel:<13.2e} | {err_r_l2:<12.2e} | {eng_r:<10.2e} | {sym_r:<10.2e} | {t_r:<9.3f} | {sp_r:.2f}x")
-            print(f"{'HROM':<8} | {hrom_dim:<8} | {err_hr_rel:<13.2e} | {err_hr_l2:<12.2e} | {eng_hr:<10.2e} | {sym_hr:<10.2e} | {t_hr:<9.3f} | {sp_hr:.2f}x")
+            print(f"{'Model':<8} | {'Dim':<8} | {'Rel-Linf Err':<13} | {'Rel-L2 Err':<12} | {'Max ΔH':<10} | {'Max ΔSp':<10} | {'Max ΔS':<10} | {'Max ΔL':<10} | {'Max ΔJ':<10} | {'Time (s)':<9} | {'Speedup'}")
+            print("-" * 122)
+            print(f"{'FOM':<8} | {2*nosc:<8} | {'Reference':<13} | {'Reference':<12} | {eng_f:<10.2e} | {sym_f:<10.2e} | {phase_f:<10.2e} | {lin_f:<10.2e} | {ang_f:<10.2e} | {t_f:<9.3f} | 1.00x")
+            print(f"{'ROM':<8} | {rom_dim:<8} | {err_r_rel:<13.2e} | {err_r_l2:<12.2e} | {eng_r:<10.2e} | {sym_r:<10.2e} | {phase_r:<10.2e} | {lin_r:<10.2e} | {ang_r:<10.2e} | {t_r:<9.3f} | {sp_r:.2f}x")
+            print(f"{'HROM':<8} | {hrom_dim:<8} | {err_hr_rel:<13.2e} | {err_hr_l2:<12.2e} | {eng_hr:<10.2e} | {sym_hr:<10.2e} | {phase_hr:<10.2e} | {lin_hr:<10.2e} | {ang_hr:<10.2e} | {t_hr:<9.3f} | {sp_hr:.2f}x")
             print(f"  Component breakdown: ROM (q_err={err_r_q:.2e}, p_err={err_r_p:.2e}) | HROM (q_err={err_hr_q:.2e}, p_err={err_hr_p:.2e})")
 
             # 5. Generate Diagnostic Plot
@@ -221,6 +233,39 @@ def run_prediction_sanity_check(kwds, solvers_r, solvers_hr, original_solver_cla
             )
             print(f"  Saved comparison plot to: {plot_path}")
 
+            # 6. Save sanity check solvers cache to disk & generate combined phase portraits
+            nosc = MechSystem.nosc
+            for s in (s_f, s_r, s_hr):
+                if s is not None and (not hasattr(s, 'coords') or s.coords is None) and hasattr(s, 'y'):
+                    s.coords = s.y[:, :nosc].reshape(-1, nosc // 3, 3)
+
+            solvers_cache_path = os.path.join(MechSystem.data_folder, "sanity_check_solvers.joblib")
+            try:
+                fast_dump({
+                    's_f': s_f,
+                    's_r': s_r,
+                    's_hr': s_hr,
+                    'dt': dt,
+                    'target_idx': target_idx,
+                    'target_omega2': target_omega2,
+                    'cls_name': cls_name,
+                }, solvers_cache_path)
+                print(f"  Saved sanity check solvers cache to: {solvers_cache_path}")
+            except Exception as e:
+                print(f"  [Warning] Could not save sanity check solvers cache: {e}")
+
+            phase_path = os.path.join(MechSystem.data_folder, f"sanity_check_{cls_name}_combined_phase_portraits.pdf")
+            try:
+                plot_combined_phase_portraits(
+                    solvers={'FOM': s_f, 'ROM': s_r, 'HROM': s_hr},
+                    data_folder=MechSystem.data_folder,
+                    solver_name=cls_name,
+                    filename=phase_path,
+                )
+                print(f"  Saved sanity check phase portrait to: {phase_path}")
+            except Exception as e:
+                print(f"  [Warning] Could not generate sanity check phase portrait: {e}")
+
 
 # ===========================================================================
 # Main script
@@ -233,7 +278,7 @@ if __name__ == '__main__':
     # to prevent it from running on every Dask worker import.
     print(
         "NumPy RNG seed:",
-        np.random.default_rng(seed=267257368022227711484290921317604022527).bit_generator._seed_seq.entropy,
+        np.random.default_rng(seed=42).bit_generator._seed_seq.entropy,
     )
 
     parser = argparse.ArgumentParser(description="Constrained Mechanics Solver & Model Reduction")
@@ -351,10 +396,10 @@ if __name__ == '__main__':
             parsed = urlparse(cluster.dashboard_link)
             port = parsed.port
             node_host = socket.gethostname()
-            print(f"\n[Dask Dashboard Access Instructions]", flush=True)
+            print("\n[Dask Dashboard Access Instructions]", flush=True)
             print(f"The dashboard is running on compute node '{node_host}' at port {port}.", flush=True)
-            print(f"Direct links to 127.0.0.1 will fail from your local browser because the dashboard is on a remote compute node.", flush=True)
-            print(f"To access the dashboard from your local machine, open a local terminal and run:", flush=True)
+            print("Direct links to 127.0.0.1 will fail from your local browser because the dashboard is on a remote compute node.", flush=True)
+            print("To access the dashboard from your local machine, open a local terminal and run:", flush=True)
             print(f"  ssh -N -L {port}:{node_host}:{port} <your_username>@<cluster_login_node>", flush=True)
             print(f"(If local port {port} is busy on your machine, try: ssh -N -L 8080:{node_host}:{port} ... and open http://localhost:8080/status)", flush=True)
             print(f"Then open http://localhost:{port}/status in your local web browser.\n", flush=True)
@@ -388,7 +433,6 @@ if __name__ == '__main__':
             fast_dump(kwds_f, kwds_file)
             fast_dump(solvers, solvers_file)
         BaseSolverMixin.compute_convergence_rates(kwds_f, solvers)
-        plot_solvers(kwds_f, solvers)
 
         # --- Reduced order solution ---
         print('Computing reduced bases...')
@@ -698,20 +742,3 @@ if __name__ == '__main__':
         print("\nGenerating Pareto plots...")
         solver_names = [cls.__name__ for cls in original_solver_classes]
         plot_pareto(time_lapsed, errors_r, errors_hr, solver_names, MechSystem.dt_space, MechSystem.data_folder)
-
-    # %% Combined error plot for FOM, ROM, and HROM
-    print("\nGenerating combined error plot across model reduction orders...")
-    plot_combined_errors(
-        data_folder=MechSystem.data_folder,
-        registered_solver_classes=original_solver_classes
-    )
-
-    # %% Combined phase portraits for FOM, ROM, and HROM
-    print("\nGenerating combined phase portraits across model reduction orders...")
-    try:
-        plot_combined_phase_portraits(
-            data_folder=MechSystem.data_folder,
-            registered_solver_classes=original_solver_classes
-        )
-    except Exception as e:
-        print(f"  [Warning] Could not generate combined phase portraits: {e}")

@@ -235,7 +235,7 @@ if __name__ == '__main__':
     history = {'ell': [], 'err_A': [], 'time_A': [], 'err_B': [], 'time_B': []}
 
     # --- Offline Phase (Single Initialization) ---
-    np.random.seed(0)
+    np.random.seed(42)
     mu_snapshots = np.random.uniform(-1, -0.01, size=(num_snapshots, d))
     # Use functools.partial to bind coords_np to f for multiprocessing
     f_for_pool = partial(f, coords=coords_np)

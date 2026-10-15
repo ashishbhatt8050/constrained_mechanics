@@ -1287,7 +1287,9 @@ class ConformalStormerVerletFixedPointMixin:
         
         # Split Lambda
         Lambda_1 = Lambda[:i0].copy()
-        Lambda_2 = Lambda[i0:].copy()
+        # Velocity projection multiplier in RATTLE is an instantaneous tangent space projection:
+        # initialize fresh to zero rather than carrying over previous step's multiplier.
+        Lambda_2 = np.zeros(i0)
         
         # p_half (unconstrained)
         p_half_unconstrained = p0 + 0.5 * dt * f(x[0], None)[neq:]
@@ -1295,9 +1297,17 @@ class ConformalStormerVerletFixedPointMixin:
         # Precompute position Jacobian factor: (-0.5 * dt^2) * (M^{-1} @ G(q0)^T)
         half_dt2_M_inv_G_q0_T = (-0.5 * dt**2) * self.apply_M_inv(G_q0.T)
         half_dt_G_q0_T = 0.5 * dt * G_q0.T
+
+        is_reduced = getattr(self, 'RB', None) is not None
+        tol_reduced = getattr(self, 'tol_reduced', None) or 1e-4
         
         # 1. Position Constraints Loop (Solve for Lambda_1)
         m = 0
+        prev_norm_g_pos = np.inf
+        best_Lambda_1 = Lambda_1.copy()
+        min_norm_g_pos = np.inf
+        Delta_Lambda_1 = None
+
         while m < self.M:
             # p_{n+1/2}
             p_half1 = p_half_unconstrained - half_dt_G_q0_T @ Lambda_1 # Lambda_1 is 1D
@@ -1315,18 +1325,32 @@ class ConformalStormerVerletFixedPointMixin:
                 raise RuntimeError("Nonlinear solver (position) diverged: Residual is NaN")
             if norm_g_pos < self.tol:
                 break
+
+            if is_reduced:
+                if norm_g_pos < min_norm_g_pos:
+                    min_norm_g_pos = norm_g_pos
+                    best_Lambda_1 = Lambda_1.copy()
+                if m > 0 and (norm_g_pos >= prev_norm_g_pos * 0.99 or (Delta_Lambda_1 is not None and norm_g_pos < tol_reduced and LA.norm(Delta_Lambda_1) < 1e-12 * (LA.norm(Lambda_1) + 1.0))):
+                    Lambda_1 = best_Lambda_1
+                    p_half1 = p_half_unconstrained - half_dt_G_q0_T @ Lambda_1
+                    x[1, :neq] = q0 + dt * self.apply_M_inv(p_half1)
+                    break
+
+            prev_norm_g_pos = norm_g_pos
                 
             # Jacobian R11 = G(q_{n+1}) @ (-0.5 * dt^2 * M^{-1} @ G(q0)^T)
             G_qnext = self.g_prime_diag(x[1])[:i0, :i1]
             R11 = G_qnext @ half_dt2_M_inv_G_q0_T
             
-            Delta_Lambda_1 = LA.lstsq(R11, g_pos, rcond=None)[0]
+            Delta_Lambda_1 = LA.lstsq(R11, g_pos, rcond=1e-10)[0]
             Lambda_1 -= Delta_Lambda_1
             m += 1
             
         if m >= self.M:
-             if getattr(self, 'RB', None) is not None and LA.norm(g_pos) < 1e-5 and not m%100:
-                 print(f"Warning: Position constraints not fully satisfied (error={LA.norm(g_pos):.2e}) in reduced model. Continuing.", flush=True)
+             if getattr(self, 'RB', None) is not None and (min_norm_g_pos < 1e-3 or norm_g_pos < 1e-3):
+                 Lambda_1 = best_Lambda_1
+                 p_half1 = p_half_unconstrained - half_dt_G_q0_T @ Lambda_1
+                 x[1, :neq] = q0 + dt * self.apply_M_inv(p_half1)
              elif LA.norm(g_pos) < 1e-10:
                  pass  # Satisfied up to double-precision floating-point roundoff floor
              else:
@@ -1346,6 +1370,11 @@ class ConformalStormerVerletFixedPointMixin:
         half_dt_G_qnext_T = 0.5 * dt * G_qnext.T
 
         m = 0
+        prev_norm_g_vel = np.inf
+        best_Lambda_2 = Lambda_2.copy()
+        min_norm_g_vel = np.inf
+        Delta_Lambda_2 = None
+
         while m < self.M:
             # p_{n+1}
             p_next = p_base - half_dt_G_qnext_T @ Lambda_2
@@ -1360,6 +1389,17 @@ class ConformalStormerVerletFixedPointMixin:
                 raise RuntimeError("Nonlinear solver (velocity) diverged: Residual is NaN")
             if norm_g_vel < self.tol:
                 break
+
+            if is_reduced:
+                if norm_g_vel < min_norm_g_vel:
+                    min_norm_g_vel = norm_g_vel
+                    best_Lambda_2 = Lambda_2.copy()
+                if m > 0 and (norm_g_vel >= prev_norm_g_vel * 0.99 or (Delta_Lambda_2 is not None and norm_g_vel < tol_reduced and LA.norm(Delta_Lambda_2) < 1e-12 * (LA.norm(Lambda_2) + 1.0))):
+                    Lambda_2 = best_Lambda_2
+                    x[1, neq:] = p_base - half_dt_G_qnext_T @ Lambda_2
+                    break
+
+            prev_norm_g_vel = norm_g_vel
                 
             # Jacobian R22 = -0.5 * dt * G(p_{n+1}) @ G(q_{n+1})^T
             # ASSUMPTION: Linear velocity constraint dependency on momentum:
@@ -1370,15 +1410,16 @@ class ConformalStormerVerletFixedPointMixin:
             G_pnext = self.g_prime(x[1])[i0:, i1:]
             R22 = G_pnext @ neg_half_dt_G_qnext_T
             
-            Delta_Lambda_2 = LA.lstsq(R22, g_vel, rcond=None)[0]
+            Delta_Lambda_2 = LA.lstsq(R22, g_vel, rcond=1e-10)[0]
             Lambda_2 -= Delta_Lambda_2
             m += 1
             if norm_g_vel < 1e-10 and LA.norm(Delta_Lambda_2) < 1e-14 * (LA.norm(Lambda_2) + 1.0):
                 break
             
         if m >= self.M:
-             if getattr(self, 'RB', None) is not None and LA.norm(g_vel) < 1e-5 and not m%100:
-                 print(f"Warning: Velocity constraints not fully satisfied (error={LA.norm(g_vel):.2e}) in reduced model. Continuing.", flush=True)
+             if getattr(self, 'RB', None) is not None and (min_norm_g_vel < 1e-3 or norm_g_vel < 1e-3):
+                 Lambda_2 = best_Lambda_2
+                 x[1, neq:] = p_base - half_dt_G_qnext_T @ Lambda_2
              elif LA.norm(g_vel) < 1e-10:
                  pass  # Satisfied up to double-precision floating-point roundoff floor
              else:

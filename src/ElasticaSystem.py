@@ -84,7 +84,11 @@ class ElasticaConfig(SysConfig):
     inv_mass = 1.0 / mass_node
 
     # Time-stepping
-    predict = True
+    _env_mode = os.environ.get("EXPERIMENT_MODE", "").lower()
+    if _env_mode:
+        predict = (_env_mode != "reproduce")
+    else:
+        predict = os.environ.get("PREDICT", "1").lower() in ("1", "true", "yes")
     train_ratio = 0.7
     reducer = 'psd'
     hyperreducer = 'MDEIM'
@@ -198,8 +202,14 @@ class ElasticaMechSystem(ElasticaConfig, MechSystem):
     Mechanical system representing a 3D Discrete Euler Elastica / Flexible Beam.
     """
     is_elastica = True
-    keep_time = os.environ.get("JOB_KEEP_TIME") or datetime.now().strftime("%Y-%m-%d")
-    data_folder = get_data_dir(os.path.join(keep_time, "elastica"))
+    experiment_name = os.environ.get("EXPERIMENT_NAME")
+    if experiment_name:
+        keep_time = experiment_name
+        data_folder = get_data_dir(experiment_name)
+    else:
+        keep_time = os.environ.get("JOB_KEEP_TIME") or datetime.now().strftime("%Y-%m-%d")
+        mode = "predict" if getattr(ElasticaConfig, 'predict', True) else "reproduce"
+        data_folder = get_data_dir(f"{keep_time}_elastica_{mode}")
     os.makedirs(data_folder, exist_ok=True)
 
     mass_node = ElasticaConfig.mass_node

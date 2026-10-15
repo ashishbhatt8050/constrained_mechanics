@@ -215,66 +215,72 @@ class SysConfig:
     assert nosc % 6 == 0, 'nosc must be divisible by 6'
     has_momentum_invariants = True            # True for translation/rotation invariant systems (e.g. lattice)
 
-    predict = False # False = reproduce results of the full model
+    @classmethod
+    def configure_mode(cls, predict=None):
+        if predict is None:
+            _env_mode = os.environ.get("EXPERIMENT_MODE", "").lower()
+            if _env_mode:
+                predict = (_env_mode == "predict")
+            else:
+                predict = os.environ.get("PREDICT", "0").lower() in ("1", "true", "yes")
+        cls.predict = predict
 
-    if predict: # prediction parameters
-        pod_tol_sweep = [1e-2]
+        if predict: # prediction parameters
+            cls.pod_tol_sweep = [1e-2]
 
-        # Time-stepping parameters
-        dt_space_dim = 1
-        dt_space = np.array([0.001])
-        T_final = dt_space[-1] * 3e3
+            # Time-stepping parameters
+            cls.dt_space_dim = 1
+            cls.dt_space = np.array([0.001])
+            cls.T_final = cls.dt_space[-1] * 3e3
 
-        # Parameter space for Omega^2:
-        # Dynamically align training split and test size to integer multiples of compute workers
-        # to ensure 100% core occupancy and eliminate idle tail stragglers during parallel solves.
-        _env_workers = os.environ.get('COMPUTE_WORKERS') or os.environ.get('DASK_NUM_WORKERS')
-        _worker_count = int(_env_workers) if _env_workers else int(os.environ.get('SLURM_CPUS_PER_TASK', 30))
+            # Parameter space for Omega^2:
+            # Dynamically align training split and test size to integer multiples of compute workers
+            # to ensure 100% core occupancy and eliminate idle tail stragglers during parallel solves.
+            _env_workers = os.environ.get('COMPUTE_WORKERS') or os.environ.get('DASK_NUM_WORKERS')
+            _worker_count = int(_env_workers) if _env_workers else int(os.environ.get('SLURM_CPUS_PER_TASK', 30))
 
-        omega2_train_waves = float(os.environ.get('OMEGA2_TRAIN_WAVES', 4))
-        omega2_test_waves = float(os.environ.get('OMEGA2_TEST_WAVES', 2))
+            omega2_train_waves = float(os.environ.get('OMEGA2_TRAIN_WAVES', 4))
+            omega2_test_waves = float(os.environ.get('OMEGA2_TEST_WAVES', 2))
 
-        split_idx = max(1, int(round(float(os.environ.get('OMEGA2_SPLIT_IDX', omega2_train_waves * _worker_count)))))
-        _test_dim = max(1, int(round(float(os.environ.get('OMEGA2_TEST_DIM', omega2_test_waves * _worker_count)))))
-        _Omega2_space_dim = split_idx + _test_dim
-        train_ratio = split_idx / _Omega2_space_dim
-    else: # reproduction parameters
-        pod_tol_sweep = [1e-4, 1e-6, 1e-8, 1e-10] # must be in descending order
+            cls.split_idx = max(1, int(round(float(os.environ.get('OMEGA2_SPLIT_IDX', omega2_train_waves * _worker_count)))))
+            _test_dim = max(1, int(round(float(os.environ.get('OMEGA2_TEST_DIM', omega2_test_waves * _worker_count)))))
+            cls._Omega2_space_dim = cls.split_idx + _test_dim
+            cls.train_ratio = cls.split_idx / cls._Omega2_space_dim
+        else: # reproduction parameters
+            cls.pod_tol_sweep = [1e-4, 1e-6, 1e-8, 1e-10] # must be in descending order
 
-        # Time-stepping parameters
-        dt_space_dim = 5
-        dt_space = np.logspace(-4, -4 - dt_space_dim, num=dt_space_dim, base=2, endpoint=False)
-        T_final = 0.1
+            # Time-stepping parameters
+            cls.dt_space_dim = 5
+            cls.dt_space = np.logspace(-4, -4 - cls.dt_space_dim, num=cls.dt_space_dim, base=2, endpoint=False)
+            cls.T_final = 0.1
 
-        # Parameter space for Omega^2
-        _Omega2_space_dim = 3
-        split_idx = 3
-        train_ratio = 1.0
+            # Parameter space for Omega^2
+            cls._Omega2_space_dim = 3
+            cls.split_idx = 3
+            cls.train_ratio = 1.0
 
-    assert pod_tol_sweep == sorted(pod_tol_sweep, reverse=True), "pod_tol_sweep must be in descending order"
+        assert cls.pod_tol_sweep == sorted(cls.pod_tol_sweep, reverse=True), "pod_tol_sweep must be in descending order"
 
-    # Generate random parameter space for Omega^2 in range (0, 10]
-    num_freqs = nosc // 3 - 2
-    _Omega2_space = np.sort(3 * (1 - rng.random((_Omega2_space_dim, num_freqs))), axis=1)
+        # Generate random parameter space for Omega^2 in range (0, 10]
+        num_freqs = cls.nosc // 3 - 2
+        rng_local = np.random.default_rng(seed=42)
+        cls._Omega2_space = np.sort(3 * (1 - rng_local.random((cls._Omega2_space_dim, num_freqs))), axis=1)
 
-    # Freeze higher frequencies across samples to match the first sample
-    # freeze_idx = _Omega2_space_dim // 2
-    # if freeze_idx < num_freqs:
-    #     _Omega2_space[:, freeze_idx:] = _Omega2_space[0, freeze_idx:]
+        # Train-test split
+        if predict:
+            cls.Omega2_space = cls._Omega2_space[:cls.split_idx]
+            cls.Omega2_space_test = cls._Omega2_space[cls.split_idx:]
+            
+            if cls.Omega2_space.shape[0] == 0 or cls.Omega2_space_test.shape[0] == 0:
+                raise ValueError(f"Train-test split resulted in empty sets. "
+                                 f"Total samples: {cls._Omega2_space_dim}, Split index: {cls.split_idx}, Train ratio: {cls.train_ratio}. "
+                                 "Adjust train_ratio or increase _Omega2_space_dim.")
+        else:
+            cls.Omega2_space = cls.Omega2_space_test = cls._Omega2_space
 
-    # Train-test split
-    if predict:
-        split_idx = int(round(_Omega2_space_dim * train_ratio))
-        Omega2_space, Omega2_space_test = _Omega2_space[:split_idx], _Omega2_space[split_idx:]
-        
-        if Omega2_space.shape[0] == 0 or Omega2_space_test.shape[0] == 0:
-            raise ValueError(f"Train-test split resulted in empty sets. "
-                             f"Total samples: {_Omega2_space_dim}, Split index: {split_idx}, Train ratio: {train_ratio}. "
-                             "Adjust train_ratio or increase _Omega2_space_dim.")
-    else:
-        split_idx = _Omega2_space_dim
-        train_ratio = 1.0
-        Omega2_space = Omega2_space_test = _Omega2_space
+
+# Initialize default mode at import time
+SysConfig.configure_mode()
 
 def make_lattice_initial_conditions(nosc):
     """
@@ -326,8 +332,14 @@ class MechSystem(SysConfig):
     and methods for evaluating system dynamics (Hamiltonian, Lagrangian, constraints).
     """
 
-    keep_time = os.environ.get("JOB_KEEP_TIME") or datetime.now().strftime("%Y-%m-%d") #_%H-%M-%S")
-    data_folder = get_data_dir(keep_time)
+    experiment_name = os.environ.get("EXPERIMENT_NAME")
+    if experiment_name:
+        keep_time = experiment_name
+        data_folder = get_data_dir(experiment_name)
+    else:
+        keep_time = os.environ.get("JOB_KEEP_TIME") or datetime.now().strftime("%Y-%m-%d")
+        mode = "predict" if getattr(SysConfig, 'predict', False) else "reproduce"
+        data_folder = get_data_dir(f"{keep_time}_lattice_{mode}")
     os.makedirs(data_folder, exist_ok=True)
 
     @staticmethod

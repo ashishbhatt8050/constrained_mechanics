@@ -287,8 +287,31 @@ if __name__ == '__main__':
     parser.add_argument("--clear-symbolic", action="store_true", help="Clear symbolic expressions cache before running")
     parser.add_argument("--clear-cache", action="store_true", help="Clear joblib cache before running")
     parser.add_argument("--no-pgfplots", action="store_true", help="Disable generation of data files for PGFPlots")
+    parser.add_argument("--predict", action="store_true", help="Run prediction mode instead of reproduction")
+    parser.add_argument("--reproduce", action="store_true", help="Run reproduction mode (default for lattice)")
+    parser.add_argument("--experiment-name", "-e", type=str, default=None, help="User-defined experiment name or path under data/")
     
     args = parser.parse_args()
+
+    # Configure mode (predict vs reproduce)
+    if args.predict:
+        MechSystem.configure_mode(predict=True)
+    elif args.reproduce:
+        MechSystem.configure_mode(predict=False)
+
+    # Configure experiment directory
+    if args.experiment_name:
+        os.environ["EXPERIMENT_NAME"] = args.experiment_name
+        MechSystem.experiment_name = args.experiment_name
+        MechSystem.keep_time = args.experiment_name
+        MechSystem.data_folder = get_data_dir(args.experiment_name)
+    elif not os.environ.get("EXPERIMENT_NAME"):
+        mode = "predict" if MechSystem.predict else "reproduce"
+        date_str = os.environ.get("JOB_KEEP_TIME") or datetime.now().strftime("%Y-%m-%d")
+        MechSystem.experiment_name = f"{date_str}_lattice_{mode}"
+        MechSystem.keep_time = MechSystem.experiment_name
+        MechSystem.data_folder = get_data_dir(MechSystem.experiment_name)
+    os.makedirs(MechSystem.data_folder, exist_ok=True)
 
     # Configure LaTeX rendering based on availability
     if args.no_latex or not shutil.which('latex'):

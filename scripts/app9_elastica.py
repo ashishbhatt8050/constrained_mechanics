@@ -263,8 +263,17 @@ if __name__ == '__main__':
     parser.add_argument("--n-samples", type=int, default=None, help="Number of parameter samples (default: 15)")
     parser.add_argument("--n-workers", type=int, default=None, help="Number of Dask workers (default: 2 on login node)")
     parser.add_argument("--quick", action="store_true", help="Quick smoke test preset for login nodes (short time, few nodes & samples)")
+    parser.add_argument("--predict", action="store_true", help="Run prediction mode (default for elastica)")
     parser.add_argument("--reproduce", action="store_true", help="Run reproduction mode instead of prediction")
+    parser.add_argument("--experiment-name", "-e", type=str, default=None, help="User-defined experiment name or path under data/")
     args = parser.parse_args()
+
+    # Configure experiment directory if specified via CLI
+    if args.experiment_name:
+        os.environ["EXPERIMENT_NAME"] = args.experiment_name
+        ElasticaMechSystem.experiment_name = args.experiment_name
+        ElasticaMechSystem.keep_time = args.experiment_name
+        ElasticaMechSystem.data_folder = get_data_dir(args.experiment_name)
 
     # 1. Update config based on CLI
     if args.quick:
@@ -307,6 +316,24 @@ if __name__ == '__main__':
     if args.reproduce:
         ElasticaConfig.predict = False
         split_idx = n_samples
+        ElasticaConfig.pod_tol_sweep = [1e-4, 1e-6, 1e-8, 1e-10]
+        ElasticaConfig.dt_space_dim = 4
+        ElasticaConfig.dt_space = np.logspace(-4, -4 - ElasticaConfig.dt_space_dim, num=ElasticaConfig.dt_space_dim, base=2, endpoint=False)
+        ElasticaConfig.T_final = 0.1
+    elif args.predict:
+        ElasticaConfig.predict = True
+
+    # Configure experiment directory
+    if args.experiment_name:
+        ElasticaMechSystem.experiment_name = args.experiment_name
+        ElasticaMechSystem.keep_time = args.experiment_name
+        ElasticaMechSystem.data_folder = get_data_dir(args.experiment_name)
+    elif not os.environ.get("EXPERIMENT_NAME"):
+        mode = "predict" if ElasticaConfig.predict else "reproduce"
+        date_str = os.environ.get("JOB_KEEP_TIME") or datetime.now().strftime("%Y-%m-%d")
+        ElasticaMechSystem.experiment_name = f"{date_str}_elastica_{mode}"
+        ElasticaMechSystem.keep_time = ElasticaMechSystem.experiment_name
+        ElasticaMechSystem.data_folder = get_data_dir(ElasticaMechSystem.experiment_name)
 
     # 2. Configure MechSystem
     MechSystem.nosc = nosc

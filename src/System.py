@@ -5,6 +5,7 @@
 """
 
 import os
+import types
 import cloudpickle as pickle
 import lz4.frame
 from datetime import datetime
@@ -548,6 +549,9 @@ class HyperReducedHamiltonianMechSystem(ReducedHamiltonianMechSystem):
 
     def __init__(self, kwds=None, **kwargs):
         super().__init__(kwds, **kwargs)
+        if not getattr(self, 'use_deim_force', True) or getattr(self, 'deim_field', None) is None or getattr(self, 'ham_z_deim', None) is None:
+            # Bind exact ROM potential force projection directly on the instance to avoid ANY conditional branching during time-stepping
+            self.ham_z = types.MethodType(ReducedHamiltonianMechSystem.ham_z, self)
 
 
 class HyperReducedLagrangianMechSystem(ReducedLagrangianMechSystem):
@@ -595,5 +599,8 @@ class HyperReducedLagrangianMechSystem(ReducedLagrangianMechSystem):
 
     def __init__(self, kwds=None, **kwargs):
         super().__init__(kwds, **kwargs)
+        if not getattr(self, 'use_deim_force', True) or getattr(self, 'deim_field', None) is None or getattr(self, 'lag_dg_deim', None) is None:
+            # Bind exact ROM Lagrangian force projection directly on the instance to avoid ANY conditional branching during time-stepping
+            self.lag_dg = types.MethodType(ReducedLagrangianMechSystem.lag_dg, self)
 
 

@@ -23,7 +23,7 @@ Adapted from https://github.com/jbmouret/matplotlib_for_papers
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
-from matplotlib.ticker import MaxNLocator, LogLocator
+from matplotlib.ticker import MaxNLocator, LogLocator, FixedLocator, LogFormatterMathtext, NullLocator
 from cycler import cycler
 import os
 import shutil
@@ -67,6 +67,8 @@ params = {
     'figure.figsize': [14, 6],
     'figure.autolayout': False
 }
+if has_latex:
+    params['text.latex.preamble'] = r'\usepackage{amsmath,amssymb,bm}'
 plt.rcParams.update(params)
 
 
@@ -292,7 +294,7 @@ def plot_structured_rb_components(components_dict, filename=None, title=None):
         ax.semilogy(idx_dyn, sv_dyn, 'o-', color=OKABE_ITO_PALETTE[4], linewidth=2, markersize=5,
                     label=r'$\sigma_i(S_{\mathrm{kin}})$')
         ax.set_xlabel('Kinematic mode index $i$')
-        ax.set_ylabel('Singular value magnitude')
+        ax.set_ylabel(r'$\sigma_i(S_{\mathrm{kin}})$')
         ax.set_title(r'(a) Kinematic POD modes ($V_{\mathrm{dyn}}$)')
         ax.xaxis.set_major_locator(MaxNLocator(integer=True))
         ax.grid(True, linestyle=':', alpha=0.6)
@@ -308,7 +310,7 @@ def plot_structured_rb_components(components_dict, filename=None, title=None):
         ax.semilogy(idx_hamz, sv_hamz, 'd-', color=OKABE_ITO_PALETTE[2], linewidth=2, markersize=5,
                     label=r'$\sigma_i(R_{\nabla H})$')
         ax.set_xlabel('Force mode index $i$')
-        ax.set_ylabel('Residual singular value')
+        ax.set_ylabel(r'$\sigma_i(R_{\nabla H})$')
         ax.set_title(r'(b) Force residual ($V_{\nabla H}$)')
         ax.xaxis.set_major_locator(MaxNLocator(integer=True))
         ax.grid(True, linestyle=':', alpha=0.6)
@@ -325,7 +327,7 @@ def plot_structured_rb_components(components_dict, filename=None, title=None):
         ax.semilogy(idx_enrich, sv_enrich, 's-', color=OKABE_ITO_PALETTE[5], linewidth=2, markersize=5,
                     label=r'$\sin\theta_k(R_G)$')
         ax.set_xlabel('Constraint normal index $k$')
-        ax.set_ylabel(r'Principal sine $\sigma_k(R_G) = \sin\theta_k$')
+        ax.set_ylabel(r'$\sigma_k(R_G) = \sin\theta_k$')
         ax.set_title(f'({panel_letter}) Constraint normals ($V_{{\\mathrm{{enrich}}}}$)')
         min_enrich = np.min(sv_enrich[sv_enrich > 0])
         if min_enrich < 1e-2:
@@ -353,7 +355,7 @@ def plot_structured_rb_components(components_dict, filename=None, title=None):
         panel_letter = chr(ord('a') + panel_idx)
         ax.plot(idx_Gr, sv_Gr, '^-', color=OKABE_ITO_PALETTE[1], linewidth=2, markersize=5)
         ax.set_xlabel('Constraint index $k$')
-        ax.set_ylabel(r'Singular value $\sigma_k(G_0 V)$')
+        ax.set_ylabel(r'$\sigma_k(G_0 V)$')
         if cond_Gr is None:
             cond_Gr = sv_Gr.max() / max(1e-15, sv_Gr.min())
         ax.set_title(f'({panel_letter}) Reduced Jacobian $G_0 V$ (cond={cond_Gr:.2f})')
@@ -443,9 +445,11 @@ def plot_structured_rb_modal_energy(modal_energies, block_slices=None, s_project
         n_modes = end - start
         legend_elements.append(Patch(facecolor=color, edgecolor='none', alpha=0.5, label=f'{label} ({n_modes})'))
 
-    ax_l.set_xlabel('Reduced basis mode index $j$')
-    ax_l.set_ylabel(r'Modal projection energy $\|V_{:, j}^T S\|_2$')
-    ax_l.set_title(r'(a) Snapshot energy across structured basis blocks')
+    modal_energy_tex = r'$\|\bm{S}_{:, k}^\top \mathbb{S}\|_2$' if plt.rcParams.get('text.usetex', False) else r'$\|\mathbf{S}_{:, k}^\top \mathcal{S}\|_2$'
+    sig_untrunc_tex = r'$\sigma_k(\tilde{\bm{S}}^\top \mathbb{S})$' if plt.rcParams.get('text.usetex', False) else r'$\sigma_k(\tilde{\mathbf{S}}^\top \mathcal{S})$'
+    ax_l.set_xlabel('Reduced basis mode index $k$')
+    ax_l.set_ylabel(modal_energy_tex)
+    ax_l.set_title(r'(a) Structured reduced basis modal energy waterfall')
     ax_l.legend(handles=legend_elements, loc='upper right', framealpha=0.95, fontsize=15)
     ax_l.grid(True, linestyle=':', alpha=0.6)
     adjust_axis_limits(ax_l, modes, axis='x', is_log_scale=False, max_steps=1)
@@ -466,8 +470,8 @@ def plot_structured_rb_modal_energy(modal_energies, block_slices=None, s_project
                 break
 
         ax_r.set_xlabel('Projected mode index $k$')
-        ax_r.set_ylabel(r'Singular value $\sigma_k(V^T S)$')
-        ax_r.set_title(r'(b) Subspace SVD $\sigma(V^T S)$')
+        ax_r.set_ylabel(sig_untrunc_tex)
+        ax_r.set_title(r'(b) Subspace SVD')
         ax_r.legend(loc='upper right', framealpha=0.95, fontsize=15)
         ax_r.grid(True, linestyle=':', alpha=0.6)
         adjust_axis_limits(ax_r, idx_s, axis='x', is_log_scale=False, max_steps=1)
@@ -475,12 +479,9 @@ def plot_structured_rb_modal_energy(modal_energies, block_slices=None, s_project
 
     fig.tight_layout()
     if has_proj:
-        fig.subplots_adjust(top=0.88, wspace=0.28)
+        fig.subplots_adjust(top=0.93, wspace=0.28)
     else:
-        fig.subplots_adjust(top=0.88)
-
-    if title:
-        fig.suptitle(title, fontsize=18, y=0.98)
+        fig.subplots_adjust(top=0.93)
 
     if filename:
         fig_data = {'modal_energies': modal_energies, 'block_slices': block_slices, 's_projected': s_projected}
@@ -926,7 +927,8 @@ def plot_pareto(time_lapsed, errors_r, errors_hr, solver_names, dt_space, data_f
         ax.set_xlabel('Average wall time')
         if i == 0:
             ax.set_ylabel('Mean global error')
-        ax.set_title(f'{solver_name}')
+        if n_solvers > 1:
+            ax.set_title(f'{solver_name}')
         ax.grid(True, which="both", ls="-", alpha=0.3)
 
         # Adjust log-scale x and y axis limits
@@ -967,7 +969,7 @@ def plot_pareto(time_lapsed, errors_r, errors_hr, solver_names, dt_space, data_f
 
 
 
-def adjust_axis_limits(ax, data_points, axis='y', is_log_scale=False, max_steps=1, margin_ratio=0.03):
+def adjust_axis_limits(ax, data_points, axis='y', is_log_scale=False, max_steps=1, margin_ratio=0.03, numticks=6):
     """
     Adjust axis limits based on data range and current tick intervals.
     Stops expanding ticks as soon as they span the entire data range.
@@ -1013,47 +1015,46 @@ def adjust_axis_limits(ax, data_points, axis='y', is_log_scale=False, max_steps=
     if len(tick_values) < 2: return
 
     if is_log_scale:
-        log_ticks = np.log10(tick_values[tick_values > 0])
-        if len(log_ticks) < 2: return
-        
-        log_step = log_ticks[-1] - log_ticks[-2]
-        if log_step <= 1e-12: return 
-        
+        pos_data = data_points[data_points > 0]
+        if len(pos_data) == 0:
+            return
+        data_min = np.nanmin(pos_data)
+        data_max = np.nanmax(pos_data)
+        if not np.isfinite(data_min) or not np.isfinite(data_max) or data_min <= 0 or data_max <= 0:
+            return
+
+        log_data_min = np.log10(data_min)
         log_data_max = np.log10(data_max)
-        log_data_min = np.log10(data_min) if data_min > 0 else log_ticks[0]
-        
-        # Stop expanding ticks as soon as they span the data range
-        ticks_above = log_ticks[log_ticks >= log_data_max]
-        if len(ticks_above) > 0:
-            new_max = ticks_above[0]
-        else:
-            new_max = log_ticks[-1]
-            steps = 0
-            while new_max < log_data_max and steps < max_steps:
-                new_max += log_step
-                steps += 1
-        
-        ticks_below = log_ticks[log_ticks <= log_data_min]
-        if len(ticks_below) > 0:
-            new_min = ticks_below[-1]
-        else:
-            new_min = log_ticks[0]
-            steps = 0
-            while new_min > log_data_min and steps < max_steps:
-                new_min -= log_step
-                steps += 1
-        
-        if new_min >= new_max:
-            new_min -= log_step
-            new_max += log_step
-        
-        log_span = new_max - new_min
+
+        e_min = int(np.floor(log_data_min))
+        e_max = int(np.ceil(log_data_max))
+        if e_min == e_max:
+            e_max = e_min + 1
+
+        total_decades = e_max - e_min
+        step = max(1, int(np.ceil(total_decades / (numticks - 1))))
+
+        tick_exps = list(range(e_min, e_max + 1, step))
+        if tick_exps[-1] < e_max:
+            tick_exps.append(tick_exps[-1] + step)
+
+        ticks = [10.0**e for e in tick_exps]
+
+        log_span = tick_exps[-1] - tick_exps[0]
         log_margin = margin_ratio * log_span
-        set_lim([10**(new_min - log_margin), 10**(new_max + log_margin)])
+        lim_min = 10.0 ** (tick_exps[0] - log_margin)
+        lim_max = 10.0 ** (tick_exps[-1] + log_margin)
+
+        set_lim([lim_min, lim_max])
+        set_ticks(ticks)
         if axis == 'y':
-            ax.yaxis.set_major_locator(LogLocator(base=10.0, numticks=15))
+            ax.yaxis.set_major_locator(FixedLocator(ticks))
+            ax.yaxis.set_major_formatter(LogFormatterMathtext())
+            ax.yaxis.set_minor_locator(NullLocator())
         elif axis == 'x':
-            ax.xaxis.set_major_locator(LogLocator(base=10.0, numticks=15))
+            ax.xaxis.set_major_locator(FixedLocator(ticks))
+            ax.xaxis.set_major_formatter(LogFormatterMathtext())
+            ax.xaxis.set_minor_locator(NullLocator())
     else:
         step = tick_values[1] - tick_values[0]
         if step <= 0 or not np.isfinite(step): return
@@ -1104,23 +1105,37 @@ def adjust_axis_limits(ax, data_points, axis='y', is_log_scale=False, max_steps=
 adjust_axis = adjust_axis_limits
 
 
-def plot_error_vs_basis_size(basis_sizes, hr_basis_sizes, errors_r, errors_hr, solver_names, pod_tols, data_folder, **kwargs):
+def plot_error_vs_basis_size(basis_sizes, hr_basis_sizes=None, errors_r=None, errors_hr=None, solver_names=None, pod_tols=None, data_folder=None, **kwargs):
     """
     Plot ROM and HROM errors as a function of the reduced basis size.
-    Also plots speedup factors and convergence orders as box plots against dt.
+    Also plots speedup factors as box plots against dt.
     Markers correspond to pod_tol values.
     """
+    if isinstance(basis_sizes, dict):
+        d_err = basis_sizes
+        hr_basis_sizes = d_err.get('hr_basis_sizes', hr_basis_sizes)
+        errors_r = d_err.get('errors_r', errors_r)
+        errors_hr = d_err.get('errors_hr', errors_hr)
+        solver_names = d_err.get('solver_names', solver_names)
+        pod_tols = d_err.get('pod_tols', pod_tols)
+        data_folder = data_folder or d_err.get('data_folder', '.')
+        dt_space = d_err.get('dt_space', kwargs.get('dt_space', []))
+        full_times_raw = d_err.get('full_times_raw', kwargs.get('full_times_raw', {}))
+        if 'times_r_raw' in d_err:
+            kwargs['times_r_raw'] = d_err['times_r_raw']
+        if 'times_hr_raw' in d_err:
+            kwargs['times_hr_raw'] = d_err['times_hr_raw']
+        basis_sizes = d_err.get('basis_sizes')
+    else:
+        dt_space = kwargs.get('dt_space', [])
+        full_times_raw = kwargs.get('full_times_raw', {})
+
     if errors_hr is None:
         errors_hr = kwargs.get('errors_dr', None)
 
-    # Extract study data from kwargs
-    dt_space = kwargs.get('dt_space', [])
-    full_times_raw = kwargs.get('full_times_raw', {})
-
-    fig, axes_grid = plt.subplots(2, 2, figsize=(22, 18.6))
+    fig, axes_grid = plt.subplots(2, 2, figsize=(16, 12))
     ax_err_r, ax_err_hr = axes_grid[0]
     ax_speed_r, ax_speed_hr = axes_grid[1]
-    # ax_conv_r, ax_conv_hr = axes_grid[2]
     
     col_axes = [ax_err_r, ax_err_hr]
 
@@ -1128,23 +1143,27 @@ def plot_error_vs_basis_size(basis_sizes, hr_basis_sizes, errors_r, errors_hr, s
     tol_markers = ['o', 's', '^', 'D', 'v', '<', '>', 'p', 'h', '*']
     marker_map = {tol: tol_markers[i % len(tol_markers)] for i, tol in enumerate(pod_tols)}
 
-    # Define colors for solvers
-    solver_colors = OKABE_ITO_PALETTE # Use the colorblind-safe palette
+    n_solvers = len(solver_names) if solver_names else 1
+    is_single_solver = (n_solvers == 1)
 
     # Store handles for legends
-    marker_handles = []
-    
-    # To ensure marker legend elements are unique
-    added_marker_labels = set()
-    
+    combined_tol_handles = [
+        Line2D([0], [0], marker=marker_map[tol], color='k', linestyle='None', 
+               markerfacecolor=mcolors.to_rgba('black', alpha=0.45),
+               markeredgecolor=mcolors.to_rgba('black', alpha=0.9),
+               markeredgewidth=1.2,
+               label=f'{tol:.0e}', markersize=10)
+        for j, tol in enumerate(pod_tols)
+    ]
+
     # Row 1: Max Error vs Dimension
     for ax_idx, ax in enumerate(col_axes):
         configure_axis(ax)
-        ax.tick_params(axis='both', labelsize=24)
+        ax.tick_params(axis='both', labelsize=20)
         all_x_col, all_y_col = [], []
 
         for i, name in enumerate(solver_names):
-            color = solver_colors[i % len(solver_colors)]
+            color = 'black' if is_single_solver else OKABE_ITO_PALETTE[i % len(OKABE_ITO_PALETTE)]
             x_sizes_raw = basis_sizes[i] if ax_idx == 0 else hr_basis_sizes[i]
             err_mats = errors_r[i] if ax_idx == 0 else errors_hr[i]
 
@@ -1154,54 +1173,50 @@ def plot_error_vs_basis_size(basis_sizes, hr_basis_sizes, errors_r, errors_hr, s
                     x_plot_val = 2 * x_sizes_raw[j]
                     # Average over Omega2 (axis 1)
                     mean_errors = np.nanmean(e_data, axis=1)
-                    alpha = 0.7
+                    face_color = mcolors.to_rgba(color, alpha=0.45)
+                    edge_color = mcolors.to_rgba(color, alpha=0.9)
                     
                     for k in range(len(dt_space)):
                         if not np.isnan(mean_errors[k]):
                             ax.semilogy(x_plot_val, mean_errors[k], marker=marker_map[tol], 
-                                        color=color, alpha=alpha, markersize=14 if ax_idx == 0 else 12,
+                                        markersize=12 if ax_idx == 0 else 10,
                                         fillstyle='full', 
-                                        markerfacecolor=color, linestyle='None')
+                                        markerfacecolor=face_color, markeredgecolor=edge_color,
+                                        markeredgewidth=1.2, linestyle='None')
                             all_y_col.append(mean_errors[k])
                     
                     all_x_col.append(x_plot_val)
-                    if tol not in added_marker_labels:
-                        marker_handles.append(Line2D([0], [0], marker=marker_map[tol], color='k', linestyle='None',
-                                                     label=f'{tol:.0e}', markersize=8, alpha=0.7))
-                        added_marker_labels.add(tol)
 
         ax.set_ylabel('Mean max relative error' if ax_idx == 0 else '')
         ax.set_xlabel(r'Reduced dimension $2r$' if ax_idx == 0 else r'Hyper-reduced dimension $2\ell$')
-        ax.xaxis.label.set_size(26)
-        ax.yaxis.label.set_size(26)
-        ax.title.set_fontsize(26)
+        ax.xaxis.label.set_size(22)
+        ax.yaxis.label.set_size(22)
         adjust_axis_limits(ax, all_x_col, axis='x', is_log_scale=False, max_steps=5)
-        adjust_axis_limits(ax, all_y_col, axis='y', is_log_scale=True, max_steps=5)
+        adjust_axis_limits(ax, all_y_col, axis='y', is_log_scale=True, max_steps=5, numticks=6)
 
     # --- Row 2: Speedup Factor (Box plots vs dt) ---
     for ax_idx, (ax, data_type) in enumerate(zip([ax_speed_r, ax_speed_hr], ['times_r_raw', 'times_hr_raw'])):
         configure_axis(ax)
-        ax.tick_params(axis='both', labelsize=24)
+        ax.tick_params(axis='both', labelsize=20)
         ax.set_ylabel('Mean speedup factor' if ax_idx == 0 else '')
         ax.set_xlabel(r'Time step-size $\Delta t$')
-        ax.xaxis.label.set_size(26)
-        ax.yaxis.label.set_size(26)
-        ax.title.set_fontsize(26)
+        ax.xaxis.label.set_size(22)
+        ax.yaxis.label.set_size(22)
         ax.axhline(y=1.0, color='black', linestyle='--', alpha=0.5, linewidth=1)
         
         times_raw_list = kwargs.get(data_type, kwargs.get('times_dr_raw', []))
         positions = np.arange(len(dt_space))
-        n_solvers = len(solver_names)
         n_tols = len(pod_tols)
         width = 0.8 / (n_solvers * n_tols)
         dt_exponents = np.log2(dt_space)
         all_speedups = []
 
         for i, name in enumerate(solver_names):
-            color = solver_colors[i % len(solver_colors)]
+            color = 'black' if is_single_solver else OKABE_ITO_PALETTE[i % len(OKABE_ITO_PALETTE)]
             for t_idx, tol in enumerate(pod_tols):
-                alpha = 0.7
                 offset = (i * n_tols + t_idx - (n_solvers * n_tols - 1) / 2) * width
+                face_color = mcolors.to_rgba(color, alpha=0.45)
+                edge_color = mcolors.to_rgba(color, alpha=0.9)
                 
                 for d_idx in range(len(dt_space)):
                     t_red_mat = times_raw_list[i][t_idx]
@@ -1211,7 +1226,9 @@ def plot_error_vs_basis_size(basis_sizes, hr_basis_sizes, errors_r, errors_hr, s
                         mean_s = np.nanmean(speedup_vals)
                         if not np.isnan(mean_s):
                             ax.plot(positions[d_idx] + offset, mean_s, marker=marker_map[tol], 
-                                    color=color, alpha=alpha, markersize=14, linestyle='None')
+                                    markersize=12, fillstyle='full',
+                                    markerfacecolor=face_color, markeredgecolor=edge_color,
+                                    markeredgewidth=1.2, linestyle='None')
                             all_speedups.append(mean_s)
 
         adjust_axis_limits(ax, all_speedups, axis='y', is_log_scale=False, max_steps=10)
@@ -1225,33 +1242,38 @@ def plot_error_vs_basis_size(basis_sizes, hr_basis_sizes, errors_r, errors_hr, s
                     color='black', linewidth=1.5, clip_on=False, linestyle='-')
         ax.tick_params(axis='x', which='both', length=0)
 
-    solver_handles = [
-        Line2D([0], [0], color=solver_colors[i], lw=4, alpha=0.5,
-               label="Model 1" if "StormerVerlet" in name else "Model 2" if "DiscreteGradient" in name else name)
-        for i, name in enumerate(solver_names)
-    ]
-    solver_handles.sort(key=lambda h: h.get_label())
+    if not is_single_solver:
+        solver_handles = [
+            Line2D([0], [0], color=OKABE_ITO_PALETTE[i % len(OKABE_ITO_PALETTE)], lw=4, alpha=0.5,
+                   label="Model 1" if "StormerVerlet" in name else "Model 2" if "DiscreteGradient" in name else name)
+            for i, name in enumerate(solver_names)
+        ]
+        solver_handles.sort(key=lambda h: h.get_label())
+        legend1 = fig.legend(handles=solver_handles, title="Model", loc='upper left', bbox_to_anchor=(0.83, 0.95), bbox_transform=fig.transFigure, fontsize=18, title_fontsize=20, frameon=True)
+        fig.add_artist(legend1)
 
-    # Create combined tolerance legend (marker shape + transparency)
-    combined_tol_handles = [
-        Line2D([0], [0], marker=marker_map[tol], color='k', linestyle='None', 
-               alpha=0.7,
-               label=f'{tol:.0e}', markersize=10)
-               for j, tol in enumerate(pod_tols)
-    ]
-
-    # Place legends outside the 2x2 axes in the top-right corner (stacked)
-    legend1 = fig.legend(handles=solver_handles, title="Model", loc='upper left', bbox_to_anchor=(0.92, 0.98), bbox_transform=fig.transFigure, fontsize=20, title_fontsize=22, frameon=True)
-    fig.add_artist(legend1)
-    legend2 = fig.legend(handles=combined_tol_handles, title="POD tolerance", loc='upper left', bbox_to_anchor=(0.92, 0.82), bbox_transform=fig.transFigure, fontsize=20, title_fontsize=22, frameon=True)
+    legend2 = fig.legend(handles=combined_tol_handles, title="POD tolerance", loc='center left', bbox_to_anchor=(0.83, 0.5), bbox_transform=fig.transFigure, fontsize=18, title_fontsize=20, frameon=True)
     fig.add_artist(legend2)
 
-    # Increase right margin so legends don't overlap the subplots
-    plt.subplots_adjust(right=0.70, hspace=0.4, wspace=0.25)
-
+    plt.subplots_adjust(left=0.09, right=0.82, top=0.96, bottom=0.08, hspace=0.35, wspace=0.25)
 
     filename = os.path.join(data_folder, "error_vs_basis_size.pdf")
-    save_figure(fig, filename)
+    fig_data = {
+        'basis_sizes': basis_sizes,
+        'hr_basis_sizes': hr_basis_sizes,
+        'errors_r': errors_r,
+        'errors_hr': errors_hr,
+        'solver_names': solver_names,
+        'pod_tols': pod_tols,
+        'data_folder': data_folder,
+        'dt_space': dt_space,
+        'full_times_raw': full_times_raw,
+        'times_r_raw': kwargs.get('times_r_raw', []),
+        'times_hr_raw': kwargs.get('times_hr_raw', []),
+    }
+    save_figure(fig, filename, fig_data=fig_data)
+    print(f"Saved Error vs. Basis Size plot to {filename}")
+    plt.close(fig)
     print(f"Saved Error vs. Basis Size plot to {filename}")
     plt.close(fig)
 
@@ -1279,15 +1301,18 @@ def _plot_metric_panel(ax, metric_data, i, j, marker, color, ms, all_y_values, x
             val = np.nanmean(np.nanmean(arr, axis=1))
             val_plot = max(abs(val), 1e-16) if np.isfinite(val) else val
             if np.isfinite(val_plot):
-                ax.semilogy([x_pos], [val_plot], marker=marker, color=color,
+                face_color = mcolors.to_rgba(color, alpha=0.45)
+                edge_color = mcolors.to_rgba(color, alpha=0.9)
+                ax.semilogy([x_pos], [val_plot], marker=marker,
                             linestyle='None', markersize=ms,
-                            markerfacecolor=color, markeredgecolor=color, zorder=3)
+                            markerfacecolor=face_color, markeredgecolor=edge_color,
+                            markeredgewidth=1.2, zorder=4)
                 all_y_values.append(val_plot)
                 return True
     return False
 
 
-def _plot_speedup_panel(ax, times_raw, i, j, marker, color, avg_full, all_y_values, x_pos=None, width=0.10):
+def _plot_speedup_panel(ax, times_raw, i, j, marker, color, avg_full, all_y_values, x_pos=None, width=0.10, is_monochrome=False):
     """Plot speedup boxplot and mean marker on *ax* if timing data is valid."""
     if x_pos is None:
         x_pos = i
@@ -1300,18 +1325,24 @@ def _plot_speedup_panel(ax, times_raw, i, j, marker, color, avg_full, all_y_valu
                 spd_arr = (np.nanmean(avg_full) / t_arr).flatten()
             spd_clean = spd_arr[np.isfinite(spd_arr)]
             if len(spd_clean) > 0:
+                fc = '0.7' if is_monochrome else color
+                ec = '0.4' if is_monochrome else color
+                alpha = 0.5 if is_monochrome else 0.25
+                mfc = 'black' if is_monochrome else color
+                scatter_col = '0.5' if is_monochrome else color
+                whisker_col = '0.4' if is_monochrome else color
                 ax.boxplot([spd_clean], positions=[x_pos], widths=width,
                            patch_artist=True, showmeans=True,
-                           meanprops=dict(marker='o', markerfacecolor=color, markeredgecolor='black', markersize=6, zorder=4),
+                           meanprops=dict(marker='o', markerfacecolor=mfc, markeredgecolor='black', markersize=6, zorder=4),
                            medianprops=dict(color='black', linewidth=1.5),
-                           boxprops=dict(facecolor=color, alpha=0.25, edgecolor=color, linewidth=1.5),
-                           whiskerprops=dict(color=color, linewidth=1.2),
-                           capprops=dict(color=color, linewidth=1.2),
-                           flierprops=dict(marker='.', markerfacecolor=color, markeredgecolor=color, markersize=4),
+                           boxprops=dict(facecolor=fc, alpha=alpha, edgecolor=ec, linewidth=1.5),
+                           whiskerprops=dict(color=whisker_col, linewidth=1.2),
+                           capprops=dict(color=whisker_col, linewidth=1.2),
+                           flierprops=dict(marker='.', markerfacecolor=scatter_col, markeredgecolor=scatter_col, markersize=4),
                            zorder=3)
                 rng = np.random.RandomState(42 + int(abs(x_pos) * 100))
                 jit = rng.uniform(-width * 0.35, width * 0.35, size=len(spd_clean))
-                ax.scatter(x_pos + jit, spd_clean, color=color, alpha=0.6, s=18, edgecolors='none', zorder=5)
+                ax.scatter(x_pos + jit, spd_clean, color=scatter_col, alpha=0.45, s=22, edgecolors='none', zorder=5)
                 all_y_values.extend(spd_clean.tolist())
                 return float(np.mean(spd_clean))
     return None
@@ -1471,8 +1502,11 @@ def plot_prediction_results(solver_names, pod_tols=None, dt_space=None, data_fol
     all_y_values_spd = [1.0]
     plotted_suffixes = set()
 
+    n_solvers = len(solver_names)
+    is_single_solver = (n_solvers == 1)
+
     for i, name in enumerate(solver_names):
-        color = solver_colors[i % len(solver_colors)]
+        color = 'black' if is_single_solver else solver_colors[i % len(solver_colors)]
         full_time = full_times_raw.get(name)
         avg_full = np.nanmean(full_time, axis=1) if isinstance(full_time, np.ndarray) else None
 
@@ -1515,27 +1549,33 @@ def plot_prediction_results(solver_names, pod_tols=None, dt_space=None, data_fol
                     spd_f_clean = np.array([1.0])
 
                 if len(spd_f_clean) > 0:
+                    fc = '0.7' if is_single_solver else color
+                    ec = '0.4' if is_single_solver else color
+                    alpha = 0.5 if is_single_solver else 0.25
+                    mfc = 'black' if is_single_solver else color
+                    scatter_col = '0.5' if is_single_solver else color
+                    whisker_col = '0.4' if is_single_solver else color
                     ax_spd.boxplot([spd_f_clean], positions=[x_fom], widths=0.10,
                                    patch_artist=True, showmeans=True,
-                                   meanprops=dict(marker='o', markerfacecolor=color, markeredgecolor='black', markersize=6, zorder=4),
+                                   meanprops=dict(marker='o', markerfacecolor=mfc, markeredgecolor='black', markersize=6, zorder=4),
                                    medianprops=dict(color='black', linewidth=1.5),
-                                   boxprops=dict(facecolor=color, alpha=0.25, edgecolor=color, linewidth=1.5),
-                                   whiskerprops=dict(color=color, linewidth=1.2),
-                                   capprops=dict(color=color, linewidth=1.2),
-                                   flierprops=dict(marker='.', markerfacecolor=color, markeredgecolor=color, markersize=4),
+                                   boxprops=dict(facecolor=fc, alpha=alpha, edgecolor=ec, linewidth=1.5),
+                                   whiskerprops=dict(color=whisker_col, linewidth=1.2),
+                                   capprops=dict(color=whisker_col, linewidth=1.2),
+                                   flierprops=dict(marker='.', markerfacecolor=scatter_col, markeredgecolor=scatter_col, markersize=4),
                                    zorder=3)
                     all_y_values_spd.extend(spd_f_clean.tolist())
                     rng_f = np.random.RandomState(42)
                     jit_f = rng_f.uniform(-0.10 * 0.35, 0.10 * 0.35, size=len(spd_f_clean))
-                    ax_spd.scatter(x_fom + jit_f, spd_f_clean, color=color, alpha=0.6, s=18, edgecolors='none', zorder=5)
+                    ax_spd.scatter(x_fom + jit_f, spd_f_clean, color=scatter_col, alpha=0.45, s=22, edgecolors='none', zorder=5)
                     sp_f_mean = float(np.mean(spd_f_clean))
                 else:
                     sp_f_mean = 1.0
 
             sp_r = _plot_speedup_panel(ax_spd, times_r_raw, i, j, 'o', color,
-                                       avg_full, all_y_values_spd, x_pos=pos_r, width=box_width)
+                                       avg_full, all_y_values_spd, x_pos=pos_r, width=box_width, is_monochrome=is_single_solver)
             sp_hr = _plot_speedup_panel(ax_spd, times_hr_raw, i, j, 'o', color,
-                                        avg_full, all_y_values_spd, x_pos=pos_hr, width=box_width)
+                                        avg_full, all_y_values_spd, x_pos=pos_hr, width=box_width, is_monochrome=is_single_solver)
 
             # Connect mean speedups with dashed line
             pts_x = [x_fom]
@@ -1547,17 +1587,19 @@ def plot_prediction_results(solver_names, pod_tols=None, dt_space=None, data_fol
                 pts_x.append(pos_hr)
                 pts_y.append(sp_hr)
             if len(pts_x) > 1:
-                ax_spd.plot(pts_x, pts_y, color=color, linestyle='--', linewidth=1.5, alpha=0.7, zorder=2)
+                ax_spd.plot(pts_x, pts_y, color='black' if is_single_solver else color, linestyle='--', linewidth=1.5, alpha=0.7, zorder=2)
 
     # Filter legend handles strictly to metrics that were actually plotted
     error_legend_handles = [
         Line2D([0], [0], marker=m, color='black', label=label,
+               markerfacecolor=mcolors.to_rgba('black', alpha=0.45),
+               markeredgecolor=mcolors.to_rgba('black', alpha=0.9),
+               markeredgewidth=1.2,
                markersize=ms, linestyle='None')
         for sfx, m, label, ms in _PLOT_METRICS
         if sfx in plotted_suffixes
     ]
 
-    n_solvers = len(solver_names)
     for ax in [ax_err, ax_spd]:
         configure_axis(ax)
         ax.tick_params(axis='both', labelsize=12)
@@ -1573,22 +1615,23 @@ def plot_prediction_results(solver_names, pod_tols=None, dt_space=None, data_fol
         ax.set_xticks(sub_ticks)
         ax.set_xticklabels(sub_labels, fontsize=12)
 
-        # Place model labels centered beneath each group
-        for i_s, sn in enumerate(solver_names):
-            if 'StormerVerlet' in sn:
-                m_label = 'Model 1\n(Stormer-Verlet)' if n_solvers > 1 else 'Stormer-Verlet'
-            elif 'DiscreteGradient' in sn:
-                m_label = 'Model 2\n(Discrete Gradient)' if n_solvers > 1 else 'Discrete Gradient'
-            else:
-                m_label = sn
-            ax.text(i_s, -0.15, m_label, ha='center', va='top', fontsize=14, fontweight='bold',
-                    transform=ax.get_xaxis_transform())
+        # Place model labels centered beneath each group only if multiple solvers
+        if not is_single_solver:
+            for i_s, sn in enumerate(solver_names):
+                if 'StormerVerlet' in sn:
+                    m_label = 'Model 1'
+                elif 'DiscreteGradient' in sn:
+                    m_label = 'Model 2'
+                else:
+                    m_label = sn
+                ax.text(i_s, -0.15, m_label, ha='center', va='top', fontsize=14, fontweight='bold',
+                        transform=ax.get_xaxis_transform())
 
     ax_err.set_title('Mean invariant error magnitude', fontsize=16, pad=12)
-    ax_err.set_ylabel('Mean error magnitude', fontsize=14)
+    ax_err.set_ylabel('', fontsize=14)
 
     ax_spd.set_title('Speedup factor', fontsize=16, pad=12)
-    ax_spd.set_ylabel('Speedup factor', fontsize=14)
+    ax_spd.set_ylabel('', fontsize=14)
     ax_spd.axhline(1.0, color='black', linestyle=':', linewidth=1.2, alpha=0.7, zorder=1)
 
     iqr_label = r'IQR (25\%--75\%)' if plt.rcParams.get('text.usetex', False) else 'IQR (25%–75%)'
@@ -1787,15 +1830,17 @@ def plot_prediction_sanity_check(s_f, s_r=None, s_hr=None, plot_path=None,
         ax.grid(True, which="both", linestyle=':', alpha=0.6)
 
     # (a) Pointwise Trajectory Error over time (log scale)
-    axes[0, 0].semilogy(t, np.maximum(err_r_t, 1e-16), label='ROM', color=OKABE_ITO_PALETTE[0], ls='--', lw=1.8)
-    axes[0, 0].semilogy(t, np.maximum(err_hr_t, 1e-16), label='HROM', color=OKABE_ITO_PALETTE[1], ls='-.', lw=1.8)
-    axes[0, 0].set_title(r"Max state error $\|y_{\mathrm{FOM}}(t) - y_{\mathrm{model}}(t)\|_\infty$")
-    axes[0, 0].set_xlabel("Time")
+    y_r_plot = np.maximum(err_r_t, 1e-16)
+    y_hr_plot = np.maximum(err_hr_t, 1e-16)
+    axes[0, 0].semilogy(t, y_r_plot, label='ROM', color=OKABE_ITO_PALETTE[0], ls='--', lw=1.8)
+    axes[0, 0].semilogy(t, y_hr_plot, label='HROM', color=OKABE_ITO_PALETTE[1], ls='-.', lw=1.8)
+    bm_z = r'\bm{z}' if plt.rcParams.get('text.usetex', False) else r'\mathbf{z}'
+    axes[0, 0].set_title(rf"Max state error $\|{bm_z}_{{\mathrm{{FOM}}}} - {bm_z}_{{\mathrm{{model}}}}\|_\infty$")
     adjust_axis_limits(axes[0, 0], t, axis='x', is_log_scale=False)
-    y_err = np.concatenate([err_r_t, err_hr_t])
+    y_err = np.concatenate([y_r_plot, y_hr_plot])
     y_err_pos = y_err[y_err > 0]
     if len(y_err_pos) > 0:
-        adjust_axis_limits(axes[0, 0], y_err_pos, axis='y', is_log_scale=True, max_steps=1)
+        adjust_axis_limits(axes[0, 0], y_err_pos, axis='y', is_log_scale=True, max_steps=1, numticks=6)
 
     def _plot_metric_panel(ax, title, f_data, r_data, hr_data):
         has_data = False
@@ -1817,35 +1862,39 @@ def plot_prediction_sanity_check(s_f, s_r=None, s_hr=None, plot_path=None,
             has_data = True
         if has_data:
             ax.set_title(title)
-            ax.set_xlabel("Time")
             adjust_axis_limits(ax, t, axis='x', is_log_scale=False)
             all_pts = np.concatenate(pts)
             all_pos = all_pts[all_pts > 0]
             if len(all_pos) > 0:
-                adjust_axis_limits(ax, all_pos, axis='y', is_log_scale=True, max_steps=1)
+                adjust_axis_limits(ax, all_pos, axis='y', is_log_scale=True, max_steps=1, numticks=6)
         else:
             ax.text(0.5, 0.5, f"{title} not available", ha='center', va='center', transform=ax.transAxes)
 
+    bm_L = r'\bm{L}' if plt.rcParams.get('text.usetex', False) else r'\mathbf{L}'
+    bm_J = r'\bm{J}' if plt.rcParams.get('text.usetex', False) else r'\mathbf{J}'
+
     # (b) Phase space error (constraint norm)
-    _plot_metric_panel(axes[0, 1], r"Phase space error $|\Delta \mathcal{S}(t)|$", g_norm_f, g_norm_r, g_norm_hr)
+    _plot_metric_panel(axes[0, 1], r"Phase space error $\Delta \mathcal{S}$", g_norm_f, g_norm_r, g_norm_hr)
 
     # (c) Energy Invariant Drift
-    _plot_metric_panel(axes[1, 0], r"Energy drift $|\Delta H(t)|$", eng_error_f, eng_error_r, eng_error_hr)
+    _plot_metric_panel(axes[1, 0], r"Energy drift $\Delta H$", eng_error_f, eng_error_r, eng_error_hr)
 
     # (d) Symplectic Invariant Error
-    _plot_metric_panel(axes[1, 1], r"Symplectic error $|\Delta \mathrm{Sp}(t)|$", sym_error_f, sym_error_r, sym_error_hr)
+    _plot_metric_panel(axes[1, 1], r"Symplectic error $\Delta \mathrm{Sp}$", sym_error_f, sym_error_r, sym_error_hr)
 
     # (e) Linear & (f) Angular Momentum Errors (only for systems possessing momentum invariants)
     if has_momentum:
-        _plot_metric_panel(axes[2, 0], r"Linear momentum error $|\Delta L(t)|$", lin_mom_f, lin_mom_r, lin_mom_hr)
-        _plot_metric_panel(axes[2, 1], r"Angular momentum error $|\Delta J(t)|$", ang_mom_f, ang_mom_r, ang_mom_hr)
+        _plot_metric_panel(axes[2, 0], rf"Linear momentum error $\Delta {bm_L}$", lin_mom_f, lin_mom_r, lin_mom_hr)
+        _plot_metric_panel(axes[2, 1], rf"Angular momentum error $\Delta {bm_J}$", ang_mom_f, ang_mom_r, ang_mom_hr)
 
-    title_prefix = f"{system_label} " if system_label else ""
-    dt_str = f", $\\Delta t={dt:.4f}$" if dt is not None else ""
-    idx_str = f", $\\Omega^2$ (test[{target_idx}])" if target_idx is not None else ""
-    safe_cls_name = cls_name.replace('_', r'\_') if cls_name else ""
-    safe_prefix = title_prefix.replace('_', r'\_')
-    fig.suptitle(f"Sanity check: {safe_prefix}{safe_cls_name}{dt_str}{idx_str}", fontsize=20)
+    # Don't repeat "Time" on vertically stacked subplots except for the bottom one
+    n_rows = axes.shape[0]
+    for row in range(n_rows):
+        for col in range(axes.shape[1]):
+            if row == n_rows - 1:
+                axes[row, col].set_xlabel("Time")
+            else:
+                axes[row, col].set_xlabel("")
 
     # Central legend at the bottom for all subplots
     legend_elements = [
@@ -1857,7 +1906,7 @@ def plot_prediction_sanity_check(s_f, s_r=None, s_hr=None, plot_path=None,
                frameon=True, framealpha=0.95, facecolor='white', edgecolor='#cccccc',
                bbox_to_anchor=(0.5, 0.012))
 
-    fig.tight_layout(rect=[0.0, 0.045, 1.0, 0.96])
+    fig.tight_layout(rect=[0.0, 0.045, 1.0, 0.99])
 
     if plot_path:
         save_figure(fig, plot_path, fig_data=fig_data)
@@ -3554,13 +3603,15 @@ def plot_initial_lattice_cylindrical(coords=None, radius=0.5, pitch=15.0, nosc=5
 
 
 def plot_elastica_beam(solvers_f, solvers_r=None, solvers_hr=None, data_folder=None,
-                       filename="elastica_beam_test_sanity_check.pdf", solver_idx=0, **kwargs):
+                       filename="elastica_beam_test_sanity_check.pdf", solver_idx=0,
+                       title=None, full_panels=False, **kwargs):
     """
-    Dedicated visualization for the Discrete Euler Elastica / Flexible Beam:
-    - Panel (a): 3D perspective of dynamic beam centerline deformation over time,
+    Dedicated publication visualization for the Discrete Euler Elastica / Flexible Beam:
+    - Default (single panel for publication):
+      Panel (a): 3D perspective of dynamic beam centerline deformation over time,
       with FOM, ROM, and HROM compared at final state t = T.
-    - Panel (b): 2D elevation profiles z(x) across time snapshots (t = T/2 and t = T).
-    - Panel (c): Tip vertical deflection history z_tip(t) comparing FOM, ROM, and HROM.
+    - If full_panels=True:
+      Includes Panel (b) [2D elevation profiles z(x)] and Panel (c) [Tip deflection history z_tip(t)].
 
     Color scheme & styling:
     - Standardized Okabe-Ito colorblind-accessible palette:
@@ -3582,164 +3633,228 @@ def plot_elastica_beam(solvers_f, solvers_r=None, solvers_hr=None, data_folder=N
             data_folder = 'data'
     os.makedirs(data_folder, exist_ok=True)
 
-    if isinstance(solvers_f, (list, tuple)):
-        sf = solvers_f[solver_idx] if len(solvers_f) > solver_idx else None
+    if isinstance(solvers_f, dict):
+        coords_f = solvers_f.get('coords_f')
+        coords_r = solvers_f.get('coords_r')
+        coords_hr = solvers_f.get('coords_hr')
+        t_points = solvers_f.get('t_points')
+        z_tip_f = solvers_f.get('z_tip_f', coords_f[:, -1, 2] if coords_f is not None else None)
+        z_tip_r = solvers_f.get('z_tip_r', coords_r[:, -1, 2] if coords_r is not None else None)
+        z_tip_hr = solvers_f.get('z_tip_hr', coords_hr[:, -1, 2] if coords_hr is not None else None)
     else:
-        sf = solvers_f
+        if isinstance(solvers_f, (list, tuple)):
+            sf = solvers_f[solver_idx] if len(solvers_f) > solver_idx else None
+        else:
+            sf = solvers_f
 
-    if sf is None:
-        print("[plot_elastica_beam] No FOM solver provided; skipping.")
-        return
+        if sf is None:
+            print("[plot_elastica_beam] No FOM solver provided; skipping.")
+            return
 
-    if isinstance(solvers_r, (list, tuple)):
-        sr = solvers_r[solver_idx] if len(solvers_r) > solver_idx else None
-    else:
-        sr = solvers_r
+        if isinstance(solvers_r, (list, tuple)):
+            sr = solvers_r[solver_idx] if len(solvers_r) > solver_idx else None
+        else:
+            sr = solvers_r
 
-    if isinstance(solvers_hr, (list, tuple)):
-        shr = solvers_hr[solver_idx] if len(solvers_hr) > solver_idx else None
-    else:
-        shr = solvers_hr
+        if isinstance(solvers_hr, (list, tuple)):
+            shr = solvers_hr[solver_idx] if len(solvers_hr) > solver_idx else None
+        else:
+            shr = solvers_hr
 
-    t_points = sf.t_points
-    nosc = sf.nosc
-    n_nodes = nosc // 3
-    coords_f = sf.y[:, :nosc].reshape(-1, n_nodes, 3)
-    coords_r = sr.y[:, :nosc].reshape(-1, n_nodes, 3) if sr is not None and getattr(sr, 'y', None) is not None else None
-    coords_hr = shr.y[:, :nosc].reshape(-1, n_nodes, 3) if shr is not None and getattr(shr, 'y', None) is not None else None
+        t_points = sf.t_points
+        nosc = sf.nosc
+        n_nodes = nosc // 3
+        coords_f = sf.y[:, :nosc].reshape(-1, n_nodes, 3)
+        coords_r = sr.y[:, :nosc].reshape(-1, n_nodes, 3) if sr is not None and getattr(sr, 'y', None) is not None else None
+        coords_hr = shr.y[:, :nosc].reshape(-1, n_nodes, 3) if shr is not None and getattr(shr, 'y', None) is not None else None
+        z_tip_f = coords_f[:, -1, 2]
+        z_tip_r = coords_r[:, -1, 2] if coords_r is not None else None
+        z_tip_hr = coords_hr[:, -1, 2] if coords_hr is not None else None
 
     n_steps = coords_f.shape[0]
 
     usetex = plt.rcParams.get('text.usetex', False)
-    lbl_fom_T = r"FOM ($t = T$)" if usetex else "FOM (t = T)"
-    lbl_rom_T = r"ROM ($t = T$)" if usetex else "ROM (t = T)"
-    lbl_hrom_T = r"HROM ($t = T$)" if usetex else "HROM (t = T)"
+    t_end_val = t_points[-1] if t_points is not None and len(t_points) > 0 else 1
+    t_end_str = f"{t_end_val:g}"
+    lbl_fom_T = rf"FOM ($t = {t_end_str}$)" if usetex else f"FOM (t = {t_end_str})"
+    lbl_rom_T = rf"ROM ($t = {t_end_str}$)" if usetex else f"ROM (t = {t_end_str})"
+    lbl_hrom_T = rf"HROM ($t = {t_end_str}$)" if usetex else f"HROM (t = {t_end_str})"
 
-    # --- Matplotlib Publication Figure ---
-    fig = plt.figure(figsize=(18, 5.5))
-    gs = fig.add_gridspec(1, 3, width_ratios=[1.2, 1, 1], wspace=0.28)
+    if not full_panels:
+        # --- Single-panel Standalone Publication Figure (Panel a only) ---
+        fig = plt.figure(figsize=(9.0, 5.8))
+        ax1 = fig.add_axes([0.01, 0.03, 0.98, 0.95], projection='3d')
+        n_snaps = min(12, n_steps)
+        snap_indices = np.linspace(0, n_steps - 1, n_snaps, dtype=int)
 
-    # Panel (a): 3D Dynamic Centerline Deformation
-    ax1 = fig.add_subplot(gs[0, 0], projection='3d')
-    n_snaps = min(12, n_steps)
-    snap_indices = np.linspace(0, n_steps - 1, n_snaps, dtype=int)
+        # Pinned anchor marker at origin
+        ax1.scatter([0], [0], [0], s=90, c='black', marker='s', label='Root pinned', zorder=10)
 
-    # Pinned anchor marker at origin
-    ax1.scatter([0], [0], [0], s=90, c='black', marker='s', label='Root pinned', zorder=10)
+        # Intermediate snapshots of FOM centerline in subtle progression
+        for s_idx in snap_indices[:-1]:
+            ax1.plot(coords_f[s_idx, :, 0], coords_f[s_idx, :, 1], coords_f[s_idx, :, 2],
+                     color='#999999', lw=1.2, ls='--', alpha=0.5)
 
-    # Intermediate snapshots of FOM centerline in subtle progression
-    for s_idx in snap_indices[:-1]:
-        ax1.plot(coords_f[s_idx, :, 0], coords_f[s_idx, :, 1], coords_f[s_idx, :, 2],
-                 color='#999999', lw=1.2, ls='--', alpha=0.5)
+        # Free tip trajectory in Okabe-Ito Vermillion
+        ax1.plot(coords_f[:, -1, 0], coords_f[:, -1, 1], coords_f[:, -1, 2],
+                 color=OKABE_ITO_PALETTE[5], ls='--', lw=1.5, alpha=0.85, label='Tip trajectory')
 
-    # Free tip trajectory in Okabe-Ito Vermillion
-    ax1.plot(coords_f[:, -1, 0], coords_f[:, -1, 1], coords_f[:, -1, 2],
-             color=OKABE_ITO_PALETTE[5], ls='--', lw=1.5, alpha=0.85, label='Tip trajectory')
+        # Final beam state comparison at t = T
+        ax1.plot(coords_f[-1, :, 0], coords_f[-1, :, 1], coords_f[-1, :, 2],
+                 color='black', lw=2.5, ls='-', label=lbl_fom_T)
+        if coords_r is not None:
+            ax1.plot(coords_r[-1, :, 0], coords_r[-1, :, 1], coords_r[-1, :, 2],
+                     color=OKABE_ITO_PALETTE[0], lw=2.0, ls='--', label=lbl_rom_T)
+        if coords_hr is not None:
+            ax1.plot(coords_hr[-1, :, 0], coords_hr[-1, :, 1], coords_hr[-1, :, 2],
+                     color=OKABE_ITO_PALETTE[1], lw=2.0, ls='-.', label=lbl_hrom_T)
 
-    # Final beam state comparison at t = T
-    ax1.plot(coords_f[-1, :, 0], coords_f[-1, :, 1], coords_f[-1, :, 2],
-             color='black', lw=2.5, ls='-', label=lbl_fom_T)
-    if coords_r is not None:
-        ax1.plot(coords_r[-1, :, 0], coords_r[-1, :, 1], coords_r[-1, :, 2],
-                 color=OKABE_ITO_PALETTE[0], lw=2.0, ls='--', label=lbl_rom_T)
-    if coords_hr is not None:
-        ax1.plot(coords_hr[-1, :, 0], coords_hr[-1, :, 1], coords_hr[-1, :, 2],
-                 color=OKABE_ITO_PALETTE[1], lw=2.0, ls='-.', label=lbl_hrom_T)
+        x_all = coords_f[:, :, 0]
+        y_all = coords_f[:, :, 1]
+        z_all = coords_f[:, :, 2]
+        x_max = float(np.amax(x_all))
+        z_min, z_max = float(np.amin(z_all)), float(np.amax(z_all))
+        y_span = max(float(np.ptp(y_all)), 0.4)
+        y_mid = float(np.mean(y_all))
 
-    # Physical scaling limits for 3D box:
-    # Ensure minimum physical lateral span of at least 0.4 m to avoid
-    # numerical roundoff (~1e-18) in nominal in-plane motion being magnified.
-    x_all = coords_f[:, :, 0]
-    y_all = coords_f[:, :, 1]
-    z_all = coords_f[:, :, 2]
-    x_max = float(np.amax(x_all))
-    z_min, z_max = float(np.amin(z_all)), float(np.amax(z_all))
-    y_span = max(float(np.ptp(y_all)), 0.4)
-    y_mid = float(np.mean(y_all))
+        ax1.set_xlim([-0.05, max(x_max + 0.05, 1.05)])
+        ax1.set_ylim([y_mid - y_span / 2.0, y_mid + y_span / 2.0])
+        ax1.set_zlim([min(z_min - 0.05, -0.25), max(z_max + 0.05, 0.05)])
+        ax1.set_box_aspect([1.1, 0.4, 0.35])
+        ax1.set_yticks([-0.2, 0.0, 0.2])
 
-    ax1.set_xlim([-0.05, max(x_max + 0.05, 1.05)])
-    ax1.set_ylim([y_mid - y_span / 2.0, y_mid + y_span / 2.0])
-    ax1.set_zlim([min(z_min - 0.05, -0.25), max(z_max + 0.05, 0.05)])
-    ax1.set_box_aspect([1.1, 0.4, 0.3])
+        ax1.set_xlabel('X (axial)', labelpad=14, fontsize=14)
+        ax1.set_ylabel('Y (lateral)', labelpad=14, fontsize=14)
+        ax1.set_zlabel('Z (vertical)', labelpad=10, fontsize=14)
+        ax1.tick_params(axis='both', which='major', labelsize=12)
+        if title:
+            ax1.set_title(title, fontsize=16, fontweight='bold', pad=12)
+        ax1.view_init(elev=20, azim=-60)
+        ax1.legend(loc='upper right', fontsize=12, framealpha=0.92)
 
-    ax1.set_xlabel('X (axial)', labelpad=8)
-    ax1.set_ylabel('Y (lateral)', labelpad=8)
-    ax1.set_zlabel('Z (vertical)', labelpad=8)
-    ax1.set_title('(a) 3D Dynamic Centerline', fontsize=13, fontweight='bold')
-    ax1.view_init(elev=20, azim=-60)
-    ax1.legend(loc='upper right', fontsize=8)
+    else:
+        # --- Multi-panel Matplotlib Figure (Panels a, b, c) ---
+        fig = plt.figure(figsize=(18, 5.5))
+        gs = fig.add_gridspec(1, 3, width_ratios=[1.2, 1, 1], wspace=0.28)
 
-    # Panel (b): 2D Elevation Profiles z(x)
-    ax2 = fig.add_subplot(gs[0, 1])
-    mid_idx = n_steps // 2
-    t_mid = t_points[mid_idx]
-    t_end = t_points[-1]
+        # Panel (a): 3D Dynamic Centerline Deformation
+        ax1 = fig.add_subplot(gs[0, 0], projection='3d')
+        n_snaps = min(12, n_steps)
+        snap_indices = np.linspace(0, n_steps - 1, n_snaps, dtype=int)
 
-    lbl_fom_mid = rf"FOM ($t = {t_mid:.2f}$)" if usetex else f"FOM (t = {t_mid:.2f})"
-    lbl_rom_mid = rf"ROM ($t = {t_mid:.2f}$)" if usetex else f"ROM (t = {t_mid:.2f})"
-    lbl_hrom_mid = rf"HROM ($t = {t_mid:.2f}$)" if usetex else f"HROM (t = {t_mid:.2f})"
-    lbl_fom_end = rf"FOM ($t = {t_end:.2f}$)" if usetex else f"FOM (t = {t_end:.2f})"
-    lbl_rom_end = rf"ROM ($t = {t_end:.2f}$)" if usetex else f"ROM (t = {t_end:.2f})"
-    lbl_hrom_end = rf"HROM ($t = {t_end:.2f}$)" if usetex else f"HROM (t = {t_end:.2f})"
+        # Pinned anchor marker at origin
+        ax1.scatter([0], [0], [0], s=90, c='black', marker='s', label='Root pinned', zorder=10)
 
-    # Mid snapshot (t = T/2)
-    ax2.plot(coords_f[mid_idx, :, 0], coords_f[mid_idx, :, 2],
-             color='0.5', lw=1.6, ls='-', label=lbl_fom_mid)
-    if coords_r is not None:
-        ax2.plot(coords_r[mid_idx, :, 0], coords_r[mid_idx, :, 2],
-                 color=OKABE_ITO_PALETTE[0], lw=1.4, ls='--', alpha=0.7, label=lbl_rom_mid)
-    if coords_hr is not None:
-        ax2.plot(coords_hr[mid_idx, :, 0], coords_hr[mid_idx, :, 2],
-                 color=OKABE_ITO_PALETTE[1], lw=1.4, ls='-.', alpha=0.7, label=lbl_hrom_mid)
+        # Intermediate snapshots of FOM centerline in subtle progression
+        for s_idx in snap_indices[:-1]:
+            ax1.plot(coords_f[s_idx, :, 0], coords_f[s_idx, :, 1], coords_f[s_idx, :, 2],
+                     color='#999999', lw=1.2, ls='--', alpha=0.5)
 
-    # Final snapshot (t = T)
-    ax2.plot(coords_f[-1, :, 0], coords_f[-1, :, 2],
-             color='black', lw=2.2, ls='-', label=lbl_fom_end)
-    if coords_r is not None:
-        ax2.plot(coords_r[-1, :, 0], coords_r[-1, :, 2],
-                 color=OKABE_ITO_PALETTE[0], lw=1.8, ls='--', label=lbl_rom_end)
-    if coords_hr is not None:
-        ax2.plot(coords_hr[-1, :, 0], coords_hr[-1, :, 2],
-                 color=OKABE_ITO_PALETTE[1], lw=1.8, ls='-.', label=lbl_hrom_end)
+        # Free tip trajectory in Okabe-Ito Vermillion
+        ax1.plot(coords_f[:, -1, 0], coords_f[:, -1, 1], coords_f[:, -1, 2],
+                 color=OKABE_ITO_PALETTE[5], ls='--', lw=1.5, alpha=0.85, label='Tip trajectory')
 
-    ax2.plot([0], [0], 'k^', markersize=10, label='Pinned base')
-    ax2.axhline(0, color='gray', lw=0.8, ls=':')
-    ax2.set_xlabel('Axial coordinate $x$', fontsize=11)
-    ax2.set_ylabel('Vertical deflection $z$', fontsize=11)
-    ax2.set_title('(b) Elevation Deflection Profiles $z(x)$', fontsize=13, fontweight='bold')
-    ax2.grid(True, linestyle='--', alpha=0.5)
-    ax2.legend(loc='lower left', fontsize=7.5)
+        # Final beam state comparison at t = T
+        ax1.plot(coords_f[-1, :, 0], coords_f[-1, :, 1], coords_f[-1, :, 2],
+                 color='black', lw=2.5, ls='-', label=lbl_fom_T)
+        if coords_r is not None:
+            ax1.plot(coords_r[-1, :, 0], coords_r[-1, :, 1], coords_r[-1, :, 2],
+                     color=OKABE_ITO_PALETTE[0], lw=2.0, ls='--', label=lbl_rom_T)
+        if coords_hr is not None:
+            ax1.plot(coords_hr[-1, :, 0], coords_hr[-1, :, 1], coords_hr[-1, :, 2],
+                     color=OKABE_ITO_PALETTE[1], lw=2.0, ls='-.', label=lbl_hrom_T)
 
-    # Panel (c): Tip Deflection History z_tip(t)
-    ax3 = fig.add_subplot(gs[0, 2])
-    z_tip_f = coords_f[:, -1, 2]
-    ax3.plot(t_points, z_tip_f, color='black', lw=2.2, ls='-', label='FOM')
-    if coords_r is not None:
-        z_tip_r = coords_r[:, -1, 2]
-        ax3.plot(t_points, z_tip_r, color=OKABE_ITO_PALETTE[0], lw=1.8, ls='--', label='ROM')
-    if coords_hr is not None:
-        z_tip_hr = coords_hr[:, -1, 2]
-        ax3.plot(t_points, z_tip_hr, color=OKABE_ITO_PALETTE[1], lw=1.8, ls='-.', label='HROM')
+        # Physical scaling limits for 3D box:
+        # Ensure minimum physical lateral span of at least 0.4 m to avoid
+        # numerical roundoff (~1e-18) in nominal in-plane motion being magnified.
+        x_all = coords_f[:, :, 0]
+        y_all = coords_f[:, :, 1]
+        z_all = coords_f[:, :, 2]
+        x_max = float(np.amax(x_all))
+        z_min, z_max = float(np.amin(z_all)), float(np.amax(z_all))
+        y_span = max(float(np.ptp(y_all)), 0.4)
+        y_mid = float(np.mean(y_all))
 
-    ax3.set_xlabel('Time $t$', fontsize=11)
-    ax3.set_ylabel(r'Tip vertical displacement $z_{\mathrm{tip}}$', fontsize=11)
-    ax3.set_title('(c) Tip Displacement History', fontsize=13, fontweight='bold')
-    ax3.grid(True, linestyle='--', alpha=0.5)
-    ax3.legend(loc='lower left', fontsize=9)
+        ax1.set_xlim([-0.05, max(x_max + 0.05, 1.05)])
+        ax1.set_ylim([y_mid - y_span / 2.0, y_mid + y_span / 2.0])
+        ax1.set_zlim([min(z_min - 0.05, -0.25), max(z_max + 0.05, 0.05)])
+        ax1.set_box_aspect([1.1, 0.4, 0.3])
 
-    err_text = []
-    if coords_r is not None:
-        err_tip_r = float(np.amax(np.abs(z_tip_f - z_tip_r)))
-        err_text.append(f"ROM: {err_tip_r:.2e}")
-    if coords_hr is not None:
-        err_tip_hr = float(np.amax(np.abs(z_tip_f - z_tip_hr)))
-        err_text.append(f"HROM: {err_tip_hr:.2e}")
-    if err_text:
-        box_str = "Max Tip Error:\n" + "\n".join(err_text)
-        ax3.text(0.95, 0.95, box_str,
-                 transform=ax3.transAxes, verticalalignment='top', horizontalalignment='right',
-                 bbox=dict(boxstyle='round,pad=0.4', facecolor='white', alpha=0.8, edgecolor='gray'),
-                 fontsize=8)
+        ax1.set_xlabel('X (axial)', labelpad=8)
+        ax1.set_ylabel('Y (lateral)', labelpad=8)
+        ax1.set_zlabel('Z (vertical)', labelpad=8)
+        ax1.set_title('(a) 3D Dynamic Centerline', fontsize=13, fontweight='bold')
+        ax1.view_init(elev=20, azim=-60)
+        ax1.legend(loc='upper right', fontsize=8)
+
+        # Panel (b): 2D Elevation Profiles z(x)
+        ax2 = fig.add_subplot(gs[0, 1])
+        mid_idx = n_steps // 2
+        t_mid = t_points[mid_idx]
+        t_end = t_points[-1]
+
+        lbl_fom_mid = rf"FOM ($t = {t_mid:.2f}$)" if usetex else f"FOM (t = {t_mid:.2f})"
+        lbl_rom_mid = rf"ROM ($t = {t_mid:.2f}$)" if usetex else f"ROM (t = {t_mid:.2f})"
+        lbl_hrom_mid = rf"HROM ($t = {t_mid:.2f}$)" if usetex else f"HROM (t = {t_mid:.2f})"
+        lbl_fom_end = rf"FOM ($t = {t_end:.2f}$)" if usetex else f"FOM (t = {t_end:.2f})"
+        lbl_rom_end = rf"ROM ($t = {t_end:.2f}$)" if usetex else f"ROM (t = {t_end:.2f})"
+        lbl_hrom_end = rf"HROM ($t = {t_end:.2f}$)" if usetex else f"HROM (t = {t_end:.2f})"
+
+        # Mid snapshot (t = T/2)
+        ax2.plot(coords_f[mid_idx, :, 0], coords_f[mid_idx, :, 2],
+                 color='0.5', lw=1.6, ls='-', label=lbl_fom_mid)
+        if coords_r is not None:
+            ax2.plot(coords_r[mid_idx, :, 0], coords_r[mid_idx, :, 2],
+                     color=OKABE_ITO_PALETTE[0], lw=1.4, ls='--', alpha=0.7, label=lbl_rom_mid)
+        if coords_hr is not None:
+            ax2.plot(coords_hr[mid_idx, :, 0], coords_hr[mid_idx, :, 2],
+                     color=OKABE_ITO_PALETTE[1], lw=1.4, ls='-.', alpha=0.7, label=lbl_hrom_mid)
+
+        # Final snapshot (t = T)
+        ax2.plot(coords_f[-1, :, 0], coords_f[-1, :, 2],
+                 color='black', lw=2.2, ls='-', label=lbl_fom_end)
+        if coords_r is not None:
+            ax2.plot(coords_r[-1, :, 0], coords_r[-1, :, 2],
+                     color=OKABE_ITO_PALETTE[0], lw=1.8, ls='--', label=lbl_rom_end)
+        if coords_hr is not None:
+            ax2.plot(coords_hr[-1, :, 0], coords_hr[-1, :, 2],
+                     color=OKABE_ITO_PALETTE[1], lw=1.8, ls='-.', label=lbl_hrom_end)
+
+        ax2.plot([0], [0], 'k^', markersize=10, label='Pinned base')
+        ax2.axhline(0, color='gray', lw=0.8, ls=':')
+        ax2.set_xlabel('Axial coordinate $x$', fontsize=11)
+        ax2.set_ylabel('Vertical deflection $z$', fontsize=11)
+        ax2.set_title('(b) Elevation Deflection Profiles $z(x)$', fontsize=13, fontweight='bold')
+        ax2.grid(True, linestyle='--', alpha=0.5)
+        ax2.legend(loc='lower left', fontsize=7.5)
+
+        # Panel (c): Tip Deflection History z_tip(t)
+        ax3 = fig.add_subplot(gs[0, 2])
+        ax3.plot(t_points, z_tip_f, color='black', lw=2.2, ls='-', label='FOM')
+        if coords_r is not None:
+            ax3.plot(t_points, z_tip_r, color=OKABE_ITO_PALETTE[0], lw=1.8, ls='--', label='ROM')
+        if coords_hr is not None:
+            ax3.plot(t_points, z_tip_hr, color=OKABE_ITO_PALETTE[1], lw=1.8, ls='-.', label='HROM')
+
+        ax3.set_xlabel('Time $t$', fontsize=11)
+        ax3.set_ylabel(r'Tip vertical displacement $z_{\mathrm{tip}}$', fontsize=11)
+        ax3.set_title('(c) Tip Displacement History', fontsize=13, fontweight='bold')
+        ax3.grid(True, linestyle='--', alpha=0.5)
+        ax3.legend(loc='lower left', fontsize=9)
+
+        err_text = []
+        if coords_r is not None:
+            err_tip_r = float(np.amax(np.abs(z_tip_f - z_tip_r)))
+            err_text.append(f"ROM: {err_tip_r:.2e}")
+        if coords_hr is not None:
+            err_tip_hr = float(np.amax(np.abs(z_tip_f - z_tip_hr)))
+            err_text.append(f"HROM: {err_tip_hr:.2e}")
+        if err_text:
+            box_str = "Max Tip Error:\n" + "\n".join(err_text)
+            ax3.text(0.95, 0.95, box_str,
+                     transform=ax3.transAxes, verticalalignment='top', horizontalalignment='right',
+                     bbox=dict(boxstyle='round,pad=0.4', facecolor='white', alpha=0.8, edgecolor='gray'),
+                     fontsize=8)
 
     out_pdf = os.path.join(data_folder, filename) if not os.path.isabs(filename) else filename
     fig_data = {

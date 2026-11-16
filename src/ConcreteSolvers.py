@@ -1064,15 +1064,23 @@ class BaseSolverMixin(MassOperatorMixin):
                 kwds_file = legacy_kwds
                 solvers_file = legacy_solvers
 
+        is_checkpoint_valid = False
         if check_checkpoint_exists(checkpoint_path, kwds_file, solvers_file):
             try:
                 print("Loading from checkpoint...")
-                kwds = fast_load(kwds_file)
-                solvers_hr = fast_load(solvers_file)
-                print("Checkpoint loaded successfully")
+                loaded_kwds = fast_load(kwds_file)
+                loaded_solvers_hr = fast_load(solvers_file)
+                if loaded_solvers_hr and any(s is not None and getattr(s, 'y', None) is not None for s in loaded_solvers_hr):
+                    kwds = loaded_kwds
+                    solvers_hr = loaded_solvers_hr
+                    is_checkpoint_valid = True
+                    print("Checkpoint loaded successfully")
+                else:
+                    print("Checkpoint contains null/failed solvers. Recomputing hyper-reduced system...")
             except Exception as e:
-                raise Exception(f"Error loading checkpoint: {str(e)}")
-        else:
+                print(f"Error loading checkpoint ({e}). Recomputing...")
+
+        if not is_checkpoint_valid:
             # Ensure reduction attributes (RB, nosc_r, V_state) are restored on Reducer classes
             BaseSolverMixin._restore_reduction_attrs(kwds)
             # If Reducer classes lack RB (e.g. clean kwds_hr without solver_data), try restoring from ROM checkpoint
@@ -1095,7 +1103,11 @@ class BaseSolverMixin(MassOperatorMixin):
                 DiscreteGradientReducer.setup_hyperreduction(dg_solvers, dg_classes, tol=pod_tol)
 
             if ReduceMechSystem.hyperreducer == 'MDEIM' and getattr(ReduceMechSystem, 'use_mdeim_hessian', False):
-                if ham_solvers:
+                needs_ham_hessian = any(
+                    issubclass(c, ConformalImplicitMidpoint)
+                    for c in kwds.get('registered_solver_classes', [])
+                )
+                if ham_solvers and needs_ham_hessian:
                     HamiltonianReducer.update_mdeim_hyperreduction(ham_solvers, ham_classes, tol=pod_tol)
                 if dg_solvers:
                     DiscreteGradientReducer.update_mdeim_hyperreduction(dg_solvers, dg_classes, tol=pod_tol)

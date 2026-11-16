@@ -241,10 +241,10 @@ def run_prediction_sanity_check(kwds, solvers_r, solvers_hr, original_solver_cla
             except Exception as e:
                 print(f"  [Warning] Could not save sanity check solvers cache: {e}")
 
-            # 7. Generate dedicated 3D/2D Elastica beam plot for this test parameter
+            # 7. Generate dedicated 3D Elastica beam plot for this test parameter
             beam_test_pdf = f"elastica_beam_test_sanity_check_{cls_name}_dt_{dt:.4f}.pdf"
             plot_elastica_beam([s_f], [s_r], [s_hr], data_folder=MechSystem.data_folder, filename=beam_test_pdf)
-            print(f"  Saved Elastica 3D/2D beam sanity check plot to: {os.path.join(MechSystem.data_folder, beam_test_pdf)}")
+            print(f"  Saved Elastica 3D beam sanity check plot to: {os.path.join(MechSystem.data_folder, beam_test_pdf)}")
 
 
 if __name__ == '__main__':
@@ -347,8 +347,10 @@ if __name__ == '__main__':
     MechSystem.pod_tol_sweep = ElasticaConfig.pod_tol_sweep
     MechSystem.tol = ElasticaConfig.tol
     MechSystem.tol_reduced = ElasticaConfig.tol_reduced
+    MechSystem.g_prime_pod_tol = getattr(ElasticaConfig, 'g_prime_pod_tol', None)
     MechSystem.M = ElasticaConfig.M
     MechSystem.has_momentum_invariants = getattr(ElasticaConfig, 'has_momentum_invariants', False)
+    MechSystem.use_deim_force = getattr(ElasticaConfig, 'use_deim_force', False)
     MechSystem.split_idx = split_idx
     MechSystem.data_folder = ElasticaMechSystem.data_folder
     os.makedirs(MechSystem.data_folder, exist_ok=True)
@@ -432,7 +434,9 @@ if __name__ == '__main__':
         "registered_solver_classes": list(original_solver_classes),
         'Omega2_space': MechSystem.Omega2_space,
         'Omega2_space_dim': len(MechSystem.Omega2_space),
-        'pod_tol_sweep': MechSystem.pod_tol_sweep
+        'pod_tol_sweep': MechSystem.pod_tol_sweep,
+        'g_prime_pod_tol': getattr(ElasticaConfig, 'g_prime_pod_tol', None),
+        'use_deim_force': getattr(ElasticaConfig, 'use_deim_force', False),
     }
 
     # Determine number of workers safely:
@@ -545,7 +549,7 @@ if __name__ == '__main__':
                                 if np.isnan(nosc_r_for_tol):
                                     nosc_r_for_tol = s_r.nosc_r
                                 if np.isnan(nosc_hr_for_tol):
-                                    nosc_hr_for_tol = s_hr.deim_field.shape[1] // 2
+                                    nosc_hr_for_tol = (s_hr.deim_field.shape[1] // 2) if (hasattr(s_hr, 'deim_field') and s_hr.deim_field is not None) else getattr(s_hr, 'nosc_r', np.nan)
 
                     if not np.isnan(nosc_r_for_tol):
                         study_data[cls.__name__]['sizes'].append(nosc_r_for_tol)

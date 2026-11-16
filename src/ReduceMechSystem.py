@@ -43,6 +43,8 @@ class ReduceMechSystem(MechSystem):
     _REDUCTION_ATTRS = [
         # Reduced Basis
         'RB', 'nosc_r', 'V_state', '_basis', 'traveling_basis',
+        # Configuration flags
+        'use_deim_force',
         # DEIM operators
         'deim_field',
         # MDEIM operators for system dynamics
@@ -689,9 +691,15 @@ class ReduceMechSystem(MechSystem):
 
                 max_constraint_modes = nz_pos.shape[0] // 2
 
-                # ── Foundational global constraint basis ────────────────────────
-                # Reusing or computing the master global constraint SVD guarantees that every
-                # window's basis covers all bonds and coordinates across the entire lattice.
+                # ── Foundational global constraint basis (Option 3) ──────────────
+                # In scientific computing, Newton convergence for DAE constraints requires a tighter tolerance
+                # than the coarse kinematic trajectory pod_tol (e.g. 1e-8 vs 1e-2).
+                g_prime_tol = getattr(cls, 'g_prime_pod_tol', None)
+                if g_prime_tol is None:
+                    g_prime_tol = getattr(cls, 'tol_g_prime', None)
+                if g_prime_tol is None:
+                    g_prime_tol = min(tol**2, 1e-8) if tol is not None else 1e-8
+
                 U_pos_global = getattr(cls, '_Full_Uj_g_prime_pos_', None)
                 if U_pos_global is None:
                     print(f'    [{cls.__name__}] Master global constraint SVD not found. Computing from full dataset...', flush=True)
@@ -707,7 +715,12 @@ class ReduceMechSystem(MechSystem):
                     cls._Full_Uj_g_prime_pos_ = U_pos_global
                     cls._Full_Sj_g_prime_pos_ = S_pos_global
 
+                U_pos_global, _, _ = cls._truncate_basis(
+                    cls._Full_Uj_g_prime_pos_, cls._Full_Sj_g_prime_pos_, g_prime_tol
+                )
+
                 sampled_gp_pairs = cls.get_mdeim_solver_indices(solvers, win_indices)
+
                 def gen_pos_w():
                     for s, idxs in sampled_gp_pairs:
                         for b in cls.compute_snapshots(s, idxs, s.g_prime, projection_indices=nz_pos, yield_batches=True):
@@ -735,7 +748,15 @@ class ReduceMechSystem(MechSystem):
                     Uk_pos_w = U_pos_global
 
                 P_pos_w, _ = DEIM(Uk_pos_w, plot_deim=False)
-                B_pos_w = Uk_pos_w @ LA.inv(P_pos_w.T @ Uk_pos_w)
+                M_pos_w = P_pos_w.T @ Uk_pos_w
+                try:
+                    cond_M = LA.cond(M_pos_w)
+                    if cond_M > 1e12 or not np.isfinite(cond_M):
+                        B_pos_w = Uk_pos_w @ LA.pinv(M_pos_w)
+                    else:
+                        B_pos_w = Uk_pos_w @ LA.inv(M_pos_w)
+                except LA.LinAlgError:
+                    B_pos_w = Uk_pos_w @ LA.pinv(M_pos_w)
 
                 # Reconstruct onto both Block (1, 1) and Block (2, 2)
                 B_hat = np.vstack([B_pos_w, B_pos_w])
@@ -889,6 +910,15 @@ class ReduceMechSystem(MechSystem):
                 # Recalculate non-zero indices based on the (potentially sliced) expression
                 non_zero_indices = np.where(np.array(expr.tolist()).flatten() != 0)[0]
 
+                # Option 3: Physics-informed constraint Jacobian MDEIM tolerance for underlying Newton iterations
+                g_prime_tol = getattr(cls, 'g_prime_pod_tol', None)
+                if g_prime_tol is None:
+                    g_prime_tol = getattr(cls, 'tol_g_prime', None)
+                if g_prime_tol is None:
+                    # In scientific computing, Newton convergence for DAE constraints requires a tighter tolerance
+                    # than the coarse kinematic trajectory pod_tol (e.g. 1e-8 vs 1e-2).
+                    g_prime_tol = min(pod_tol**2, 1e-8) if pod_tol is not None else 1e-8
+
                 if solver_type == "Hamiltonian" and func_name == 'g_prime_':
                     # ASSUMPTION: 2x2 Block Structure of Hamiltonian Constraint Jacobian:
                     # G(y) = [ \nabla_q g_pos(q),   0 ]
@@ -919,28 +949,35 @@ class ReduceMechSystem(MechSystem):
                         print(f"  [{cls.__name__}] Master constraint SVD for g_prime_ not found. Computing Block 11 basis...")
                         sampled_pairs = cls.get_mdeim_solver_indices(solvers, filtered_indices)
 
-                        def gen_pos_res():
+                        def gen_pos():
                             for solver, indices in sampled_pairs:
                                 for batch in cls.compute_snapshots(solver, indices, solver.g_prime, projection_indices=nz_pos, yield_batches=True):
                                     yield batch
 
                         max_constraint_modes = nz_pos.shape[0] // 2
                         U_pos_full, S_pos_full, _ = cls.incremental_POD(
-                            gen_pos_res(), max_basis_size=max_constraint_modes, tol=None
+                            gen_pos(), max_basis_size=max_constraint_modes, tol=None
                         )
                         cls._Full_Uj_g_prime_pos_ = U_pos_full
                         cls._Full_Sj_g_prime_pos_ = S_pos_full
                     else:
                         print(f"  [{cls.__name__}] Reusing Master constraint SVD for g_prime_ (Rank: pos={cls._Full_Uj_g_prime_pos_.shape[1]})")
 
-                    active_modes = int(np.sum(cls._Full_Sj_g_prime_pos_ / cls._Full_Sj_g_prime_pos_[0] > 1e-10))
-                    if active_modes % 2 == 1:
-                        active_modes += 1
-                    active_modes = min(active_modes, cls._Full_Uj_g_prime_pos_.shape[1])
-                    Uk_pos = cls._Full_Uj_g_prime_pos_[:, :active_modes]
+                    # Truncate uncentered constraint normal modes using Option 3 Newton tolerance
+                    Uk_pos, sv_pos, _ = cls._truncate_basis(cls._Full_Uj_g_prime_pos_, cls._Full_Sj_g_prime_pos_, g_prime_tol)
 
                     P_pos, _ = DEIM(Uk_pos, plot_deim=False)
-                    B_pos = Uk_pos @ LA.inv(P_pos.T @ Uk_pos)
+                    M_pos = P_pos.T @ Uk_pos
+                    try:
+                        cond_M = LA.cond(M_pos)
+                        if cond_M > 1e12 or not np.isfinite(cond_M):
+                            print(f"  [{cls.__name__}] Warning: DEIM interpolation matrix ill-conditioned (cond={cond_M:.2e}). Using pseudo-inverse.")
+                            B_pos = Uk_pos @ LA.pinv(M_pos)
+                        else:
+                            B_pos = Uk_pos @ LA.inv(M_pos)
+                    except LA.LinAlgError:
+                        print(f"  [{cls.__name__}] Warning: DEIM interpolation matrix singular. Using pseudo-inverse.")
+                        B_pos = Uk_pos @ LA.pinv(M_pos)
 
                     B_hat = np.vstack([B_pos, B_pos])
                     nz_combined = np.concatenate([nz_pos, nz_vel_p])
@@ -950,7 +987,7 @@ class ReduceMechSystem(MechSystem):
                     flat_expr = expr.flat()
                     selected_expr_elements = [flat_expr[i] for i in nz_pos]
                     col = P_pos.T @ smp.Matrix(selected_expr_elements)
-                    sv = cls._Full_Sj_g_prime_pos_
+                    sv = sv_pos
                 else:
                     if not hasattr(cls, master_u_attr) or getattr(cls, master_u_attr) is None:
                         print(f"  [{cls.__name__}] Master constraint SVD for {func_name} not found. Computing from snapshots...")
@@ -981,7 +1018,7 @@ class ReduceMechSystem(MechSystem):
                     else:
                         print(f"  [{cls.__name__}] Reusing Master constraint SVD for {func_name} (Rank: {getattr(cls, master_u_attr).shape[1]})")
 
-                    Uj, sv, _ = cls._truncate_basis(getattr(cls, master_u_attr), getattr(cls, master_s_attr), pod_tol)
+                    Uj, sv, _ = cls._truncate_basis(getattr(cls, master_u_attr), getattr(cls, master_s_attr), g_prime_tol)
                     Pj, _ = DEIM(Uj, plot_deim=False)
                     B_hat = Uj @ LA.inv(Pj.T @ Uj)
                     total_elements = np.prod(g_prime_shape)
@@ -1453,6 +1490,21 @@ class HamiltonianReducer(ReduceMechSystem, HamiltonianMechSystem):
         
         RB = cls.RB
         nosc_r = cls.nosc_r
+
+        if not getattr(cls, 'use_deim_force', True):
+            print("  [Variant A] use_deim_force=False: Skipping potential force DEIM to prevent constraint multiplier resonance.")
+            for target_class in target_classes:
+                setattr(target_class, 'RB', RB)
+                setattr(target_class, 'nosc_r', nosc_r)
+                setattr(target_class, 'deim_field', None)
+                setattr(target_class, 'ham_z_deim', None)
+                setattr(target_class, 'ham_zz_deim', None)
+                setattr(target_class, 'use_deim_force', False)
+            setattr(cls, 'deim_field', None)
+            setattr(cls, 'ham_z_deim', None)
+            setattr(cls, 'ham_zz_deim', None)
+            setattr(cls, 'use_deim_force', False)
+            return
         
         attr_11 = RB[:cls.nosc, :nosc_r]
         P11, _ = DEIM(attr_11, plot_deim=False)
